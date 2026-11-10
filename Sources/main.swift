@@ -1,8 +1,9 @@
 // vmlab-spice-agent: a SPICE guest agent for macOS. Shares the clipboard (UTF-8 text, PNG images)
 // with the SPICE client and saves files dropped on the viewer window to ~/Desktop.
 //
-// Threads: SerialPort reads and reassembles messages on its io queue and hands complete messages
-// to the main queue, where all agent state, NSPasteboard access and file writes live.
+// Threads: SerialPort reads and reassembles messages on its io queue. File-transfer messages go
+// from there straight to FileXfer's own queue; everything else goes to the main queue, where the
+// clipboard state and all NSPasteboard access live.
 
 import AppKit
 
@@ -51,18 +52,30 @@ final class Agent {
     private var guestOwnsHost = false        // we sent GRAB and the client has not taken over
 
     // Host -> guest fetch: after a client GRAB we request each type we want, one at a time.
-    private var fetchQueue: [UInt32] = []    // types still to request
-    private var fetchPending: UInt32?        // type of the request in flight
+    // The protocol has no request ids: a CLIPBOARD reply matches its REQUEST only by order, and
+    // spice-gtk silently drops a request it cannot serve (data over its max-clipboard, an empty
+    // clipboard). So at most one REQUEST is ever in flight, and it times out.
+    private var fetching = false             // a fetch is current (not abandoned)
+    private var fetchQueue: [UInt32] = []    // types of the current fetch still to request
     private var fetchResult = HostClip()
     private var fetchBaseChange = 0          // pasteboard changeCount when the grab arrived
-    private var staleReplies = 0             // replies to requests we abandoned
+    private var inFlight: UInt32?            // type of the REQUEST awaiting its reply
+    private var inFlightCurrent = false      // that reply belongs to the current fetch
+    private var inFlightTimer: DispatchSourceTimer?
+    private var nextOffer: [UInt32]?         // a GRAB that came while an abandoned request was in flight
+    /// Give up on a reply after this long without any bytes from the host.
+    static let replyTimeout = 10.0
 
     init(path: String) {
         port = SerialPort(path: path)
-        files = FileXfer(directory: dropDir)
+        // One staging directory per device, so an agent started by hand on another device (the
+        // tests do that) never deletes this one's partial files.
+        let stage = "Library/Caches/vmlab-spice-agent/partial/" + (path as NSString).lastPathComponent
+        files = FileXfer(directory: dropDir, stageDir: (NSHomeDirectory() as NSString).appendingPathComponent(stage))
         files.sendStatus = { [unowned self] in self.send(MsgType.fileXferStatus, $0) }
         port.onOpen = { [unowned self] in
             self.reader.reset()
+            self.files.cleanStage()
             var d = Data()
             d.appendLE(UInt32(1))   // request: ask the client for its capabilities
             Agent.ourCaps.words.forEach { d.appendLE($0) }
@@ -70,15 +83,27 @@ final class Agent {
         }
         port.onBytes = { [unowned self] bytes in
             try self.reader.feed(bytes) { msg in
-                if msg.type == MsgType.clientDisconnected {
+                switch msg.type {
+                case MsgType.fileXferStart, MsgType.fileXferData, MsgType.fileXferStatus:
+                    // Straight to the files queue: file data never waits behind clipboard work.
+                    if verbose { log("<- port \(msg.port) type \(msg.type), \(msg.data.count) B") }
+                    if msg.type == MsgType.fileXferStart { self.files.start(msg.data) }
+                    else if msg.type == MsgType.fileXferData { self.files.data(msg.data) }
+                    else { self.files.clientStatus(msg.data) }
+                    return
+                case MsgType.clientDisconnected:
                     // A message the client was halfway through sending will never complete.
                     self.reader.assemblers[VDP.clientPort]!.reset()
+                    self.files.abortAll()
+                default:
+                    break
                 }
-                DispatchQueue.main.async { self.handle(msg) }
+                DispatchQueue.main.async { autoreleasepool { self.handle(msg) } }
             }
         }
         port.onClose = { [unowned self] in
             self.reader.reset()
+            self.files.abortAll()
             DispatchQueue.main.async { self.clientGone(reason: "port closed") }
         }
     }
@@ -111,9 +136,6 @@ final class Agent {
         case MsgType.clipboardRequest: hostRequest(msg.data)
         case MsgType.clipboard: hostData(msg.data)
         case MsgType.clipboardRelease: hostRelease()
-        case MsgType.fileXferStart: files.start(msg.data)
-        case MsgType.fileXferData: files.data(msg.data)
-        case MsgType.fileXferStatus: files.clientStatus(msg.data)
         case MsgType.monitorsConfig, MsgType.displayConfig:
             // Not announced, so a client should not send these; reply so it never waits on us.
             var d = Data()
@@ -162,9 +184,9 @@ final class Agent {
         clientCaps = Caps()
         maxClipboard = -1
         guestOwnsHost = false
-        resetFetch(abandoned: false)   // the server drops replies to a gone client's requests
-        staleReplies = 0
-        files.abortAll()
+        abandonFetch()
+        nextOffer = nil
+        clearInFlight()   // the server drops replies to a gone client's requests
         stopPolling()
     }
 
@@ -175,7 +197,7 @@ final class Agent {
         let t = DispatchSource.makeTimerSource(queue: .main)
         // Generous leeway lets the kernel batch this wakeup with others.
         t.schedule(deadline: .now() + pollInterval, repeating: pollInterval, leeway: .milliseconds(250))
-        t.setEventHandler { [unowned self] in self.poll() }
+        t.setEventHandler { [unowned self] in autoreleasepool { self.poll() } }
         t.resume()
         pollTimer = t
     }
@@ -191,10 +213,9 @@ final class Agent {
         guard cc != lastSeenChange else { return }
         lastSeenChange = cc
         if cc == ownChange { return }        // our own write of host data: never echo it back
-        if fetchPending != nil || !fetchQueue.isEmpty {
-            // The guest copied something while host data was on its way; the guest copy is newer.
-            resetFetch(abandoned: true)
-        }
+        // The guest copied something while host data was on its way; the guest copy is newer.
+        abandonFetch()
+        nextOffer = nil
         let types = pasteboard.offerTypes()
         if types.isEmpty {
             if guestOwnsHost {
@@ -230,7 +251,16 @@ final class Agent {
         var offered: [UInt32] = []
         while let t = r.u32() { offered.append(t) }
         guestOwnsHost = false
-        if fetchPending != nil || !fetchQueue.isEmpty { resetFetch(abandoned: true) }
+        abandonFetch()
+        if inFlight != nil {
+            // A reply to the older grab is still due; ask for this one once it is in (or timed out).
+            nextOffer = offered
+            return
+        }
+        beginFetch(offered)
+    }
+
+    private func beginFetch(_ offered: [UInt32]) {
         // Fetch right away (not when the guest pastes): text and the best image type, so both are
         // on the pasteboard the way a native copy would put them.
         var want: [UInt32] = []
@@ -239,6 +269,7 @@ final class Agent {
             want.append(img)
         }
         guard !want.isEmpty else { return }
+        fetching = true
         fetchQueue = want
         fetchResult = HostClip()
         fetchBaseChange = pasteboard.changeCount
@@ -246,32 +277,74 @@ final class Agent {
     }
 
     private func requestNext() {
+        guard fetching else { return }
         guard !fetchQueue.isEmpty else {
+            fetching = false
             finishFetch()
             return
         }
         let t = fetchQueue.removeFirst()
-        fetchPending = t
+        inFlight = t
+        inFlightCurrent = true
         var d = Data()
         d.appendLE(t)
         send(MsgType.clipboardRequest, d)
+        armReplyTimer(after: Agent.replyTimeout)
+    }
+
+    private func armReplyTimer(after secs: Double) {
+        inFlightTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + secs, leeway: .milliseconds(500))
+        t.setEventHandler { [unowned self] in self.replyTimerFired() }
+        t.resume()
+        inFlightTimer = t
+    }
+
+    private func replyTimerFired() {
+        guard let type = inFlight else { return }
+        // A big reply takes a while to arrive; wait as long as bytes keep coming.
+        let idle = Double(DispatchTime.now().uptimeNanoseconds - port.lastReadTime.uptimeNanoseconds) / 1e9
+        if idle < Agent.replyTimeout {
+            armReplyTimer(after: Agent.replyTimeout - idle)
+            return
+        }
+        log("no reply to clipboard request for type \(type) in \(Int(Agent.replyTimeout)) s; going on without it")
+        let current = inFlightCurrent
+        clearInFlight()
+        replyDone(current: current)
     }
 
     private func hostData(_ data: Data) {
         var r = ByteReader(data)
         guard let type = r.u32() else { return }
-        if staleReplies > 0 {
-            staleReplies -= 1
+        guard let want = inFlight else {
+            log("clipboard data (type \(type)) with no request in flight; ignored")
             return
         }
-        guard let want = fetchPending, want == type || type == ClipType.none else { return }
-        fetchPending = nil
+        guard type == want || type == ClipType.none else {
+            log("clipboard data of type \(type) while waiting for type \(want) (a late reply?); ignored")
+            return
+        }
+        let current = inFlightCurrent
+        clearInFlight()
         let payload = r.rest()
-        if type != ClipType.none, !payload.isEmpty, let clip = Pasteboard.decode(type: type, data: payload) {
+        if current, type != ClipType.none, !payload.isEmpty, let clip = Pasteboard.decode(type: type, data: payload) {
             if let t = clip.text { fetchResult.text = t }
             if let p = clip.png { fetchResult.png = p }
         }
-        requestNext()
+        replyDone(current: current)
+    }
+
+    /// The in-flight request was answered or timed out: go on with this fetch, or start the grab
+    /// that was waiting for the line to clear.
+    private func replyDone(current: Bool) {
+        if current {
+            requestNext()
+        } else if let offer = nextOffer {
+            nextOffer = nil
+            beginFetch(offer)
+        }
     }
 
     private func finishFetch() {
@@ -286,14 +359,23 @@ final class Agent {
 
     private func hostRelease() {
         // The host clipboard owner went away. The copy already on the pasteboard stays usable.
-        if fetchPending != nil || !fetchQueue.isEmpty { resetFetch(abandoned: true) }
+        abandonFetch()
+        nextOffer = nil
     }
 
-    private func resetFetch(abandoned: Bool) {
-        if abandoned && fetchPending != nil { staleReplies += 1 }
-        fetchPending = nil
+    /// Drop the current fetch. A request still in flight stays in flight: its reply is discarded.
+    private func abandonFetch() {
+        fetching = false
         fetchQueue = []
         fetchResult = HostClip()
+        inFlightCurrent = false
+    }
+
+    private func clearInFlight() {
+        inFlight = nil
+        inFlightCurrent = false
+        inFlightTimer?.cancel()
+        inFlightTimer = nil
     }
 }
 

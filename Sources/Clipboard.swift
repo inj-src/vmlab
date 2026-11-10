@@ -1,9 +1,9 @@
 // Clipboard.swift: the macOS side of the shared clipboard. Everything here runs on the main queue.
 
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
-let jpegType = NSPasteboard.PasteboardType("public.jpeg")
-let bmpType = NSPasteboard.PasteboardType("com.microsoft.bmp")
 let utf8Type = NSPasteboard.PasteboardType("public.utf8-plain-text")   // == .string
 
 /// Data the guest received from the host, ready to put on the pasteboard.
@@ -25,11 +25,16 @@ final class Pasteboard {
         if types.contains(.string) { out.append(ClipType.utf8Text) }
         // A Finder file copy also carries the file's icon as TIFF; offering that as an image
         // would paste an icon, so file copies only offer their text (the file name).
-        if !types.contains(.fileURL),
-           types.contains(where: { [.png, .tiff, jpegType, bmpType].contains($0) }) {
+        if !types.contains(.fileURL), !imageTypes(types).isEmpty {
             out.append(ClipType.png)
         }
         return out
+    }
+
+    /// Pasteboard types holding an image (PNG, TIFF, JPEG, HEIC, GIF, BMP, PDF...), best first.
+    private func imageTypes(_ types: [NSPasteboard.PasteboardType]) -> [NSPasteboard.PasteboardType] {
+        let images = types.filter { UTType($0.rawValue)?.conforms(to: .image) == true || $0 == .pdf }
+        return images.sorted { ($0 == .png ? 0 : 1) < ($1 == .png ? 0 : 1) }
     }
 
     /// Current pasteboard content in the requested wire type, or nil if it is not available.
@@ -39,9 +44,10 @@ final class Pasteboard {
             guard let s = pb.string(forType: .string) else { return nil }
             return Data(s.utf8)
         case ClipType.png:
-            if let png = pb.data(forType: .png) { return png }
-            for t in [NSPasteboard.PasteboardType.tiff, jpegType, bmpType] {
-                if let d = pb.data(forType: t), let png = Pasteboard.toPNG(d) { return png }
+            for t in imageTypes(pb.types ?? []) {
+                guard let d = pb.data(forType: t) else { continue }
+                if t == .png { return d }
+                if let png = Pasteboard.toPNG(d) { return png }
             }
             return nil
         default:
@@ -60,10 +66,35 @@ final class Pasteboard {
         return pb.changeCount
     }
 
-    /// Decode any image format ImageIO knows (PNG, BMP, JPEG, TIFF) and re-encode it as PNG.
+    /// Decode any image format ImageIO knows (PNG, BMP, JPEG, TIFF, HEIC, GIF...) and re-encode
+    /// it as PNG, with the EXIF orientation applied (a rotated phone photo stays upright).
+    /// Vector data (PDF) goes through NSImage instead.
     static func toPNG(_ data: Data) -> Data? {
-        guard let rep = NSBitmapImageRep(data: data) else { return nil }
+        if let src = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(src) > 0,
+           let image = orientedImage(src) {
+            let out = NSMutableData()
+            guard let dst = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(dst, image, nil)
+            return CGImageDestinationFinalize(dst) ? out as Data : nil
+        }
+        guard let img = NSImage(data: data), let tiff = img.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
         return rep.representation(using: .png, properties: [:])
+    }
+
+    private static func orientedImage(_ src: CGImageSource) -> CGImage? {
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let orientation = props?[kCGImagePropertyOrientation] as? UInt32 ?? 1
+        if orientation == 1 { return CGImageSourceCreateImageAtIndex(src, 0, nil) }
+        // The thumbnail API applies the orientation; ask for the full size.
+        let w = props?[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let h = props?[kCGImagePropertyPixelHeight] as? Int ?? 0
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(w, h, 1),
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 
     /// Wire data for an incoming clipboard type, converted to what we put on the pasteboard.

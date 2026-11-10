@@ -23,6 +23,14 @@ final class SerialPort {
     private var source: DispatchSourceRead?
     private var buffer = [UInt8](repeating: 0, count: 65536)
     private var missingLogged = false
+    private let activityLock = NSLock()
+    private var lastRead = DispatchTime.now()
+
+    /// When bytes last arrived from the host (any thread).
+    var lastReadTime: DispatchTime {
+        activityLock.lock(); defer { activityLock.unlock() }
+        return lastRead
+    }
 
     init(path: String) { self.path = path }
 
@@ -46,6 +54,10 @@ final class SerialPort {
             ioQueue.asyncAfter(deadline: .now() + 3) { self.open() }
             return
         }
+        // Exclusive use: a second agent (say, one started by hand) must get EBUSY instead of
+        // reading half of the stream. The virtio console already refuses a second open; TIOCEXCL
+        // (_IO('t', 13)) makes sure of it.
+        if ioctl(f, UInt(0x2000_740d)) != 0 { log("TIOCEXCL failed: \(String(cString: strerror(errno)))") }
         // No tcflush here: spice-server starts a fresh chunk stream whenever the guest opens the
         // port, and flushing the input queue of the macOS virtio console stalled host->guest
         // traffic after an agent restart.
@@ -53,6 +65,8 @@ final class SerialPort {
         writeQueue.sync { writeFD = f }
         let s = DispatchSource.makeReadSource(fileDescriptor: f, queue: ioQueue)
         s.setEventHandler { [weak self] in self?.readAvailable() }
+        // libdispatch needs the descriptor open until the source is fully cancelled.
+        s.setCancelHandler { Darwin.close(f) }
         source = s
         s.resume()
         log("opened \(path)")
@@ -83,6 +97,7 @@ final class SerialPort {
         while true {
             let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
             if n > 0 {
+                activityLock.lock(); lastRead = .now(); activityLock.unlock()
                 do {
                     try buffer.withUnsafeBytes { try onBytes?(UnsafeRawBufferPointer(rebasing: $0[0..<n])) }
                 } catch {
@@ -104,16 +119,13 @@ final class SerialPort {
     /// Close and reopen later. Must run on ioQueue.
     func reopen(after delay: Double) {
         guard fd >= 0 else { return }
-        let f = fd
         fd = -1
+        // Stop writes first: this waits for a write in progress to finish (or fail), and later
+        // writes are dropped. Then cancel the read source; its cancel handler closes the fd, so
+        // no write can land on a reused descriptor number.
+        writeQueue.sync { writeFD = -1 }
         source?.cancel()
         source = nil
-        // Close on the write queue so a write in progress finishes (or fails) first and no
-        // later write can land on a reused descriptor number.
-        writeQueue.sync {
-            writeFD = -1
-            Darwin.close(f)
-        }
         onClose?()
         ioQueue.asyncAfter(deadline: .now() + delay) { if self.fd < 0 { self.open() } }
     }
@@ -122,10 +134,12 @@ final class SerialPort {
     func write(_ bytes: Data) {
         writeQueue.async {
             guard self.writeFD >= 0 else { return }
-            if !self.writeAll(self.writeFD, bytes) {
-                // A partly written message leaves spice-server's parser mid-message. Closing the
-                // port makes it reset, and the reopen announces our capabilities again.
-                let f = self.writeFD
+            let f = self.writeFD
+            if !self.writeAll(f, bytes) {
+                // A partly written message leaves spice-server's parser mid-message. Nothing more
+                // may be written to this stream; closing the port makes the server reset, and the
+                // reopen announces our capabilities again.
+                self.writeFD = -1
                 self.ioQueue.async { if self.fd == f { self.reopen(after: 1) } }
             }
         }

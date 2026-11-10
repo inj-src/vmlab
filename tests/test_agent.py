@@ -34,6 +34,7 @@ REMOTE = "~/src/spice-agent"
 SEL = 0  # VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD
 UTF8, PNG, BMP, TIFF, JPG = 1, 2, 3, 4, 5
 CAP_BY_DEMAND, CAP_MAX_CLIPBOARD = 5, 10
+STAGE = "~/Library/Caches/vmlab-spice-agent/partial/cu.com.redhat.spice.0"
 ctx = GLib.MainContext.default()
 
 
@@ -318,8 +319,8 @@ def t_png_host_to_guest(g, c):
     end = time.monotonic() + 15
     while time.monotonic() < end:
         c.pump(0.2)
-        if g.run(f"{REMOTE}/build/pbtool read public.png /tmp/sa-out.png", check=False) is not None and \
-                g.run("test -s /tmp/sa-out.png && echo y", check=False).strip() == b"y":
+        g.run(f"{REMOTE}/build/pbtool read public.png /tmp/sa-out.png", check=False)
+        if g.run("test -s /tmp/sa-out.png && echo y", check=False).strip() == b"y":
             break
     got = g.get("/tmp/sa-out.png")
     check(got == png, f"guest public.png differs: {len(got)} B vs {len(png)} B")
@@ -471,6 +472,148 @@ def t_no_mouse_state(g, c):
     check("MOUSE_STATE" not in agent_log(g), "agent received MOUSE_STATE messages")
 
 
+def wait_guest_png(g, c, timeout=15):
+    """Wait for public.png on the guest pasteboard and return it."""
+    g.run("rm -f /tmp/sa-out.png")
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        c.pump(0.2)
+        g.run(f"{REMOTE}/build/pbtool read public.png /tmp/sa-out.png 2>/dev/null", check=False)
+        if g.run("test -s /tmp/sa-out.png && echo y", check=False).strip() == b"y":
+            return g.get("/tmp/sa-out.png")
+    raise Fail("no public.png on the guest pasteboard")
+
+
+def t_jpeg_orientation_host_to_guest(g, c):
+    # A phone photo: pixels stored landscape, EXIF orientation 6 (rotate 90 degrees clockwise).
+    im = test_image(w=80, h=40, seed=8)
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    b = io.BytesIO()
+    im.save(b, "JPEG", exif=exif.tobytes())
+    g.run("pbcopy < /dev/null")
+    c.pump(1)
+    c.grab({JPG: b.getvalue()})
+    got = Image.open(io.BytesIO(wait_guest_png(g, c)))
+    check(got.size == (40, 80), f"rotated JPEG arrived as {got.size}, expected (40, 80)")
+
+
+def t_other_image_types_guest_to_host(g, c):
+    # Apps that put only GIF or HEIC on the pasteboard: the agent offers and converts to PNG.
+    im = test_image(w=64, h=48, seed=9).quantize(64).convert("RGB")
+    g.put("/tmp/sa-in.gif", encode(im, "GIF"))
+    g.put("/tmp/sa-in.png", encode(im, "PNG"))
+    g.run("sips -s format heic /tmp/sa-in.png --out /tmp/sa-in.heic >/dev/null")
+    for uti, path in (("com.compuserve.gif", "/tmp/sa-in.gif"), ("public.heic", "/tmp/sa-in.heic")):
+        n = len(c.grabs)
+        g.run(f"{REMOTE}/build/pbtool write {uti} {path}")
+        c.wait(lambda: len(c.grabs) > n, 5, f"no grab after a guest {uti} copy")
+        check(c.grabs[-1] == [PNG], f"{uti}: grab types {c.grabs[-1]}, expected [PNG]")
+        t, got = c.request(PNG)
+        check(got[:8] == b"\x89PNG\r\n\x1a\n", f"{uti} did not arrive as PNG ({len(got)} B)")
+        out = Image.open(io.BytesIO(got))
+        check(out.size == (64, 48), f"{uti}: PNG is {out.size}")
+        if uti.endswith("gif"):
+            check(out.convert("RGB").tobytes() == im.tobytes(), "GIF->PNG pixels differ")
+
+
+def t_dropped_reply_does_not_block(g, c):
+    # spice-gtk silently drops a request it will not serve (here: data over its max-clipboard).
+    # The agent must give up on that reply and still take the next host copy.
+    c.close()
+    c = Client(max_clipboard=1000)
+    try:
+        lines = log_lines(g)
+        c.grab({UTF8: b"y" * 5000})
+        c.wait(lambda: UTF8 in c.requests, 10, "agent did not request the big host text")
+        c.pump(1)
+        text = f"after a dropped reply {random.random()}".encode()
+        c.grab({UTF8: text})
+        wait_guest_text(g, c, text, timeout=30)
+        check("no reply to clipboard request" in agent_log(g, lines), "agent did not log the timeout")
+    finally:
+        c.close()
+    return Client()
+
+
+def t_second_grab_while_request_held(g, c):
+    # Two host copies in a row while the first request is unanswered: at most one request may be
+    # in flight (replies carry no id), the stale reply is dropped, the newer copy wins.
+    c.hold_requests = True
+    c.held.clear()
+    c.grab({UTF8: b"first host copy"})
+    c.wait(lambda: c.held, 10, "agent did not request")
+    newer = f"second host copy {random.random()}".encode()
+    c.grab({UTF8: newer})
+    c.pump(1.5)
+    check(len(c.requests) == 0, f"agent sent a second request while one was in flight: {c.requests}")
+    c.hold_requests = False
+    c.held.clear()
+    c.main.clipboard_selection_notify(SEL, UTF8, b"stale reply to the first copy")
+    c.wait(lambda: UTF8 in c.requests, 10, "agent did not request the second copy after the stale reply")
+    wait_guest_text(g, c, newer)
+
+
+def t_release_paths(g, c):
+    # Guest pasteboard emptied after a guest copy went to the host: the agent sends RELEASE.
+    guest_to_host_text(g, c, f"before clear {random.random()}")
+    r = c.releases
+    g.run(f"{REMOTE}/build/pbtool clear")
+    c.wait(lambda: c.releases > r, 5, "no RELEASE after the guest pasteboard was emptied")
+    # Client RELEASE while its data is still on the way: the late data is not used.
+    keep = f"guest text kept {random.random()}".encode()
+    guest_copy_text(g, keep)
+    c.pump(1.5)
+    c.hold_requests = True
+    c.held.clear()
+    c.grab({UTF8: b"released before it arrived"})
+    c.wait(lambda: c.held, 10, "agent did not request")
+    c.main.clipboard_selection_release(SEL)
+    c.pump(0.5)
+    c.hold_requests = False
+    c.serve(c.held.pop())
+    c.pump(1.5)
+    check(g.run("pbpaste") == keep, "data for a released host clipboard reached the pasteboard")
+    host_to_guest_text(g, c, f"after release {random.random()}")
+
+
+def t_unit(g, c):
+    # Sanitizer, key-file parser, exclusive publish and chunk reassembly, compiled in the VM.
+    here = os.path.dirname(os.path.abspath(__file__))
+    g.run("rm -rf /tmp/sa-unit && mkdir -p /tmp/sa-unit")
+    for src, dst in (("../Sources/Protocol.swift", "Protocol.swift"), ("../Sources/FileXfer.swift", "FileXfer.swift"),
+                     ("unit.swift", "main.swift")):
+        g.put(f"/tmp/sa-unit/{dst}", open(os.path.join(here, src), "rb").read())
+    out = g.run("cd /tmp/sa-unit && swiftc -swift-version 5 -o unit *.swift 2>&1 && ./unit 2>&1", check=False).decode()
+    print("    " + out.strip().replace("\n", "\n    "))
+    check("unit: all passed" in out, "unit tests failed")
+
+
+def t_exclusive_device(g, c):
+    # While the agent has the port open, a second open (say, a copy of the agent started by hand)
+    # gets EBUSY instead of reading half of the stream.
+    probe = b"""import os
+try:
+    os.open("/dev/cu.com.redhat.spice.0", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    print("opened")
+except OSError as e:
+    print(e.errno)
+"""
+    out = g.run("/usr/bin/python3 -", input=probe, check=False).strip()
+    check(out == b"16", f"second open of the device: {out!r}, expected EBUSY (16)")
+    host_to_guest_text(g, c, f"after the second open {random.random()}")
+
+
+def t_pty(g, c):
+    # Device absent at start, port closing and reopening, chunk edge cases, exclusive open: a
+    # second agent on a pseudo-terminal (see pty_test.py).
+    here = os.path.dirname(os.path.abspath(__file__))
+    g.put("/tmp/sa-pty_test.py", open(os.path.join(here, "pty_test.py"), "rb").read())
+    out = g.run("/usr/bin/python3 /tmp/sa-pty_test.py /usr/local/libexec/vmlab-spice-agent 2>&1", check=False).decode()
+    print("    " + out.strip().replace("\n", "\n    "))
+    check("pty: all passed" in out, "pty tests failed")
+
+
 def self_finish(ch, res):
     try:
         return ch.file_copy_finish(res)
@@ -560,7 +703,8 @@ def t_file_drop_contents(g, c):
 
 def t_file_cancel(g, c):
     # spice-gtk 0.42 sends no CANCELLED status: it just stops sending data. The agent drops a
-    # transfer idle for 20 s and deletes the partial file.
+    # transfer idle for 20 s and deletes the partial file from its staging directory; nothing
+    # reaches the Desktop.
     name = f"sa{random.randrange(1 << 30):x}-cancel.bin"
     tmp = tempfile.mkdtemp(prefix="spice-drop-")
     p = os.path.join(tmp, name)
@@ -569,16 +713,28 @@ def t_file_cancel(g, c):
     def size():
         o = g.run(f"stat -f %z ~/Desktop/{name} 2>/dev/null", check=False).strip()
         return int(o) if o.isdigit() else -1
+
+    def staged():
+        o = g.run(f"cat {STAGE}/* 2>/dev/null | wc -c", check=False).strip()
+        return int(o) if o.isdigit() else 0
     try:
+        lines = log_lines(g)
         done = []
         cancel = Gio.Cancellable()
         c.main.file_copy_async([Gio.File.new_for_path(p)], Gio.FileCopyFlags.NONE, cancel, None, None,
                                lambda ch, res: done.append(self_finish(ch, res)))
-        c.wait(lambda: size() > 1 << 20, 60, "transfer never got going")
+        c.wait(lambda: staged() > 1 << 20, 60, "transfer never got going")
+        check(size() == -1, "partial file visible on the Desktop during the transfer")
         cancel.cancel()
         c.wait(lambda: done, 30, "cancelled transfer never finished")
         check(done[0] is not True, "cancelled transfer reported success")
-        c.wait(lambda: size() == -1, 40, "partial file still on the Desktop 40 s after the cancel")
+        c.wait(lambda: "discarding the partial file" in agent_log(g, lines), 40,
+               "agent never discarded the cancelled transfer")
+        log = agent_log(g, lines)
+        how = "client CANCELLED status" if "client sent status" in log else "20 s idle timeout"
+        print(f"    cancel detected by: {how}")
+        check(size() == -1, "a partial file appeared on the Desktop")
+        check(g.run(f"ls -A {STAGE}", check=False).strip() == b"", "staging directory not empty")
         host_to_guest_text(g, c, f"after cancel {random.random()}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -589,6 +745,8 @@ TESTS = [
     t_png_host_to_guest, t_bmp_jpeg_host_to_guest, t_png_guest_to_host, t_echo_loop,
     t_guest_copy_wins_race, t_max_clipboard, t_reconnect, t_copy_while_disconnected,
     t_agent_restart, t_no_mouse_state, t_file_drop_desktop, t_file_drop_contents, t_file_cancel,
+    t_jpeg_orientation_host_to_guest, t_other_image_types_guest_to_host, t_dropped_reply_does_not_block,
+    t_second_grab_while_request_held, t_release_paths, t_exclusive_device, t_unit, t_pty,
 ]
 
 
