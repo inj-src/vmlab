@@ -101,7 +101,7 @@ impl Proxy {
                 Err(e) if attempt == 1 => {
                     tracing::warn!(%machine, "upstream session closed before the call was sent ({e}); reconnecting");
                 }
-                Err(e) => return Ok(tool_error(lost(machine, &e))),
+                Err(e) => return Ok(tool_error(lost(machine, &handle, &e))),
             }
         };
         let peer = handle.peer.clone();
@@ -138,7 +138,7 @@ impl Proxy {
                  Check the VM's state before retrying (the action may have partly happened)",
                 timeout.as_secs()
             ))),
-            Err(e) => Ok(tool_error(lost(machine, &e))),
+            Err(e) => Ok(tool_error(lost(machine, &handle, &e))),
         }
     }
 
@@ -188,7 +188,10 @@ fn cancelled() -> McpError {
     McpError::internal_error("request cancelled", None)
 }
 
-fn lost(machine: Machine, e: &ServiceError) -> String {
+fn lost(machine: Machine, handle: &Handle, e: &ServiceError) -> String {
+    if handle.overflowed() {
+        return crate::upstream::oversized_message(machine);
+    }
     format!(
         "lost the connection to Cua Driver on {machine} during the call ({e}); the VM may have \
          stopped or rebooted. The next call reconnects; element refs and Cua sessions from \

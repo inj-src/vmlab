@@ -162,7 +162,7 @@ fn fake() -> Fake {
     // The fake's tools must be in the catalog for routing. win gets all of them; mac lacks
     // `image`, so `image` is win-only. The cached `echo` description is stale on purpose.
     let tool = |n: &str, d: &str| json!({"name": n, "description": d, "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}}});
-    let win: Vec<Value> = ["echo", "sleep", "image", "fail", "die"].iter().map(|n| tool(n, &format!("fake {n}"))).collect();
+    let win: Vec<Value> = ["echo", "sleep", "image", "fail", "die", "huge"].iter().map(|n| tool(n, &format!("fake {n}"))).collect();
     let mut mac: Vec<Value> = win.iter().filter(|t| t["name"] != "image").cloned().collect();
     mac[0]["description"] = json!("stale");
     std::fs::write(cache.join("cua-tools-win.json"), serde_json::to_vec(&win).unwrap()).unwrap();
@@ -226,7 +226,7 @@ fn proxy_routes_strips_and_passes_through() {
 
     // The connect refreshed the mac cache, which changed the unified list.
     let cached: Value = serde_json::from_slice(&std::fs::read(f.cache.join("cua-tools-mac.json")).unwrap()).unwrap();
-    assert_eq!(cached.as_array().unwrap().len(), 5);
+    assert_eq!(cached.as_array().unwrap().len(), 6);
     assert_eq!(cached[0]["description"], "fake echo");
     assert!(
         c.notes.iter().any(|n| n["method"] == "notifications/tools/list_changed"),
@@ -321,6 +321,52 @@ fn proxy_reconnects_after_drop() {
     // mac was never used, so it was never started.
     assert!(pids(&f, "mac").is_empty());
     assert!(c.close().success());
+}
+
+#[test]
+fn proxy_oversized_reply_resets_the_session() {
+    // rmcp's stdio line limit (one JSON-RPC message, without its newline).
+    const MAX: usize = 16 * 1024 * 1024;
+    let f = fake();
+    let mut c = spawn_fake(&f);
+    // A reply of exactly the limit passes through.
+    let r = c.call_wait(1, "huge", json!({"machine": "win", "bytes": MAX}));
+    assert!(!is_error(&r), "error: {}", text(&r));
+    assert!(text(&r).len() > MAX - 200, "{}", text(&r).len());
+    let first = pids(&f, "win")[0];
+
+    // One byte more: every call in flight on that VM fails at once with a clear tool error,
+    // instead of hanging until the call timeout.
+    c.call(2, "sleep", json!({"machine": "win", "seconds": 30}));
+    std::thread::sleep(Duration::from_millis(200));
+    let t = Instant::now();
+    let r = c.call_wait(3, "huge", json!({"machine": "win", "bytes": MAX + 1}));
+    let took = t.elapsed();
+    eprintln!("oversized reply failed after {took:?}");
+    assert!(took < Duration::from_secs(3), "took {took:?}");
+    let want = "win: Cua's reply exceeded 16 MiB; the connection to the VM was reset";
+    assert!(is_error(&r), "{r}");
+    assert!(text(&r).starts_with(want), "{r}");
+    let r = c.wait(2, 2);
+    assert!(is_error(&r) && text(&r).starts_with(want), "{r}");
+    assert!(log_lines(&f, "win").contains(&format!("huge {}", MAX + 1)));
+
+    // The upstream process is gone, not left blocked on its write.
+    let t = Instant::now();
+    while alive(first) {
+        assert!(t.elapsed() < Duration::from_secs(2), "upstream {first} left running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The next call reconnects and works, on a new upstream.
+    let again: Value = serde_json::from_str(&text(&c.call_wait(4, "echo", json!({"machine": "win"})))).unwrap();
+    assert_ne!(again["pid"], first);
+    let all = pids(&f, "win");
+    assert_eq!(all.len(), 2);
+    assert!(c.close().success());
+    std::thread::sleep(Duration::from_millis(300));
+    for p in all {
+        assert!(!alive(p), "upstream {p} still running");
+    }
 }
 
 #[test]

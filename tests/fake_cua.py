@@ -6,6 +6,8 @@ Speaks newline-delimited JSON-RPC on stdio. Tools:
   image     returns one image block and one text block with annotations
   fail      returns a JSON-RPC error (-32602)
   die       exits the process without answering (simulates a VM reboot)
+  huge      answers with a text block padded so the response line is exactly `bytes` long
+            (without its newline)
 Writes its pid to <log-dir>/<machine>.pid and events (calls, cancelled ids) to
 <log-dir>/<machine>.log. FAKE_CUA_LIST=<seconds> delays the tools/list answer; "hang" never sends it.
 """
@@ -29,7 +31,7 @@ def send(obj):
 
 TOOLS = [
     {"name": n, "description": f"fake {n}", "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}}}
-    for n in ["echo", "sleep", "image", "fail", "die"]
+    for n in ["echo", "sleep", "image", "fail", "die", "huge"]
 ]
 
 IMAGE = [
@@ -61,6 +63,13 @@ def call(rid, params):
         send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "bad window id", "data": {"hint": "x"}}})
     elif name == "die":
         os._exit(3)
+    elif name == "huge":
+        line = lambda n: json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": "x" * n}]}})
+        body = line(int(args["bytes"]) - len(line(0)))
+        log(f"huge {len(body)}")
+        with lock:
+            sys.stdout.write(body + "\n")
+            sys.stdout.flush()
 
 for line in sys.stdin:
     msg = json.loads(line)

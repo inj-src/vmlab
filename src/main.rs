@@ -4,6 +4,7 @@
 //! stdout carries only MCP messages; all logging goes to stderr (`RUST_LOG`, default `info`).
 
 mod catalog;
+mod child;
 mod server;
 mod upstream;
 

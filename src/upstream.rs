@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -13,12 +14,12 @@ use rmcp::model::{
     ClientCapabilities, ClientConfig, Implementation, ProgressNotificationParam, ProgressToken,
 };
 use rmcp::service::{NotificationContext, Peer, RoleClient, RoleServer, RunningService};
-use rmcp::transport::TokioChildProcess;
 use rmcp::{ClientHandler, ServiceExt};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::catalog::{self, Machine};
+use crate::child::{ChildTransport, MAX_LINE};
 
 /// Upper bound on SSH connect + the remote readiness wait (≤ 90 s, bounded remotely too) + the
 /// MCP handshake + tools/list.
@@ -209,6 +210,15 @@ pub fn parse_status(out: &str, machine: Machine) -> Option<String> {
     })
 }
 
+/// The tool error for calls that were in flight when Cua sent a message over the line limit.
+pub fn oversized_message(machine: Machine) -> String {
+    format!(
+        "{machine}: Cua's reply exceeded {} MiB; the connection to the VM was reset. The next \
+         call reconnects; element refs and Cua sessions from before are gone",
+        MAX_LINE / (1024 * 1024)
+    )
+}
+
 pub fn not_running_message(machine: Machine) -> String {
     format!("{machine} is not running: run `vm start {machine}` first")
 }
@@ -273,6 +283,8 @@ pub struct Conn {
     pub progress: ProgressRoutes,
     /// Bumped on every (re)connect, so a caller can tell a fresh session from the old one.
     pub generation: u64,
+    /// Set when Cua sent a message over the line limit, which ended this session.
+    pub overflow: Arc<AtomicBool>,
 }
 
 impl Conn {
@@ -306,10 +318,8 @@ pub async fn connect(
         c
     };
     die_with_parent(&mut cmd);
-    let (transport, stderr) = TokioChildProcess::builder(cmd)
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot start the {machine} upstream: {e}"))?;
+    let (transport, stderr, overflow) =
+        ChildTransport::spawn(cmd).map_err(|e| format!("cannot start the {machine} upstream: {e}"))?;
     // Forward the child's stderr to our log (never to stdout, which carries protocol messages).
     let last_err = Arc::new(StdMutex::new(String::new()));
     if let Some(stderr) = stderr {
@@ -329,6 +339,7 @@ pub async fn connect(
     let deadline = tokio::time::Instant::now() + cfg.connect_timeout;
     let service = match tokio::time::timeout_at(deadline, handler.serve(transport)).await {
         Ok(Ok(s)) => s,
+        Ok(Err(_)) if overflow.load(Ordering::Relaxed) => return Err(oversized_message(machine)),
         Ok(Err(e)) => {
             // Let the stderr forwarder drain the last lines before we look at them.
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -359,6 +370,9 @@ pub async fn connect(
         Ok(Ok(t)) => t,
         Ok(Err(e)) => {
             let _ = service.cancel().await;
+            if overflow.load(Ordering::Relaxed) {
+                return Err(oversized_message(machine));
+            }
             return Err(format!("tools/list on {machine} failed: {e}"));
         }
         Err(_) => {
@@ -380,7 +394,7 @@ pub async fn connect(
         ms = t0.elapsed().as_millis() as u64,
         "connected"
     );
-    Ok((Conn { service, progress, generation }, tools))
+    Ok((Conn { service, progress, generation, overflow }, tools))
 }
 
 fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
@@ -414,6 +428,14 @@ pub struct Handle {
     pub progress: ProgressRoutes,
     /// The session's generation; a new one means its tools/list was just refreshed.
     pub generation: u64,
+    overflow: Arc<AtomicBool>,
+}
+
+impl Handle {
+    /// Did this session end because Cua sent a message over the line limit?
+    pub fn overflowed(&self) -> bool {
+        self.overflow.load(Ordering::Relaxed)
+    }
 }
 
 impl Conn {
@@ -422,6 +444,7 @@ impl Conn {
             peer: self.service.peer().clone(),
             progress: self.progress.clone(),
             generation: self.generation,
+            overflow: self.overflow.clone(),
         }
     }
 }

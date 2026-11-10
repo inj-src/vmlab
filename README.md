@@ -20,6 +20,7 @@ A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and 
   - If it drops (the VM stopped or rebooted), the next call reconnects once. A call that was in flight when it dropped returns a tool error and is not retried, because Cua actions are not idempotent.
   - A VM that is off returns `mac is not running: run \`vm start mac\` first` within milliseconds.
   - A tool call that gets no answer in 15 minutes returns a tool error, and Cua is sent a cancel.
+  - One message from Cua may be at most 16 MiB (rmcp's stdio line limit; without its newline). Plain rmcp would drop a longer one silently, and the call would hang until that timeout. Here the session is reset at once instead. Every call in flight on that VM returns `win: Cua's reply exceeded 16 MiB; the connection to the VM was reset`, the upstream is killed, and the next call reconnects. Nothing beyond the current read is buffered.
 - **SSH sharing.** ssh uses `ControlMaster=auto`, `ControlPersist=10m` and `ControlPath=~/.cache/vmlab/ssh/%C` (the directory is mode 0700). Later sessions reuse the authenticated connection.
   - Every session still starts its own `cua-driver mcp`, because Cua state (element refs, sessions) belongs to a connection.
   - The master process outlives the session for 10 minutes by design. ServerAlive ends it within about 15 s once the VM goes away.
@@ -54,5 +55,6 @@ Build output stays in `target/`, inside this repo on the spare SSD (`.cargo/conf
 
 - `src/catalog.rs`: cache and seed, the unified list (schema rewrite, merge), routing.
 - `src/upstream.rs`: VM checks, ssh arguments, the remote command, connect and reconnect.
+- `src/child.rs`: the upstream child process as an rmcp transport, with the line-length cap and the stop sequence (stdin EOF, SIGTERM, SIGKILL).
 - `src/server.rs`: the MCP server (list, call, cancel, progress).
 - `tests/stdio.rs`: runs the real binary over stdio, against a fake `vm` and a fake Cua.
