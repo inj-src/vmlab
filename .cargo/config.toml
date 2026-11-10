@@ -1,0 +1,3 @@
+[build]
+# Keep build output on the spare SSD, inside the repo (gitignored).
+target-dir = "target"
