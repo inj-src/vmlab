@@ -4,6 +4,8 @@
 //! Everything here is pure or touches only the cache directory, so it is unit-tested.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde_json::{Map, Value, json};
 
@@ -136,18 +138,47 @@ fn tool_name(v: &Value) -> &str {
     v.get("name").and_then(Value::as_str).unwrap_or_default()
 }
 
+/// The cache files' lists in memory, re-read only when a file changes (size or mtime), for
+/// example because another session reconnected and refreshed it.
+pub struct DiskCache {
+    dir: PathBuf,
+    entries: Mutex<[Option<(Stamp, Arc<Vec<Value>>)>; 2]>,
+}
+
+type Stamp = Option<(SystemTime, u64)>;
+
+fn stamp(path: &Path) -> Stamp {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+}
+
+impl DiskCache {
+    pub fn new(dir: PathBuf) -> DiskCache {
+        DiskCache { dir, entries: Mutex::new([None, None]) }
+    }
+
+    /// The cached list for `machine` (or the seed), in normalized form.
+    pub fn get(&self, machine: Machine) -> Arc<Vec<Value>> {
+        let now = stamp(&cache_path(&self.dir, machine));
+        let mut entries = self.entries.lock().unwrap();
+        if let Some((s, list)) = &entries[machine.index()] {
+            if *s == now {
+                return list.clone();
+            }
+        }
+        let list = Arc::new(load(&self.dir, machine));
+        entries[machine.index()] = Some((now, list.clone()));
+        list
+    }
+}
+
 /// Both VMs' tool lists, indexed by `Machine::index`.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
-    pub lists: [Vec<Value>; 2],
+    pub lists: [Arc<Vec<Value>>; 2],
 }
 
 impl Catalog {
-    pub fn load(dir: &Path) -> Catalog {
-        Catalog {
-            lists: [load(dir, Machine::Win), load(dir, Machine::Mac)],
-        }
-    }
 
     pub fn has(&self, machine: Machine, tool: &str) -> bool {
         self.lists[machine.index()].iter().any(|t| tool_name(t) == tool)
@@ -156,7 +187,7 @@ impl Catalog {
     /// The unified list served to the agent: every tool once, each with a required `machine`
     /// argument. Order: the win list, then tools only mac has.
     pub fn unified(&self) -> Vec<Value> {
-        let [win, mac] = &self.lists;
+        let [win, mac] = [&self.lists[0][..], &self.lists[1][..]];
         let find = |list: &[Value], name: &str| list.iter().find(|t| tool_name(t) == name).cloned();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -247,12 +278,48 @@ fn merge_both(win: Value, mac: Value) -> Value {
     let empty = json!({});
     let ws = win.get("inputSchema").unwrap_or(&empty);
     let ms = mac.get("inputSchema").unwrap_or(&empty);
-    let schema = if ws == ms { ws.clone() } else { merge_schemas(ws, ms) };
+    let schema = merge_schema(ws, ms);
 
     let obj = tool.as_object_mut().expect("tool is an object");
     obj.insert("description".into(), json!(desc));
     obj.insert("inputSchema".into(), add_machine(&schema, None));
+    match merge_annotations(win.get("annotations"), mac.get("annotations")) {
+        Some(a) => obj.insert("annotations".into(), a),
+        None => obj.remove("annotations"),
+    };
     tool
+}
+
+/// Behaviour hints that hold on both VMs. A hint is only as safe as its riskier side: read-only
+/// and idempotent only if both say so, destructive and open-world if either does. A side that
+/// leaves a hint out has the MCP default (readOnly false, destructive true, idempotent false,
+/// openWorld true).
+fn merge_annotations(w: Option<&Value>, m: Option<&Value>) -> Option<Value> {
+    if w == m {
+        return w.cloned();
+    }
+    let empty = Map::new();
+    let wo = w.and_then(Value::as_object).unwrap_or(&empty);
+    let mo = m.and_then(Value::as_object).unwrap_or(&empty);
+    let hint = |o: &Map<String, Value>, k: &str, default: bool| {
+        o.get(k).and_then(Value::as_bool).unwrap_or(default)
+    };
+    let mut out = Map::new();
+    if let Some(t) = wo.get("title").or_else(|| mo.get("title")) {
+        out.insert("title".into(), t.clone());
+    }
+    for (key, default, both) in [
+        ("readOnlyHint", false, true),
+        ("idempotentHint", false, true),
+        ("destructiveHint", true, false),
+        ("openWorldHint", true, false),
+    ] {
+        if wo.contains_key(key) || mo.contains_key(key) {
+            let (a, b) = (hint(wo, key, default), hint(mo, key, default));
+            out.insert(key.into(), json!(if both { a && b } else { a || b }));
+        }
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
 }
 
 fn str_set(v: Option<&Value>) -> Vec<String> {
@@ -271,47 +338,105 @@ fn mark(prop: &Value, note: &str) -> Value {
     p
 }
 
-fn merge_schemas(ws: &Value, ms: &Value) -> Value {
-    let mut out = ws.as_object().cloned().unwrap_or_default();
-    let wp = ws.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
-    let mp = ms.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
-    let wr = str_set(ws.get("required"));
-    let mr = str_set(ms.get("required"));
+fn os_texts(w: Option<&str>, m: Option<&str>) -> Option<String> {
+    match (w.filter(|s| !s.is_empty()), m.filter(|s| !s.is_empty())) {
+        (Some(w), Some(m)) if w == m => Some(w.to_string()),
+        (Some(w), Some(m)) => Some(format!("On Windows: {w} On macOS: {m}")),
+        (Some(w), None) => Some(format!("On Windows: {w}")),
+        (None, Some(m)) => Some(format!("On macOS: {m}")),
+        (None, None) => None,
+    }
+}
 
-    let mut props = Map::new();
-    for (k, v) in &wp {
-        let v = if mp.contains_key(k) { v.clone() } else { mark(v, "(win only)") };
-        props.insert(k.clone(), v);
+/// Merge two JSON schemas (a tool's input schema, or one property's) into one both VMs accept:
+/// - `properties`: the union. A property only one VM has is marked "(win only)" / "(mac only)";
+///   one both have is merged recursively.
+/// - `required`: only what both require; the rest say who requires them.
+/// - `description`: both texts when they differ. `enum`: the union.
+/// - any other keyword the two disagree on (or only one has) is dropped, which loosens the
+///   schema: Cua on the target VM still validates the call.
+/// - `additionalProperties: false` stays if either side has it (every property is listed).
+fn merge_schema(w: &Value, m: &Value) -> Value {
+    if w == m {
+        return w.clone();
     }
-    for (k, v) in &mp {
-        if !wp.contains_key(k) {
-            props.insert(k.clone(), mark(v, "(mac only)"));
-        }
-    }
-    // A field required on one VM only cannot be required for both; say so in its description.
-    let mut required = Vec::new();
-    for k in wr.iter().chain(mr.iter()) {
-        if required.contains(k) {
+    let (Some(wo), Some(mo)) = (w.as_object(), m.as_object()) else {
+        return json!({});
+    };
+    let mut out = Map::new();
+    for (k, wv) in wo {
+        if matches!(k.as_str(), "properties" | "required" | "description" | "additionalProperties") {
             continue;
         }
-        match (wr.contains(k), mr.contains(k)) {
-            (true, true) => required.push(k.clone()),
-            (true, false) | (false, true) => {
-                let who = if wr.contains(k) { "win" } else { "mac" };
-                if let Some(p) = props.get(k).cloned() {
-                    props.insert(k.clone(), mark(&p, &format!("(required on {who})")));
+        let Some(mv) = mo.get(k) else { continue };
+        let merged = if wv == mv {
+            wv.clone()
+        } else {
+            match (k.as_str(), wv, mv) {
+                ("enum", Value::Array(a), Value::Array(b)) => {
+                    let mut u = a.clone();
+                    u.extend(b.iter().filter(|x| !a.contains(x)).cloned());
+                    Value::Array(u)
                 }
+                ("items", _, _) => merge_schema(wv, mv),
+                _ => continue,
             }
-            (false, false) => {}
+        };
+        out.insert(k.clone(), merged);
+    }
+    let text = |o: &Map<String, Value>| o.get("description").and_then(Value::as_str).map(str::to_owned);
+    if let Some(d) = os_texts(text(wo).as_deref(), text(mo).as_deref()) {
+        out.insert("description".into(), json!(d));
+    }
+
+    let wp = wo.get("properties").and_then(Value::as_object);
+    let mp = mo.get("properties").and_then(Value::as_object);
+    if wp.is_some() || mp.is_some() {
+        let empty = Map::new();
+        let (wp, mp) = (wp.unwrap_or(&empty), mp.unwrap_or(&empty));
+        let mut props = Map::new();
+        for (k, v) in wp {
+            let v = match mp.get(k) {
+                Some(mv) => merge_schema(v, mv),
+                None => mark(v, "(win only)"),
+            };
+            props.insert(k.clone(), v);
+        }
+        for (k, v) in mp {
+            if !wp.contains_key(k) {
+                props.insert(k.clone(), mark(v, "(mac only)"));
+            }
+        }
+        // A field required on one VM only cannot be required for both; say so in its description.
+        let (wr, mr) = (str_set(wo.get("required")), str_set(mo.get("required")));
+        let mut required = Vec::new();
+        for k in wr.iter().chain(mr.iter()) {
+            if required.contains(k) {
+                continue;
+            }
+            match (wr.contains(k), mr.contains(k)) {
+                (true, true) => required.push(k.clone()),
+                (true, false) | (false, true) => {
+                    let who = if wr.contains(k) { "win" } else { "mac" };
+                    if let Some(p) = props.get(k).cloned() {
+                        props.insert(k.clone(), mark(&p, &format!("(required on {who})")));
+                    }
+                }
+                (false, false) => {}
+            }
+        }
+        out.insert("properties".into(), Value::Object(props));
+        if !required.is_empty() || wo.contains_key("required") || mo.contains_key("required") {
+            out.insert("required".into(), json!(required));
         }
     }
-    let required: Vec<Value> = required.into_iter().map(Value::String).collect();
-    out.insert("properties".into(), Value::Object(props));
-    out.insert("required".into(), Value::Array(required));
-    // Strict on either side stays strict; every property of both sides is listed above.
-    let strict = |s: &Value| s.get("additionalProperties") == Some(&json!(false));
-    if strict(ws) || strict(ms) {
+    let strict = |o: &Map<String, Value>| o.get("additionalProperties") == Some(&json!(false));
+    if strict(wo) || strict(mo) {
         out.insert("additionalProperties".into(), json!(false));
+    } else if let (Some(a), Some(b)) = (wo.get("additionalProperties"), mo.get("additionalProperties")) {
+        if a == b {
+            out.insert("additionalProperties".into(), a.clone());
+        }
     }
     Value::Object(out)
 }
@@ -362,7 +487,7 @@ mod tests {
     }
 
     fn catalog(win: Vec<Value>, mac: Vec<Value>) -> Catalog {
-        Catalog { lists: [win, mac] }
+        Catalog { lists: [Arc::new(win), Arc::new(mac)] }
     }
 
     fn by_name<'a>(list: &'a [Value], name: &str) -> &'a Value {
@@ -429,6 +554,45 @@ mod tests {
     }
 
     #[test]
+    fn annotations_merge_conservatively() {
+        let e = json!({"type": "object"});
+        let with = |a: Value| json!({"name": "t", "inputSchema": e, "annotations": a});
+        let c = catalog(
+            vec![with(json!({"title": "T", "readOnlyHint": true, "idempotentHint": false}))],
+            vec![with(json!({"readOnlyHint": false, "idempotentHint": true, "destructiveHint": false}))],
+        );
+        let a = &c.unified()[0]["annotations"];
+        assert_eq!(a, &json!({"title": "T", "readOnlyHint": false, "idempotentHint": false, "destructiveHint": true}));
+        // A side without annotations has the defaults: not read-only.
+        let c = catalog(vec![with(json!({"readOnlyHint": true}))], vec![json!({"name": "t", "inputSchema": e})]);
+        assert_eq!(c.unified()[0]["annotations"], json!({"readOnlyHint": false}));
+        // Equal annotations are kept as they are.
+        let c = catalog(vec![with(json!({"readOnlyHint": true}))], vec![with(json!({"readOnlyHint": true}))]);
+        assert_eq!(c.unified()[0]["annotations"], json!({"readOnlyHint": true}));
+    }
+
+    #[test]
+    fn shared_properties_merge_loosely() {
+        let ws = json!({"type": "object", "properties": {
+            "x": {"type": "number", "description": "Pixels.", "minimum": 0, "default": 1},
+            "mode": {"type": "string", "enum": ["a", "b"]},
+            "opts": {"type": "object", "properties": {"k": {"type": "string"}, "w": {"type": "string"}}, "required": ["k", "w"]},
+            "same": {"type": "string", "description": "Same."}}});
+        let ms = json!({"type": "object", "properties": {
+            "x": {"type": "number", "description": "Points.", "minimum": 0, "default": 2},
+            "mode": {"type": "string", "enum": ["b", "c"]},
+            "opts": {"type": "object", "properties": {"k": {"type": "string"}}, "required": ["k"]},
+            "same": {"type": "string", "description": "Same."}}});
+        let c = catalog(vec![tool("t", "", ws)], vec![tool("t", "", ms)]);
+        let p = &c.unified()[0]["inputSchema"]["properties"];
+        assert_eq!(p["x"], json!({"type": "number", "minimum": 0, "description": "On Windows: Pixels. On macOS: Points."}));
+        assert_eq!(p["mode"]["enum"], json!(["a", "b", "c"]));
+        assert_eq!(p["opts"]["required"], json!(["k"]));
+        assert_eq!(p["opts"]["properties"]["w"]["description"], "(required on win) (win only)");
+        assert_eq!(p["same"], json!({"type": "string", "description": "Same."}));
+    }
+
+    #[test]
     fn route_strips_machine() {
         let args = json!({"machine": "mac", "pid": 3}).as_object().cloned();
         let (m, rest) = route(args).unwrap();
@@ -489,7 +653,7 @@ mod tests {
 
     #[test]
     fn seeds_parse_and_unify() {
-        let c = Catalog { lists: [seed(Machine::Win), seed(Machine::Mac)] };
+        let c = catalog(seed(Machine::Win), seed(Machine::Mac));
         for t in c.unified() {
             let s = &t["inputSchema"];
             assert_eq!(s["required"][0], "machine", "{}", t["name"]);

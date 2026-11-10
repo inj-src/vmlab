@@ -18,11 +18,14 @@ use rmcp::{ClientHandler, ServiceExt};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
-use crate::catalog::Machine;
+use crate::catalog::{self, Machine};
 
 /// Upper bound on SSH connect + the remote readiness wait (≤ 90 s, bounded remotely too) + the
-/// MCP handshake.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+/// MCP handshake + tools/list.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Backstop for one tool call, so a wedged Cua cannot hang the agent forever. Generous: the
+/// slowest normal calls (screenshots, long waits) take seconds.
+const CALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// `vm status` / `vm ip` should answer in well under a second.
 const VM_CMD_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -43,6 +46,19 @@ pub struct Config {
     /// Test hook (`VMLAB_MCP_TEST_UPSTREAM`): a command run as `sh -c "<cmd> <machine>"` instead
     /// of SSH; skips the VM checks. Used by the integration tests with a fake MCP server.
     pub test_upstream: Option<String>,
+    /// Bound on one connect (`VMLAB_MCP_CONNECT_TIMEOUT`, seconds; default 120).
+    pub connect_timeout: Duration,
+    /// Bound on one tool call (`VMLAB_MCP_CALL_TIMEOUT`, seconds; default 900).
+    pub call_timeout: Duration,
+}
+
+fn env_secs(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(default)
 }
 
 impl Config {
@@ -67,6 +83,8 @@ impl Config {
             state_dir,
             mux: std::env::var("VMLAB_SSH_MUX").map(|v| v != "0").unwrap_or(true),
             test_upstream: std::env::var("VMLAB_MCP_TEST_UPSTREAM").ok().filter(|v| !v.is_empty()),
+            connect_timeout: env_secs("VMLAB_MCP_CONNECT_TIMEOUT", CONNECT_TIMEOUT),
+            call_timeout: env_secs("VMLAB_MCP_CALL_TIMEOUT", CALL_TIMEOUT),
         }
     }
 
@@ -78,22 +96,41 @@ impl Config {
 /// Printed to stderr by the remote command when the Cua daemon never came up.
 pub const NOT_READY_MARKER: &str = "vmlab-mcp: cua-driver daemon not running";
 
-/// The one remote command per session: wait for the Cua daemon in the desktop session (same
-/// checks and bounds as the old `vm gui`), then become `cua-driver mcp`. One command instead of
-/// a separate readiness probe saves a remote shell start (~0.5 s for pwsh on win).
-/// - win: the named pipe appears once the logon task starts the daemon; kick it after ~12 s,
-///   give up after ~40 s.
-/// - mac: `cua-driver status` answers once the LaunchAgent runs; kickstart it after ~60 s,
-///   give up after ~90 s.
+/// The one remote command per session: wait for the Cua daemon in the desktop session, then
+/// become `cua-driver mcp`. One command instead of a separate readiness probe saves a remote
+/// shell start (~0.5 s for pwsh on win).
+/// - The wait is bounded by wall-clock time (90 s, under the local connect timeout): the daemon
+///   is kicked after 12 s on win (the logon task) and kickstarted after 60 s on mac (the
+///   LaunchAgent), as `vm gui` did.
+/// - stdin carries the MCP stream, which the client starts writing at once, so the probes get
+///   an empty stdin and their stdout is discarded: only `cua-driver mcp` may touch the stream.
 pub fn remote_command(machine: Machine) -> String {
     match machine {
         Machine::Win => format!(
-            r#"$c="$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe"; $ok=$false; for ($i = 0; $i -lt 20; $i++) {{ if ([IO.Directory]::GetFiles("\\.\pipe\") -match "cua-driver") {{ $ok=$true; break }}; if ($i -eq 6) {{ & $c autostart kick | Out-Null }}; Start-Sleep 2 }}; if (-not $ok) {{ [Console]::Error.WriteLine("{NOT_READY_MARKER}"); exit 3 }}; & $c mcp --socket \\.\pipe\cua-driver; exit $LASTEXITCODE"#
+            r#"$c="$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe"; $sw=[Diagnostics.Stopwatch]::StartNew(); $ok=$false; $kicked=$false; while ($true) {{ if ([IO.Directory]::GetFiles("\\.\pipe\") -match "cua-driver") {{ $ok=$true; break }}; if ($sw.Elapsed.TotalSeconds -ge 90) {{ break }}; if (-not $kicked -and $sw.Elapsed.TotalSeconds -ge 12) {{ $kicked=$true; $null | & $c autostart kick | Out-Null }}; Start-Sleep 2 }}; if (-not $ok) {{ [Console]::Error.WriteLine("{NOT_READY_MARKER}"); exit 3 }}; & $c mcp --socket \\.\pipe\cua-driver; exit $LASTEXITCODE"#
         ),
         Machine::Mac => format!(
-            r#"ok=0; for i in $(seq 45); do ~/.local/bin/cua-driver status >/dev/null 2>&1 && {{ ok=1; break; }}; [ $i = 30 ] && launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver; sleep 2; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
+            r#"ok=0; k=0; SECONDS=0; while :; do ~/.local/bin/cua-driver status </dev/null >/dev/null 2>&1 && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 60 ] && {{ k=1; launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver </dev/null >/dev/null 2>&1; }}; sleep 2; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
         ),
     }
+}
+
+/// ssh expands `%` tokens in these paths and splits UserKnownHostsFile on whitespace, so refuse
+/// such paths instead of letting ssh use a different file.
+fn check_ssh_paths(cfg: &Config) -> Result<(), String> {
+    let bad = |p: &std::path::Path| {
+        let s = p.to_string_lossy();
+        s.contains('%') || s.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    };
+    for p in [&cfg.ssh_key, &cfg.state_dir] {
+        if bad(p) {
+            return Err(format!(
+                "unsupported path {}: ssh cannot use paths with spaces, quotes or `%` here",
+                p.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// ssh arguments up to and including the destination. Fixed options only; the one variable part
@@ -135,12 +172,19 @@ pub fn ssh_args(cfg: &Config, ip: IpAddr) -> Vec<String> {
 /// Make the child die with us even if we are SIGKILLed (stdin EOF also ends it normally).
 /// We run on a current-thread runtime, so the spawning thread is the main thread and lives as
 /// long as the process; PR_SET_PDEATHSIG fires when that thread exits.
+/// If we die between fork and the prctl, the signal never comes; the getppid check closes that
+/// window (the child was reparented, so it exits at once).
 fn die_with_parent(cmd: &mut tokio::process::Command) {
-    // SAFETY: prctl is async-signal-safe; nothing else runs between fork and exec.
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: prctl, getppid and _exit are async-signal-safe; nothing else runs between fork
+    // and exec.
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(1);
             }
             Ok(())
         });
@@ -250,6 +294,7 @@ pub async fn connect(
         c.arg("-c").arg(format!("{test} {machine}"));
         c
     } else {
+        check_ssh_paths(cfg)?;
         let ip = vm_address(cfg, machine).await?;
         if cfg.mux {
             ensure_private_dir(&cfg.mux_dir())
@@ -279,7 +324,10 @@ pub async fn connect(
     }
     let progress: ProgressRoutes = Arc::default();
     let handler = UpstreamHandler { machine, progress: progress.clone() };
-    let service = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handler.serve(transport)).await {
+    // One deadline for the readiness wait, the handshake and tools/list (the slot is locked
+    // throughout, so every step must be bounded).
+    let deadline = tokio::time::Instant::now() + cfg.connect_timeout;
+    let service = match tokio::time::timeout_at(deadline, handler.serve(transport)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             // Let the stderr forwarder drain the last lines before we look at them.
@@ -300,13 +348,25 @@ pub async fn connect(
                 if detail.is_empty() { String::new() } else { format!(" ({detail})") }
             ));
         }
-        Err(_) => return Err(format!("MCP handshake with Cua Driver on {machine} timed out")),
+        Err(_) => {
+            return Err(format!(
+                "MCP handshake with Cua Driver on {machine} timed out after {} s",
+                cfg.connect_timeout.as_secs()
+            ));
+        }
     };
-    let tools = match service.peer().list_all_tools().await {
-        Ok(t) => t,
-        Err(e) => {
+    let tools = match tokio::time::timeout_at(deadline, service.peer().list_all_tools()).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
             let _ = service.cancel().await;
             return Err(format!("tools/list on {machine} failed: {e}"));
+        }
+        Err(_) => {
+            let _ = service.cancel().await;
+            return Err(format!(
+                "tools/list on {machine} did not answer within {} s of connecting",
+                cfg.connect_timeout.as_secs()
+            ));
         }
     };
     let tools: Vec<serde_json::Value> = tools
@@ -337,57 +397,103 @@ fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 /// handle, never for the duration of a tool call, so calls run concurrently.
 pub struct Slot {
     pub machine: Machine,
+    inner: Arc<SlotInner>,
+}
+
+struct SlotInner {
+    /// The session and the generation counter (bumped on every connect attempt).
     state: Mutex<(Option<Conn>, u64)>,
+    /// The tools/list of the last successful connect, normalized. It overrides the cache file,
+    /// so a failed cache write never leaves routing on stale data.
+    live_tools: StdMutex<Option<Arc<Vec<serde_json::Value>>>>,
 }
 
 /// What a caller gets back from `Slot::get`.
 pub struct Handle {
     pub peer: Peer<RoleClient>,
     pub progress: ProgressRoutes,
-    /// The fresh tools/list, if this call made the connection.
-    pub new_tools: Option<Vec<serde_json::Value>>,
+    /// The session's generation; a new one means its tools/list was just refreshed.
+    pub generation: u64,
+}
+
+impl Conn {
+    fn handle(&self) -> Handle {
+        Handle {
+            peer: self.service.peer().clone(),
+            progress: self.progress.clone(),
+            generation: self.generation,
+        }
+    }
 }
 
 impl Slot {
     pub fn new(machine: Machine) -> Slot {
-        Slot { machine, state: Mutex::new((None, 0)) }
+        Slot {
+            machine,
+            inner: Arc::new(SlotInner { state: Mutex::new((None, 0)), live_tools: StdMutex::new(None) }),
+        }
+    }
+
+    /// The tools/list from this session's last connect, if any.
+    pub fn live_tools(&self) -> Option<Arc<Vec<serde_json::Value>>> {
+        self.inner.live_tools.lock().unwrap().clone()
     }
 
     /// The live session, connecting (or reconnecting once, if the old one dropped) as needed.
-    pub async fn get(&self, cfg: &Config) -> Result<Handle, String> {
-        let mut st = self.state.lock().await;
-        if let Some(conn) = &st.0 {
-            if conn.is_alive() {
-                return Ok(Handle {
-                    peer: conn.service.peer().clone(),
-                    progress: conn.progress.clone(),
-                    new_tools: None,
-                });
-            }
-            tracing::warn!(machine = %self.machine, generation = conn.generation, "upstream session dropped; reconnecting");
-            if let Some(old) = st.0.take() {
-                let _ = old.service.cancel().await;
+    /// The connect runs in its own task: if the caller gives up (client timeout or cancel),
+    /// the connect still finishes and the next call uses it, instead of the remote side being
+    /// abandoned half way through its readiness wait.
+    pub async fn get(&self, cfg: &Arc<Config>) -> Result<Handle, String> {
+        {
+            let st = self.inner.state.lock().await;
+            if let Some(conn) = st.0.as_ref().filter(|c| c.is_alive()) {
+                return Ok(conn.handle());
             }
         }
-        st.1 += 1;
-        let (conn, tools) = connect(cfg, self.machine, st.1).await?;
-        let handle = Handle {
-            peer: conn.service.peer().clone(),
-            progress: conn.progress.clone(),
-            new_tools: Some(tools),
-        };
-        st.0 = Some(conn);
-        Ok(handle)
+        let (inner, cfg, machine) = (self.inner.clone(), cfg.clone(), self.machine);
+        tokio::spawn(async move { inner.get_or_connect(&cfg, machine).await })
+            .await
+            .map_err(|e| format!("connecting to {machine} failed: {e}"))?
     }
 
     /// Close the session: closes ssh's stdin, waits for it, then SIGTERM/SIGKILL (rmcp's
     /// graceful shutdown of the child process).
     pub async fn shutdown(&self) {
-        let conn = self.state.lock().await.0.take();
+        let conn = self.inner.state.lock().await.0.take();
         if let Some(conn) = conn {
             let _ = conn.service.cancel().await;
             tracing::info!(machine = %self.machine, "upstream closed");
         }
+    }
+}
+
+impl SlotInner {
+    async fn get_or_connect(&self, cfg: &Config, machine: Machine) -> Result<Handle, String> {
+        let mut st = self.state.lock().await;
+        if let Some(conn) = &st.0 {
+            if conn.is_alive() {
+                return Ok(conn.handle());
+            }
+            tracing::warn!(%machine, generation = conn.generation, "upstream session dropped; reconnecting");
+            if let Some(old) = st.0.take() {
+                let _ = old.service.cancel().await;
+            }
+        }
+        st.1 += 1;
+        let (conn, tools) = connect(cfg, machine, st.1).await?;
+        let tools = catalog::normalize(tools);
+        // Keep the cache file current for other and later sessions. It is not needed for this
+        // one, which uses `live_tools`.
+        let on_disk = catalog::read_cache(&cfg.cache_dir, machine).map(catalog::normalize);
+        if on_disk.as_ref() != Some(&tools) {
+            if let Err(e) = catalog::write_cache(&cfg.cache_dir, machine, &tools) {
+                tracing::warn!(%machine, "cannot write tool cache: {e}");
+            }
+        }
+        *self.live_tools.lock().unwrap() = Some(Arc::new(tools));
+        let handle = conn.handle();
+        st.0 = Some(conn);
+        Ok(handle)
     }
 }
 
@@ -403,6 +509,8 @@ mod tests {
             cache_dir: "/c".into(),
             mux,
             test_upstream: None,
+            connect_timeout: CONNECT_TIMEOUT,
+            call_timeout: CALL_TIMEOUT,
         }
     }
 
@@ -422,6 +530,29 @@ mod tests {
         let s = ssh_args(&cfg(false), "10.0.0.1".parse().unwrap()).join(" ");
         assert!(s.contains("-o ControlMaster=no -o ControlPath=none"));
         assert!(!s.contains("ControlPersist"));
+    }
+
+    #[test]
+    fn ssh_paths_are_checked() {
+        assert!(check_ssh_paths(&cfg(true)).is_ok());
+        let mut c = cfg(true);
+        c.state_dir = "/home/a b/.cache/vmlab".into();
+        assert!(check_ssh_paths(&c).unwrap_err().contains("unsupported path /home/a b/"));
+        let mut c = cfg(true);
+        c.ssh_key = "/k/50%".into();
+        assert!(check_ssh_paths(&c).is_err());
+    }
+
+    #[test]
+    fn remote_probes_cannot_read_the_mcp_stream() {
+        let mac = remote_command(Machine::Mac);
+        assert!(mac.contains("cua-driver status </dev/null >/dev/null"), "{mac}");
+        assert!(mac.contains("com.trycua.cua-driver </dev/null >/dev/null"), "{mac}");
+        assert!(mac.contains("[ $SECONDS -ge 90 ] && break"), "{mac}");
+        let win = remote_command(Machine::Win);
+        assert!(win.contains("$null | & $c autostart kick | Out-Null"), "{win}");
+        assert!(win.contains("TotalSeconds -ge 90"), "{win}");
+        assert!(win.contains(r"& $c mcp --socket \\.\pipe\cua-driver"), "{win}");
     }
 
     #[test]

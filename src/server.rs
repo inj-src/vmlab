@@ -1,5 +1,6 @@
 //! Downstream side: the MCP server the agent talks to over stdio.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use rmcp::model::{
@@ -11,8 +12,8 @@ use rmcp::model::{
 use rmcp::service::{Peer, PeerRequestOptions, RequestContext, RoleClient, RoleServer, ServiceError};
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::catalog::{self, Catalog, Machine};
-use crate::upstream::{Config, Slot};
+use crate::catalog::{self, Catalog, DiskCache, Machine};
+use crate::upstream::{Config, Handle, Slot};
 
 const INSTRUCTIONS: &str = "\
 Drives the desktops of the vmlab test VMs through Cua Driver. Every tool takes a required \
@@ -24,17 +25,39 @@ the VM reboots. Check outcomes yourself over `vm ssh` when it matters.";
 pub struct Proxy {
     cfg: Arc<Config>,
     slots: Arc<[Slot; 2]>,
+    disk: DiskCache,
     /// The unified list last served, to tell the agent when a connect changed it.
     served: StdMutex<Option<Vec<serde_json::Value>>>,
+    /// Per VM, the session generation whose tools/list has been taken into account.
+    seen_generation: [AtomicU64; 2],
 }
 
 impl Proxy {
     pub fn new(cfg: Arc<Config>, slots: Arc<[Slot; 2]>) -> Proxy {
-        Proxy { cfg, slots, served: StdMutex::new(None) }
+        let disk = DiskCache::new(cfg.cache_dir.clone());
+        Proxy { cfg, slots, disk, served: StdMutex::new(None), seen_generation: Default::default() }
     }
 
+    /// Per VM: the list from this session's connect if there was one, else the cache file
+    /// (or the seed).
     fn catalog(&self) -> Catalog {
-        Catalog::load(&self.cfg.cache_dir)
+        let list = |m: Machine| self.slots[m.index()].live_tools().unwrap_or_else(|| self.disk.get(m));
+        Catalog { lists: [list(Machine::Win), list(Machine::Mac)] }
+    }
+
+    async fn connect(
+        &self,
+        machine: Machine,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<Result<Handle, String>, McpError> {
+        let handle = tokio::select! {
+            h = self.slots[machine.index()].get(&self.cfg) => h,
+            _ = ctx.ct.cancelled() => return Err(cancelled()),
+        };
+        if let Ok(h) = &handle {
+            self.after_connect(machine, h.generation, &ctx.peer);
+        }
+        Ok(handle)
     }
 
     async fn forward(
@@ -43,17 +66,17 @@ impl Proxy {
         params: CallToolRequestParams,
         ctx: &RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let slot = &self.slots[machine.index()];
-
-        // Forward the caller's _meta except its progress token: rmcp issues its own token for
-        // the upstream request, and progress is mapped back to the caller's token.
+        // Forward the caller's _meta except its progress token (rmcp issues its own token for
+        // the upstream request, and progress is mapped back to the caller's token) and the
+        // other keys MCP reserves for the transport between these two peers.
         let downstream_token = ctx.meta.get_progress_token();
         let mut meta = ctx.meta.clone();
-        meta.0.remove("progressToken");
+        meta.0.retain(|k, _| k != "progressToken" && !k.starts_with("io.modelcontextprotocol/"));
         let meta = (!meta.0.is_empty()).then_some(meta);
         let options = || {
             let mut o = PeerRequestOptions::no_options();
             o.meta = meta.clone();
+            o.timeout = Some(self.cfg.call_timeout);
             o
         };
         let mut params = params;
@@ -64,16 +87,13 @@ impl Proxy {
         let mut attempt = 0;
         let (handle, sent) = loop {
             attempt += 1;
-            let handle = tokio::select! {
-                h = slot.get(&self.cfg) => h,
-                _ = ctx.ct.cancelled() => return Err(cancelled()),
-            };
-            let handle = match handle {
+            let handle = match self.connect(machine, ctx).await? {
                 Ok(h) => h,
                 Err(msg) => return Ok(tool_error(msg)),
             };
-            if let Some(tools) = &handle.new_tools {
-                self.on_fresh_tools(machine, tools, &ctx.peer).await;
+            // The connect may have taken a while; don't start the action if the caller gave up.
+            if ctx.ct.is_cancelled() {
+                return Err(cancelled());
             }
             let request = ClientRequest::CallToolRequest(CallToolRequest::new(params.clone()));
             match handle.peer.send_cancellable_request(request, options()).await {
@@ -101,6 +121,7 @@ impl Proxy {
             r = sent.await_response() => r,
             _ = ctx.ct.cancelled() => return Err(cancelled()),
         };
+        // From here Cua needs no cancel: the call completed, or rmcp already sent one (timeout).
         guard.disarm();
         match result {
             Ok(ServerResult::CallToolResult(r)) => Ok(CallToolResponse::Complete(r)),
@@ -112,39 +133,50 @@ impl Proxy {
             )),
             // A JSON-RPC error from Cua goes back to the agent unchanged.
             Err(ServiceError::McpError(e)) => Err(e),
+            Err(ServiceError::Timeout { timeout }) => Ok(tool_error(format!(
+                "Cua Driver on {machine} did not answer within {} s; the call was cancelled. \
+                 Check the VM's state before retrying (the action may have partly happened)",
+                timeout.as_secs()
+            ))),
             Err(e) => Ok(tool_error(lost(machine, &e))),
         }
     }
 
-    /// Persist a fresh tools/list and tell the agent if the unified list changed.
-    async fn on_fresh_tools(
+    /// After a (re)connect, tell the agent if the fresh tools/list changed the unified list.
+    /// The slot has already stored the list and refreshed the cache file.
+    fn after_connect(&self, machine: Machine, generation: u64, peer: &Peer<RoleServer>) {
+        if self.seen_generation[machine.index()].swap(generation, Ordering::SeqCst) == generation {
+            return;
+        }
+        let unified = self.catalog().unified();
+        let mut served = self.served.lock().unwrap();
+        if served.as_ref().is_some_and(|s| *s != unified) {
+            tracing::info!(%machine, "tool list changed; notifying the client");
+            *served = Some(unified);
+            let peer = peer.clone();
+            tokio::spawn(async move {
+                let _ = peer.notify_tool_list_changed().await;
+            });
+        }
+    }
+
+    /// Check the tool against the catalog. If it fails and this session has not seen the VM's
+    /// live list yet, the cache may be stale (Cua was updated on the VM): connect, then check
+    /// the live list. If the connect fails, the first answer stands.
+    async fn check(
         &self,
         machine: Machine,
-        tools: &[serde_json::Value],
-        peer: &Peer<RoleServer>,
-    ) {
-        let before = self.catalog();
-        let tools = &catalog::normalize(tools.to_vec())[..];
-        if before.lists[machine.index()] != tools {
-            if let Err(e) = catalog::write_cache(&self.cfg.cache_dir, machine, tools) {
-                tracing::warn!(%machine, "cannot write tool cache: {e}");
-            }
-        } else if catalog::read_cache(&self.cfg.cache_dir, machine).is_none() {
-            // Same as the seed, but write it so the cache reflects a real connect.
-            let _ = catalog::write_cache(&self.cfg.cache_dir, machine, tools);
+        tool: &str,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<Result<(), String>, McpError> {
+        let first = catalog::check_tool(&self.catalog(), machine, tool);
+        if first.is_ok() || self.slots[machine.index()].live_tools().is_some() {
+            return Ok(first);
         }
-        let mut after = before;
-        after.lists[machine.index()] = tools.to_vec();
-        let unified = after.unified();
-        let changed = {
-            let served = self.served.lock().unwrap();
-            served.as_ref().is_some_and(|s| *s != unified)
-        };
-        if changed {
-            tracing::info!(%machine, "tool list changed; notifying the client");
-            *self.served.lock().unwrap() = Some(unified);
-            let _ = peer.notify_tool_list_changed().await;
+        if self.connect(machine, ctx).await?.is_err() {
+            return Ok(first);
         }
+        Ok(catalog::check_tool(&self.catalog(), machine, tool))
     }
 }
 
@@ -230,7 +262,7 @@ impl ServerHandler for Proxy {
             Ok(r) => r,
             Err(msg) => return Ok(tool_error(msg)),
         };
-        if let Err(msg) = catalog::check_tool(&self.catalog(), machine, &request.name) {
+        if let Err(msg) = self.check(machine, &request.name, &ctx).await? {
             return Ok(tool_error(msg));
         }
         request.arguments = Some(args);

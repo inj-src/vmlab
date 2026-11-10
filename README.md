@@ -6,12 +6,20 @@ A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and 
 
 - **One tool list for both VMs.** It is Cua's list, with a required `machine` argument (`"win"` or `"mac"`) added to every tool. The argument is removed before the call is forwarded.
   - A tool only one VM has says so in its description (today only `debug_window_info`, which is win only). Calling it for the other VM returns a tool error.
-  - When the two VMs describe a tool differently, the description gives both texts. Input properties only one VM has are marked `(win only)` or `(mac only)`.
-- **Cached tool list.** tools/list is served from `~/.cache/vmlab/cua-tools-<win|mac>.json`, which every successful connect rewrites. When there is no cache yet, it falls back to `seed/`, which is compiled into the binary. The list is therefore complete with both VMs off.
-- **Lazy, persistent upstream.** The first call for a VM checks `vm status`. It then opens `ssh -T dev@<ip>` to a remote command that waits for the Cua daemon in the desktop session (up to about 40 s on win and 90 s on mac, the same checks the old `vm gui` made) and then runs `cua-driver mcp`.
+  - When the two VMs describe a tool or one of its properties differently, the description gives both texts. Input properties only one VM has are marked `(win only)` or `(mac only)`; a field only one VM requires is not required and says `(required on win)`.
+  - Other schema keywords the VMs disagree on (a default, a minimum) are dropped, and enums are joined, so the merged schema accepts what either VM accepts. Cua on the target VM still validates the call.
+  - Behaviour hints are merged conservatively: read-only and idempotent only if both VMs say so, destructive and open-world if either does.
+- **Cached tool list.** tools/list is served from `~/.cache/vmlab/cua-tools-<win|mac>.json`, which every successful connect rewrites. The files are re-read only when they change. When there is no cache yet, it falls back to `seed/`, which is compiled into the binary. The list is therefore complete with both VMs off.
+  - Once this session has connected to a VM, the VM's live list is used for that VM, even if the cache file could not be written.
+  - A call that the cached list rejects (unknown tool, or a tool the other VM has) connects first if this session has not seen the VM's live list yet, in case Cua was updated on the VM. If that connect fails, the original error is returned.
+  - The descriptions come from Cua on the guests and reach the agent as written. The guests are disposable test VMs, so treat their text as no more trusted than the VM itself.
+- **Lazy, persistent upstream.** The first call for a VM checks `vm status`. It then opens `ssh -T dev@<ip>` to a remote command that waits for the Cua daemon in the desktop session and then runs `cua-driver mcp`.
+  - The wait is at most 90 s of wall-clock time. On win the logon task is kicked after 12 s; on mac the LaunchAgent is kickstarted after 60 s (the checks the old `vm gui` made). The probes get an empty stdin, so they cannot eat the MCP stream.
+  - The whole connect (ssh, the wait, the MCP handshake and tools/list) is bounded by 120 s. It runs in its own task: if the agent cancels or times out the call that started it, the connect still finishes and the next call uses it.
   - The MCP session is kept until the agent session ends.
   - If it drops (the VM stopped or rebooted), the next call reconnects once. A call that was in flight when it dropped returns a tool error and is not retried, because Cua actions are not idempotent.
   - A VM that is off returns `mac is not running: run \`vm start mac\` first` within milliseconds.
+  - A tool call that gets no answer in 15 minutes returns a tool error, and Cua is sent a cancel.
 - **SSH sharing.** ssh uses `ControlMaster=auto`, `ControlPersist=10m` and `ControlPath=~/.cache/vmlab/ssh/%C` (the directory is mode 0700). Later sessions reuse the authenticated connection.
   - Every session still starts its own `cua-driver mcp`, because Cua state (element refs, sessions) belongs to a connection.
   - The master process outlives the session for 10 minutes by design. ServerAlive ends it within about 15 s once the VM goes away.
@@ -26,6 +34,8 @@ Environment variables:
 | `VMLAB_VM` | path of the `vm` CLI (default `~/.local/bin/vm`) |
 | `VMLAB_CACHE_DIR` | tool-list cache dir (default `~/.cache/vmlab`) |
 | `VMLAB_SSH_MUX=0` | turn ControlMaster sharing off |
+| `VMLAB_MCP_CONNECT_TIMEOUT` | bound on one connect, in seconds (default 120) |
+| `VMLAB_MCP_CALL_TIMEOUT` | bound on one tool call, in seconds (default 900) |
 | `VMLAB_MCP_TEST_UPSTREAM` | tests only: run `sh -c "<cmd> <machine>"` instead of SSH |
 
 ## Build, test, install
@@ -35,6 +45,8 @@ cargo test                      # unit tests + stdio integration tests against t
 cargo build --release && install -m755 target/release/vmlab-mcp ~/.local/bin/vmlab-mcp
 scripts/update-seed.sh          # after connecting to both VMs: refresh seed/ from the cache
 ```
+
+ssh expands `%` and splits on spaces in some of its paths, so a home or cache path with spaces, quotes or `%` is refused with an error.
 
 Build output stays in `target/`, inside this repo on the spare SSD (`.cargo/config.toml`).
 

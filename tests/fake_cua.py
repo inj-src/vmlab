@@ -6,7 +6,8 @@ Speaks newline-delimited JSON-RPC on stdio. Tools:
   image     returns one image block and one text block with annotations
   fail      returns a JSON-RPC error (-32602)
   die       exits the process without answering (simulates a VM reboot)
-Writes its pid to <log-dir>/<machine>.pid and events (cancelled ids) to <log-dir>/<machine>.log.
+Writes its pid to <log-dir>/<machine>.pid and events (calls, cancelled ids) to
+<log-dir>/<machine>.log. FAKE_CUA_LIST=<seconds> delays the tools/list answer; "hang" never sends it.
 """
 import json, os, sys, threading, time
 
@@ -39,6 +40,7 @@ IMAGE = [
 def call(rid, params):
     name, args = params["name"], params.get("arguments") or {}
     meta = params.get("_meta") or {}
+    log(f"call {name}")
     if name == "echo":
         send({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps({"machine": machine, "args": args, "pid": os.getpid(), "meta": meta})}]}})
     elif name == "sleep":
@@ -66,6 +68,11 @@ for line in sys.stdin:
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "fake-cua", "version": "0"}}})
     elif method == "tools/list":
+        delay = os.environ.get("FAKE_CUA_LIST", "")
+        if delay == "hang":
+            continue
+        if delay:
+            time.sleep(float(delay))
         send({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})
     elif method == "tools/call":
         threading.Thread(target=call, args=(rid, msg["params"]), daemon=True).start()

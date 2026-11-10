@@ -176,6 +176,20 @@ fn spawn_fake(f: &Fake) -> Client {
     Client::spawn(&[("VMLAB_CACHE_DIR", &f.cache)], &[("VMLAB_MCP_TEST_UPSTREAM", &f.cmd)])
 }
 
+fn spawn_fake_with(f: &Fake, extra: &[(&str, &str)]) -> Client {
+    let mut all = vec![("VMLAB_MCP_TEST_UPSTREAM", f.cmd.as_str())];
+    all.extend_from_slice(extra);
+    Client::spawn(&[("VMLAB_CACHE_DIR", &f.cache)], &all)
+}
+
+fn log_lines(f: &Fake, m: &str) -> Vec<String> {
+    std::fs::read_to_string(f.logs.join(format!("{m}.log")))
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
 fn pids(f: &Fake, m: &str) -> Vec<i32> {
     std::fs::read_to_string(f.logs.join(format!("{m}.pid")))
         .unwrap_or_default()
@@ -344,6 +358,104 @@ fn proxy_sigkill_does_not_orphan() {
         assert!(t.elapsed() < Duration::from_secs(5), "upstream {up} orphaned after SIGKILL");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn proxy_strips_reserved_meta() {
+    let f = fake();
+    let mut c = spawn_fake(&f);
+    c.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "echo", "arguments": {"machine": "win"},
+        "_meta": {"io.modelcontextprotocol/related-task": {"taskId": "t1"}, "custom": 1}}}));
+    let echoed: Value = serde_json::from_str(&text(&c.wait(1, 10))).unwrap();
+    assert_eq!(echoed["meta"]["custom"], 1, "{echoed}");
+    assert!(echoed["meta"].get("io.modelcontextprotocol/related-task").is_none(), "{echoed}");
+    assert!(c.close().success());
+}
+
+#[test]
+fn proxy_call_timeout_is_a_tool_error() {
+    let f = fake();
+    let mut c = spawn_fake_with(&f, &[("VMLAB_MCP_CALL_TIMEOUT", "1")]);
+    c.call_wait(1, "echo", json!({"machine": "win"}));
+    let t = Instant::now();
+    let r = c.call_wait(2, "sleep", json!({"machine": "win", "seconds": 10}));
+    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    assert!(is_error(&r), "{r}");
+    assert!(text(&r).contains("did not answer within 1 s"), "{r}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(log_lines(&f, "win").iter().any(|l| l.starts_with("cancelled")), "{:?}", log_lines(&f, "win"));
+    // The session itself is still usable.
+    assert!(text(&c.call_wait(3, "echo", json!({"machine": "win"}))).contains("\"win\""));
+    assert!(c.close().success());
+}
+
+#[test]
+fn proxy_bounds_tools_list_on_connect() {
+    let f = fake();
+    let mut c = spawn_fake_with(&f, &[("FAKE_CUA_LIST", "hang"), ("VMLAB_MCP_CONNECT_TIMEOUT", "1")]);
+    let t = Instant::now();
+    let r = c.call_wait(1, "echo", json!({"machine": "win"}));
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(is_error(&r), "{r}");
+    assert!(text(&r).contains("tools/list on win did not answer within 1 s"), "{r}");
+    // The half-connected upstream was shut down, and the slot is free for another try.
+    let up = pids(&f, "win")[0];
+    let t = Instant::now();
+    while alive(up) {
+        assert!(t.elapsed() < Duration::from_secs(6), "upstream {up} left running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let r = c.call_wait(2, "echo", json!({"machine": "mac"}));
+    assert!(is_error(&r), "{r}");
+    assert!(c.close().success());
+}
+
+#[test]
+fn proxy_connect_survives_a_cancelled_caller() {
+    let f = fake();
+    let mut c = spawn_fake_with(&f, &[("FAKE_CUA_LIST", "1.5")]);
+    let t = Instant::now();
+    c.call(1, "echo", json!({"machine": "win"}));
+    std::thread::sleep(Duration::from_millis(300));
+    c.send(json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1, "reason": "timeout"}}));
+    std::thread::sleep(Duration::from_millis(100));
+    // The next call reuses the connect that was already under way.
+    let r = c.call_wait(2, "echo", json!({"machine": "win"}));
+    assert!(!is_error(&r), "{r}");
+    assert!(t.elapsed() < Duration::from_millis(2500), "{:?}", t.elapsed());
+    assert_eq!(pids(&f, "win").len(), 1);
+    // The cancelled call was never sent to Cua.
+    let calls: Vec<_> = log_lines(&f, "win").into_iter().filter(|l| l.starts_with("call ")).collect();
+    assert_eq!(calls, ["call echo"]);
+    assert!(c.close().success());
+}
+
+#[test]
+fn proxy_stale_catalog_and_unwritable_cache() {
+    // The cache dir cannot be created (its parent is a file), so the catalog is the real seed,
+    // which has none of the fake's tools.
+    let f = fake();
+    let blocker = f.logs.join("file");
+    std::fs::write(&blocker, "").unwrap();
+    let cache = blocker.join("cache");
+    let mut c = Client::spawn(&[("VMLAB_CACHE_DIR", &cache)], &[("VMLAB_MCP_TEST_UPSTREAM", &f.cmd)]);
+    c.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+    let tools = c.wait(1, 10)["result"]["tools"].clone();
+    assert!(tools.as_array().unwrap().iter().all(|t| t["name"] != "echo"));
+    // `echo` is unknown to the catalog, but this session has not seen win's live list: it
+    // connects, checks again and forwards. The live list is used although it was not cached.
+    let r = c.call_wait(2, "echo", json!({"machine": "win"}));
+    assert!(!is_error(&r), "{r}");
+    assert!(c.notes.iter().any(|n| n["method"] == "notifications/tools/list_changed"));
+    c.send(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}));
+    let tools = c.wait(3, 10)["result"]["tools"].clone();
+    assert!(tools.as_array().unwrap().iter().any(|t| t["name"] == "echo"));
+    // Now that the live list is known, an unknown tool is refused without another connect.
+    let r = c.call_wait(4, "nope", json!({"machine": "win"}));
+    assert_eq!(text(&r), "unknown tool `nope`");
+    assert_eq!(pids(&f, "win").len(), 1);
+    assert!(c.close().success());
 }
 
 unsafe extern "C" {
