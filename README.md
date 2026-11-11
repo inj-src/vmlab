@@ -85,3 +85,8 @@ main channel only), so the host desktop clipboard is never touched. Guest state 
 
 Only one SPICE client can connect. If the user opens the viewer during a run, the test client is
 dropped and the run stops with exit code 3 instead of reconnecting.
+
+Side effect: `t_unit` and `t_pty` compile and run unsigned binaries over SSH, and on this VM that
+starts a tccd/sandboxd/apfsd loop (about 100% guest CPU) that survives a reboot. The agent itself
+and the other tests don't trigger it. Run the tests on a throwaway overlay and `vm reset mac`
+afterwards; never `vm commit` a VM the tests have run on.
