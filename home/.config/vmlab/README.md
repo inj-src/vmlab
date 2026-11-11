@@ -107,7 +107,8 @@ Using it:
 
 - `win`: three disk layers in `/vmlab/images`. `win11-base.qcow2` is Windows as installed and is never written. `win11-ready.qcow2` on it is the clean state (GPU driver and the lab's fixes); `vm reset` returns to it and `vm commit` writes to it. `win11-venus.qcow2` holds the current run's changes. `win-venus.sh setup` builds the clean state again from `win11-base` (about 4 minutes).
 - `mac`: one disk, `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/disk.qcow2`. Its snapshot `clean` is the clean state.
-- `/vmlab/tools/vmlab/` holds the build scripts (`win/`, `mac/`), the `vmlab-mcp` source (`vmlab-mcp/`) and the computer-use benchmark (`bench/`; run `python3 bench.py report`).
+- `/vmlab/tools/vmlab/` is the lab's git repository (branch `main`, no remote): the GPU VMs' launchers and patches (`gpu/`), the build scripts (`win/`, `mac/`), the `vmlab-mcp` source (`vmlab-mcp/`) and the computer-use benchmark (`bench/`; run `python3 bench.py report`). Its `README.md` has the layout and what stays out of git.
+- This file, `~/.local/bin/vm`, its helpers and the two app-grid launchers are links into that repository's `home/`; `./install.sh` there makes the links. Edit them in place.
 
 ## Freeing disk space on /vmlab
 
