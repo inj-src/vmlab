@@ -118,7 +118,7 @@ fn write_exe(path: &Path, body: &str) {
 fn vm_off() {
     let dir = tempfile::tempdir().unwrap();
     let vm = dir.path().join("vm");
-    write_exe(&vm, "#!/bin/sh\ncase $1 in status) printf 'mac  shutoff  -\\nwin  shutoff  -\\n';; ip) echo 192.168.122.171;; esac\n");
+    write_exe(&vm, "#!/bin/sh\ncase $1 in status) printf 'mac  shutoff  -\\nwin  shutoff  -\\n';; ip) echo 127.0.0.1;; port) echo 2222;; esac\n");
     let cache = dir.path().join("cache");
     let mut c = Client::spawn(&[("VMLAB_VM", &vm), ("VMLAB_CACHE_DIR", &cache)], &[]);
 

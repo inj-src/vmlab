@@ -134,11 +134,14 @@ fn check_ssh_paths(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// ssh arguments up to and including the destination. Fixed options only; the one variable part
-/// is the destination, built from a parsed IP address, so nothing from outside can inject an
-/// option. `-F none` ignores ~/.ssh/config so a user Host block cannot change behaviour.
-pub fn ssh_args(cfg: &Config, ip: IpAddr) -> Vec<String> {
+/// ssh arguments up to and including the destination. Fixed options only; the variable parts
+/// are the port and the destination, built from a parsed number and a parsed IP address, so
+/// nothing from outside can inject an option. `-F none` ignores ~/.ssh/config so a user Host
+/// block cannot change behaviour.
+pub fn ssh_args(cfg: &Config, ip: IpAddr, port: u16) -> Vec<String> {
     let mut a: Vec<String> = vec!["-F".into(), "none".into(), "-T".into(), "-a".into(), "-x".into()];
+    a.push("-p".into());
+    a.push(port.to_string());
     a.push("-i".into());
     a.push(cfg.ssh_key.display().to_string());
     let mut opt = |s: String| {
@@ -147,7 +150,8 @@ pub fn ssh_args(cfg: &Config, ip: IpAddr) -> Vec<String> {
     };
     opt("IdentitiesOnly=yes".into());
     opt(format!("UserKnownHostsFile={}", cfg.state_dir.join("known_hosts").display()));
-    // Same policy as `vm`: the guests' keys are recorded on first contact (libvirt NAT only).
+    // Same policy as `vm`: the guests' keys are recorded on first contact (the guests are
+    // reached at a port QEMU forwards on 127.0.0.1 only).
     opt("StrictHostKeyChecking=accept-new".into());
     opt("BatchMode=yes".into());
     opt("ConnectTimeout=5".into());
@@ -223,9 +227,9 @@ pub fn not_running_message(machine: Machine) -> String {
     format!("{machine} is not running: run `vm start {machine}` first")
 }
 
-/// The VM's address, or an agent-facing error if it is not running. Checks the libvirt state
-/// first: `vm ip` alone can print a stale DHCP lease for a stopped VM.
-async fn vm_address(cfg: &Config, machine: Machine) -> Result<IpAddr, String> {
+/// Where the VM's SSH is (`vm ip`, `vm port`: 127.0.0.1 and a port QEMU forwards to the
+/// guest), or an agent-facing error if the VM is not running (`vm status`).
+async fn vm_address(cfg: &Config, machine: Machine) -> Result<(IpAddr, u16), String> {
     let (_, status) = run_vm(cfg, &["status"]).await?;
     match parse_status(&status, machine).as_deref() {
         Some("running") => {}
@@ -233,11 +237,11 @@ async fn vm_address(cfg: &Config, machine: Machine) -> Result<IpAddr, String> {
         None => return Err(format!("`vm status` does not list {machine}")),
     }
     let (ok, out) = run_vm(cfg, &["ip", machine.name()]).await?;
-    let ip = out.trim();
-    match (ok, ip.parse::<IpAddr>()) {
-        (true, Ok(ip)) => Ok(ip),
+    let (port_ok, port) = run_vm(cfg, &["port", machine.name()]).await?;
+    match (ok && port_ok, out.trim().parse::<IpAddr>(), port.trim().parse::<u16>()) {
+        (true, Ok(ip), Ok(port)) => Ok((ip, port)),
         _ => Err(format!(
-            "{machine} is running but has no IP address yet (still booting?): wait for `vm start {machine}` to finish"
+            "{machine} is running but `vm ip {machine}` and `vm port {machine}` gave no address (still booting?): wait for `vm start {machine}` to finish"
         )),
     }
 }
@@ -307,14 +311,14 @@ pub async fn connect(
         c
     } else {
         check_ssh_paths(cfg)?;
-        let ip = vm_address(cfg, machine).await?;
+        let (ip, port) = vm_address(cfg, machine).await?;
         if cfg.mux {
             ensure_private_dir(&cfg.mux_dir())
                 .map_err(|e| format!("cannot create {}: {e}", cfg.mux_dir().display()))?;
         }
-        tracing::info!(%machine, %ip, "connecting");
+        tracing::info!(%machine, %ip, port, "connecting");
         let mut c = tokio::process::Command::new("ssh");
-        c.args(ssh_args(cfg, ip)).arg(remote_command(machine));
+        c.args(ssh_args(cfg, ip, port)).arg(remote_command(machine));
         c
     };
     die_with_parent(&mut cmd);
@@ -539,18 +543,18 @@ mod tests {
 
     #[test]
     fn ssh_args_mux() {
-        let a = ssh_args(&cfg(true), "192.168.122.5".parse().unwrap());
+        let a = ssh_args(&cfg(true), "127.0.0.1".parse().unwrap(), 2222);
         let s = a.join(" ");
-        assert!(s.starts_with("-F none -T -a -x -i /k/id "), "{s}");
+        assert!(s.starts_with("-F none -T -a -x -p 2222 -i /k/id "), "{s}");
         assert!(s.contains("-o ControlMaster=auto -o ControlPath=/s/ssh/%C -o ControlPersist=10m"));
         assert!(s.contains("-o UserKnownHostsFile=/s/known_hosts"));
         assert!(s.contains("-o BatchMode=yes"));
-        assert_eq!(&a[a.len() - 2..], ["--", "dev@192.168.122.5"]);
+        assert_eq!(&a[a.len() - 2..], ["--", "dev@127.0.0.1"]);
     }
 
     #[test]
     fn ssh_args_no_mux() {
-        let s = ssh_args(&cfg(false), "10.0.0.1".parse().unwrap()).join(" ");
+        let s = ssh_args(&cfg(false), "10.0.0.1".parse().unwrap(), 22).join(" ");
         assert!(s.contains("-o ControlMaster=no -o ControlPath=none"));
         assert!(!s.contains("ControlPersist"));
     }
@@ -580,7 +584,7 @@ mod tests {
 
     #[test]
     fn status_parsing() {
-        let out = "mac  shutoff  -               \nwin  running  192.168.122.171 started by x 2026\n";
+        let out = "mac  shutoff  -               \nwin  running  127.0.0.1:2222  started by x 2026\n";
         assert_eq!(parse_status(out, Machine::Mac).as_deref(), Some("shutoff"));
         assert_eq!(parse_status(out, Machine::Win).as_deref(), Some("running"));
         assert_eq!(parse_status("", Machine::Win), None);
@@ -596,7 +600,7 @@ mod tests {
         // A fake `vm` that reports both VMs shut off.
         let dir = tempfile::tempdir().unwrap();
         let vm = dir.path().join("vm");
-        std::fs::write(&vm, "#!/bin/sh\n[ \"$1\" = status ] && printf 'mac  shutoff  -\\nwin  shutoff  -\\n'\n[ \"$1\" = ip ] && echo 192.168.122.9\nexit 0\n").unwrap();
+        std::fs::write(&vm, "#!/bin/sh\n[ \"$1\" = status ] && printf 'mac  shutoff  -\\nwin  shutoff  -\\n'\n[ \"$1\" = ip ] && echo 127.0.0.1\n[ \"$1\" = port ] && echo 2227\nexit 0\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&vm, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut c = cfg(true);
