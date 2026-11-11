@@ -1,0 +1,8 @@
+{
+  "name": "bench-form",
+  "version": "1.0.0",
+  "main": "main.js",
+  "private": true,
+  "scripts": { "start": "electron ." },
+  "devDependencies": { "electron": "38.2.0" }
+}

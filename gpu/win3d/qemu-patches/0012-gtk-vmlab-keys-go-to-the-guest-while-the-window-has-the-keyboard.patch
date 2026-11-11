@@ -1,0 +1,265 @@
+gtk: vmlab: every key goes to the guest while the window has the keyboard
+
+While the Windows window has the keyboard, the desktop's own shortcuts (the Windows key,
+Alt+Tab) go to the guest too: the window asks the compositor for a shortcuts inhibitor
+(keyboard-shortcuts-inhibit-unstable-v1) for its surface, once, when it first has the
+keyboard, and keeps it until it is unmapped. The compositor applies it only while the
+window has the keyboard, so another window has the desktop's shortcuts as before. The
+pointer is not held.
+
+Not GDK's keyboard grab at each change of focus: GNOME asks the person once whether to
+allow it, its question takes the keyboard for a moment, and dropping the request then
+withdraws the question, so it is never answered.
+
+When the compositor takes the inhibitor back ("inactive": GNOME's Super+Escape), it is
+asked for anew the next time the window gains the keyboard; GNOME answers that as the
+person answered before, without asking.
+
+Only with VMLAB_WINDOW, on Wayland.
+---
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index e253fc3..1a89fda 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -252,6 +252,7 @@ bool vmlab_wl_update(VirtualConsole *vc, int x, int y, int w, int h);
+ void vmlab_wl_switch(VirtualConsole *vc);
+ void vmlab_wl_uncover(VirtualConsole *vc);
+ void vmlab_wl_cover(VirtualConsole *vc);
++void vmlab_wl_keys_to_guest(VirtualConsole *vc);
+ /* and what it asks of ui/gtk.c */
+ void gd_vmlab_rescale(VirtualConsole *vc);
+ void gd_vmlab_layout_changed(VirtualConsole *vc);
+diff --git a/ui/gtk-vmlab-wl.c b/ui/gtk-vmlab-wl.c
+index 31434a5..48be3ab 100644
+--- a/ui/gtk-vmlab-wl.c
++++ b/ui/gtk-vmlab-wl.c
+@@ -29,6 +29,7 @@
+ #include <wayland-client.h>
+ #include "ui/vmlab-viewporter-client-protocol.h"
+ #include "ui/vmlab-fractional-scale-v1-client-protocol.h"
++#include "ui/vmlab-keyboard-shortcuts-inhibit-v1-client-protocol.h"
+ 
+ #define VMLAB_BUFFERS 3
+ 
+@@ -43,6 +44,10 @@ typedef struct VmlabBuffer {
+ 
+ static struct {
+     bool tried, on;
++    bool looked;                /* the compositor's globals have been asked for */
++    struct zwp_keyboard_shortcuts_inhibit_manager_v1 *inhibit_manager;
++    struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor;  /* the window's, while it is mapped */
++    bool inhibitor_off;         /* the compositor took it back (GNOME: Super+Escape, or "Deny") */
+     VirtualConsole *vc;
+     struct wl_compositor *compositor;
+     struct wl_subcompositor *subcompositor;
+@@ -84,6 +89,9 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
+     } else if (!strcmp(interface, wp_fractional_scale_manager_v1_interface.name)) {
+         wl.scales = wl_registry_bind(registry, name,
+                                      &wp_fractional_scale_manager_v1_interface, 1);
++    } else if (!strcmp(interface, zwp_keyboard_shortcuts_inhibit_manager_v1_interface.name)) {
++        wl.inhibit_manager = wl_registry_bind(registry, name,
++                                              &zwp_keyboard_shortcuts_inhibit_manager_v1_interface, 1);
+     }
+ }
+ 
+@@ -246,21 +254,125 @@ static void vmlab_wl_stop(void)
+ /* the window goes off the screen, and its Wayland surface with it: start again when it is back */
+ static void window_unmapped(GtkWidget *window, gpointer opaque)
+ {
++    g_clear_pointer(&wl.inhibitor, zwp_keyboard_shortcuts_inhibitor_v1_destroy);
+     if (wl.on) {
+         vmlab_wl_stop();
+         wl.tried = false;
+     }
+ }
+ 
++/* the compositor's globals, asked for once */
++static void vmlab_wl_globals(GtkWidget *window, struct wl_display *display)
++{
++    struct wl_display *wrapper;
++    struct wl_event_queue *queue;
++    struct wl_registry *registry;
++
++    if (wl.looked) {
++        return;
++    }
++    wl.looked = true;
++    /*
++     * The globals are found on a queue of their own, so that GDK's events stay where GDK
++     * reads them, and then moved to the display's queue, which GDK's main loop reads:
++     * what is made from them answers there.
++     */
++    queue = wl_display_create_queue(display);
++    wrapper = wl_proxy_create_wrapper(display);
++    wl_proxy_set_queue((struct wl_proxy *)wrapper, queue);
++    registry = wl_display_get_registry(wrapper);
++    wl_proxy_wrapper_destroy(wrapper);
++    wl_registry_add_listener(registry, &registry_listener, NULL);
++    wl_display_roundtrip_queue(display, queue);
++    wl_display_roundtrip_queue(display, queue);
++    if (wl.compositor) {
++        wl_proxy_set_queue((struct wl_proxy *)wl.compositor, NULL);
++    }
++    if (wl.subcompositor) {
++        wl_proxy_set_queue((struct wl_proxy *)wl.subcompositor, NULL);
++    }
++    if (wl.shm) {
++        wl_proxy_set_queue((struct wl_proxy *)wl.shm, NULL);
++    }
++    if (wl.viewporter) {
++        wl_proxy_set_queue((struct wl_proxy *)wl.viewporter, NULL);
++    }
++    if (wl.scales) {
++        wl_proxy_set_queue((struct wl_proxy *)wl.scales, NULL);
++    }
++    if (wl.inhibit_manager) {
++        wl_proxy_set_queue((struct wl_proxy *)wl.inhibit_manager, NULL);
++    }
++    wl_registry_destroy(registry);
++    wl_event_queue_destroy(queue);
++    g_signal_connect(window, "unmap", G_CALLBACK(window_unmapped), NULL);
++}
++
++static void inhibitor_active(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor)
++{
++    wl.inhibitor_off = false;
++}
++
++static void inhibitor_inactive(void *data, struct zwp_keyboard_shortcuts_inhibitor_v1 *inhibitor)
++{
++    wl.inhibitor_off = true;
++}
++
++static const struct zwp_keyboard_shortcuts_inhibitor_v1_listener inhibitor_listener = {
++    .active = inhibitor_active,
++    .inactive = inhibitor_inactive,
++};
++
++/*
++ * Every key is the guest's while the window has the keyboard, the desktop's own shortcuts
++ * too (the Windows key, Alt+Tab): the compositor's shortcuts inhibitor for the window. It is
++ * asked for once, when the window first has the keyboard, and kept while the window is mapped;
++ * the compositor applies it only while the window has the keyboard. (Not GDK's keyboard grab,
++ * which asks and lets go at each change of focus: GNOME asks the person once whether to allow
++ * it, its question takes the keyboard for a moment, and letting go then withdraws the
++ * question.) When the compositor has taken it back (GNOME's Super+Escape gives the desktop its
++ * shortcuts again), it is asked for anew the next time the window gains the keyboard; GNOME
++ * then answers as the person did before, without asking. The pointer is never held. Called
++ * when the window gains the keyboard.
++ */
++void vmlab_wl_keys_to_guest(VirtualConsole *vc)
++{
++    GtkWidget *window = gtk_widget_get_toplevel(vc->gfx.drawing_area);
++    GdkWindow *gdk_window = gtk_widget_get_window(window);
++    GdkDisplay *gdk_display = gtk_widget_get_display(window);
++    struct wl_display *display;
++    struct wl_surface *surface;
++    struct wl_seat *seat;
++
++    if (wl.inhibitor && wl.inhibitor_off) {
++        g_clear_pointer(&wl.inhibitor, zwp_keyboard_shortcuts_inhibitor_v1_destroy);
++    }
++    if (wl.inhibitor || !g_getenv("VMLAB_WINDOW") || !gdk_window ||
++        !gtk_widget_get_mapped(window) || !GDK_IS_WAYLAND_DISPLAY(gdk_display)) {
++        return;
++    }
++    display = gdk_wayland_display_get_wl_display(gdk_display);
++    surface = gdk_wayland_window_get_wl_surface(gdk_window);
++    seat = gdk_wayland_seat_get_wl_seat(gdk_display_get_default_seat(gdk_display));
++    if (!display || !surface || !seat) {
++        return;
++    }
++    vmlab_wl_globals(window, display);
++    if (!wl.inhibit_manager) {
++        return;
++    }
++    wl.inhibitor_off = false;
++    wl.inhibitor = zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts(
++        wl.inhibit_manager, surface, seat);
++    zwp_keyboard_shortcuts_inhibitor_v1_add_listener(wl.inhibitor, &inhibitor_listener, NULL);
++}
++
+ static void vmlab_wl_start(VirtualConsole *vc)
+ {
+     GtkWidget *window = gtk_widget_get_toplevel(vc->gfx.drawing_area);
+     GdkWindow *gdk_window = gtk_widget_get_window(window);
+     GdkDisplay *gdk_display = gtk_widget_get_display(window);
+     struct wl_display *display;
+-    struct wl_display *wrapper;
+-    struct wl_event_queue *queue;
+-    struct wl_registry *registry;
+     struct wl_surface *parent;
+     struct wl_region *nothing;
+ 
+@@ -278,39 +390,7 @@ static void vmlab_wl_start(VirtualConsole *vc)
+         return;
+     }
+ 
+-    if (!wl.compositor) {
+-        /*
+-         * The globals are found on a queue of their own, so that GDK's events stay where GDK
+-         * reads them, and then moved to the display's queue, which GDK's main loop reads:
+-         * what is made from them answers there.
+-         */
+-        queue = wl_display_create_queue(display);
+-        wrapper = wl_proxy_create_wrapper(display);
+-        wl_proxy_set_queue((struct wl_proxy *)wrapper, queue);
+-        registry = wl_display_get_registry(wrapper);
+-        wl_proxy_wrapper_destroy(wrapper);
+-        wl_registry_add_listener(registry, &registry_listener, NULL);
+-        wl_display_roundtrip_queue(display, queue);
+-        wl_display_roundtrip_queue(display, queue);
+-        if (wl.compositor) {
+-            wl_proxy_set_queue((struct wl_proxy *)wl.compositor, NULL);
+-        }
+-        if (wl.subcompositor) {
+-            wl_proxy_set_queue((struct wl_proxy *)wl.subcompositor, NULL);
+-        }
+-        if (wl.shm) {
+-            wl_proxy_set_queue((struct wl_proxy *)wl.shm, NULL);
+-        }
+-        if (wl.viewporter) {
+-            wl_proxy_set_queue((struct wl_proxy *)wl.viewporter, NULL);
+-        }
+-        if (wl.scales) {
+-            wl_proxy_set_queue((struct wl_proxy *)wl.scales, NULL);
+-        }
+-        wl_registry_destroy(registry);
+-        wl_event_queue_destroy(queue);
+-        g_signal_connect(window, "unmap", G_CALLBACK(window_unmapped), NULL);
+-    }
++    vmlab_wl_globals(window, display);
+     if (!wl.compositor || !wl.subcompositor || !wl.shm || !wl.viewporter || !wl.scales) {
+         warn_report("vmlab: the compositor lacks a protocol for showing the picture at the "
+                     "screen's pixels (wp_viewporter, wp_fractional_scale_v1): GTK draws it");
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 0f63f54..8426776 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -2207,6 +2207,11 @@ static gboolean gd_focus_in_event(GtkWidget *widget,
+     VirtualConsole *vc = opaque;
+ 
+     win32_kbd_set_window(gd_win32_get_hwnd(vc));
++    /*
++     * vmlab: while the window has the keyboard, every key is the guest's, the desktop's own
++     * shortcuts too (the Windows key, Alt+Tab). The pointer stays free.
++     */
++    vmlab_wl_keys_to_guest(vc);
+     return TRUE;
+ }
+ 
+diff --git a/ui/meson.build b/ui/meson.build
+index b7e9b5d..182bd16 100644
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -164,7 +164,9 @@ if gtk.found()
+   if vmlab_wl.found() and vmlab_wlp.found() and vmlab_scanner.found()
+     vmlab_wlp_dir = vmlab_wlp.get_variable('pkgdatadir')
+     foreach p : [['viewporter', 'stable/viewporter/viewporter.xml'],
+-                 ['fractional-scale-v1', 'staging/fractional-scale/fractional-scale-v1.xml']]
++                 ['fractional-scale-v1', 'staging/fractional-scale/fractional-scale-v1.xml'],
++                 ['keyboard-shortcuts-inhibit-v1',
++                  'unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml']]
+       gtk_ss.add(custom_target('vmlab-' + p[0] + '-client-protocol.h',
+                                input: vmlab_wlp_dir / p[1],
+                                output: 'vmlab-' + p[0] + '-client-protocol.h',

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# wait-picker [max_secs]: block until the OpenCore boot picker is on screen (bright "REL-..." version
+# text in the bottom-right corner on an otherwise black screen), then save a screenshot and exit 0.
+max=${1:-14400}; d=$(mktemp -d); t0=$SECONDS
+while (( SECONDS - t0 < max )); do
+  if virsh -c qemu:///system screenshot macos "$d/s.ppm" >/dev/null 2>&1; then
+    r=$(/vmlab/tools/vmlab/mac/venv/bin/python -W ignore -c "
+from PIL import Image; im=Image.open('$d/s.ppm').convert('L'); w,h=im.size
+corner=im.crop((int(w*.87),int(h*.955),int(w*.97),int(h*.985)))
+bright=sum(1 for p in corner.getdata() if p>150)
+dark=sum(1 for p in im.resize((160,100)).getdata() if p<30)/16000
+print('picker' if bright>20 and dark>0.85 else 'no')")
+    [[ $r == picker ]] && { echo "picker after $((SECONDS - t0))s"; /vmlab/tools/vmlab/mac/shot >/dev/null; rm -rf "$d"; exit 0; }
+  fi
+  sleep 10
+done
+rm -rf "$d"; echo "timeout"; exit 1

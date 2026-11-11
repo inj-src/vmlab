@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# settle [max_secs] [stable_polls]: wait until the macOS VM screen has changed and then stayed
+# unchanged for <stable_polls> consecutive 3s polls. Then save a screenshot via ./shot.
+max=${1:-180}; need=${2:-3}; d=$(mktemp -d); prev=""; first=""; same=0; changed=0; t0=$SECONDS
+while (( SECONDS - t0 < max )); do
+  virsh -c qemu:///system screenshot macos "$d/s.ppm" >/dev/null 2>&1 || { sleep 3; continue; }
+  h=$(/vmlab/tools/vmlab/mac/venv/bin/python -W ignore -c "
+from PIL import Image; im=Image.open('$d/s.ppm').convert('L').resize((160,100)); print(hash(im.tobytes()))")
+  [[ -z $first ]] && first=$h
+  [[ $h != "$first" ]] && changed=1
+  if [[ $h == "$prev" ]]; then same=$((same+1)); else same=0; fi
+  prev=$h
+  (( changed && same >= need )) && break
+  sleep 3
+done
+rm -rf "$d"; echo "settled after $((SECONDS - t0))s (changed=$changed)"; /vmlab/tools/vmlab/mac/shot >/dev/null

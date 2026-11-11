@@ -1,0 +1,1 @@
+{"mcpServers": {"cu": {"type": "stdio", "command": "/home/inj-src/.local/bin/vm-mcp-stdio", "args": ["win", "C:\\Users\\dev\\AppData\\Local\\Programs\\Cua\\cua-driver\\bin\\cua-driver.exe mcp --socket \\\\.\\pipe\\cua-driver"]}}}

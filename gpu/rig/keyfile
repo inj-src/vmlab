@@ -1,0 +1,18 @@
+# The nested compositor's settings (nested-shell.sh copies this into its own home when it starts).
+# scale-monitor-framebuffer: fractional scales, as on the person's desktop. The dock hides, as theirs
+# does, so a maximized window has the screen's whole width.
+[org/gnome/mutter]
+experimental-features=['scale-monitor-framebuffer']
+edge-tiling=false
+
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+enable-animations=false
+
+[org/gnome/shell]
+welcome-dialog-last-shown-version='99.0'
+
+[org/gnome/shell/extensions/dash-to-dock]
+dock-fixed=false
+autohide=true
+intellihide=true

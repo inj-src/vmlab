@@ -1,0 +1,22 @@
+{
+  "about": "NOT INSTALLED: removed from the win base image on 2026-11-10 after losing the benchmark to cua-driver; reinstall it before re-running (launcher: /vmlab/tools/vmlab/win/mcp/). Was: mediar-ai terminator-mcp-agent, http server in the desktop session, reached via: vm tunnel win 3000 13000",
+  "server": {
+    "type": "http",
+    "url": "http://127.0.0.1:13000/mcp",
+    "headers": {
+      "Authorization": "Bearer 47230941913d346aa8c94759b4c1f3c1d9a05f780d55b3cd"
+    }
+  },
+  "deny": [
+    "mcp__cu__run_command",
+    "mcp__cu__write_file",
+    "mcp__cu__edit_file",
+    "mcp__cu__copy_content",
+    "mcp__cu__read_file",
+    "mcp__cu__glob_files",
+    "mcp__cu__grep_files",
+    "mcp__cu__typecheck_workflow",
+    "mcp__cu__ask_user",
+    "mcp__cu__gemini_computer_use"
+  ]
+}

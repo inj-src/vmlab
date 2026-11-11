@@ -1,0 +1,5 @@
+{
+  "about": "Cua Driver: daemon in the desktop session (cua-driver autostart kick), stdio proxy over SSH to its named pipe",
+  "server": {"type": "stdio", "command": "/home/inj-src/.local/bin/vm-mcp-stdio", "args": ["win", "C:\\Users\\dev\\AppData\\Local\\Programs\\Cua\\cua-driver\\bin\\cua-driver.exe mcp --socket \\\\.\\pipe\\cua-driver"]},
+  "deny": ["mcp__cu__install_extension", "mcp__cu__install_ffmpeg", "mcp__cu__check_for_update"]
+}

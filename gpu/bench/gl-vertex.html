@@ -1,0 +1,56 @@
+<!doctype html><meta charset=utf-8><title>gl-vertex</title>
+<body style="background:#222;color:#ccc;font:12px monospace"><pre id=out></pre>
+<script>
+// Where do a draw's vertices come from? One WebGL2 case per source, each read back with readPixels.
+// window.__result: name -> "ok" or the pixel it got (clear is blue, the quad is red). For page-shot.mjs.
+const FS = `#version 300 es
+precision mediump float; out vec4 o; void main(){ o = vec4(1, 0, 0, 1); }`;
+const VS_ID = `#version 300 es
+void main(){ gl_Position = vec4(vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0, 0, 1); }`;
+const VS_ATTR = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0, 1); }`;
+const VS_CONST = `#version 300 es
+in vec2 k; void main(){ gl_Position = vec4((vec2(gl_VertexID & 1, gl_VertexID >> 1) * 2.0 - 1.0) * k.x, 0, 1); }`;
+const VS_INT = `#version 300 es
+in ivec2 p; void main(){ gl_Position = vec4(vec2(p), 0, 1); }`;
+const QUAD = [-1,-1, 1,-1, -1,1, 1,1];
+function ctx(vs) { const cv = document.createElement('canvas'); cv.width = cv.height = 64; document.body.appendChild(cv);
+  const gl = cv.getContext('webgl2', { antialias: false }); const pr = gl.createProgram();
+  for (const [t, s] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, FS]]) { const sh = gl.createShader(t); gl.shaderSource(sh, s); gl.compileShader(sh); gl.attachShader(pr, sh); }
+  gl.bindAttribLocation(pr, 0, 'p'); gl.bindAttribLocation(pr, 0, 'k'); gl.linkProgram(pr); gl.useProgram(pr);
+  if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+  gl.clearColor(0, 0, 1, 1); gl.clear(gl.COLOR_BUFFER_BIT); return gl; }
+const buf = (gl, data, usage) => { gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, data, usage); };
+const floats = (gl, usage = gl.STATIC_DRAW) => { buf(gl, new Float32Array(QUAD), usage); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0); };
+const draw = gl => gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+const frame = () => new Promise(r => requestAnimationFrame(r));
+const cases = {
+  vertexId: [VS_ID, gl => draw(gl)],
+  constAttr: [VS_CONST, gl => { gl.vertexAttrib2f(0, 1, 1); draw(gl); }],
+  bufStatic: [VS_ATTR, gl => { floats(gl); draw(gl); }],
+  bufDynamic: [VS_ATTR, gl => { floats(gl, gl.DYNAMIC_DRAW); draw(gl); }],
+  bufStream: [VS_ATTR, gl => { floats(gl, gl.STREAM_DRAW); draw(gl); }],
+  bufSubData: [VS_ATTR, gl => { buf(gl, 32, gl.STATIC_DRAW); gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(QUAD)); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0); draw(gl); }],
+  bufBig1M: [VS_ATTR, gl => { const d = new Float32Array(262144); d.set(QUAD); buf(gl, d, gl.STATIC_DRAW); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0); draw(gl); }],
+  bufVao: [VS_ATTR, gl => { gl.bindVertexArray(gl.createVertexArray()); floats(gl); draw(gl); }],
+  bufDrawTwice: [VS_ATTR, gl => { floats(gl); draw(gl); gl.flush(); draw(gl); }],
+  bufFinishFirst: [VS_ATTR, gl => { floats(gl); gl.finish(); draw(gl); }],
+  bufNextFrame: [VS_ATTR, async gl => { floats(gl); draw(gl); await frame(); await frame(); gl.clear(gl.COLOR_BUFFER_BIT); draw(gl); }],
+  bufAfter1s: [VS_ATTR, async gl => { floats(gl); await new Promise(r => setTimeout(r, 1000)); draw(gl); }],
+  bufShorts: [VS_ATTR, gl => { buf(gl, new Int16Array(QUAD), gl.STATIC_DRAW); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.SHORT, false, 0, 0); draw(gl); }],
+  bufBytesNorm: [VS_ATTR, gl => { buf(gl, new Int8Array(QUAD.map(v => v * 127)), gl.STATIC_DRAW); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.BYTE, true, 0, 0); draw(gl); }],
+  bufInts: [VS_INT, gl => { buf(gl, new Int32Array(QUAD), gl.STATIC_DRAW); gl.enableVertexAttribArray(0); gl.vertexAttribIPointer(0, 2, gl.INT, 0, 0); draw(gl); }],
+  bufIndexed: [VS_ATTR, gl => { floats(gl); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0,1,2, 2,1,3]), gl.STATIC_DRAW); gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0); }],
+  idIndexed: [VS_ID, gl => { gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0,1,2, 2,1,3]), gl.STATIC_DRAW); gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0); }],
+  bufReadBack: [VS_ATTR, gl => { floats(gl); const d = new Float32Array(8); gl.getBufferSubData(gl.ARRAY_BUFFER, 0, d); if (String([...d]) !== String(QUAD)) throw new Error('buffer reads back ' + [...d]); draw(gl); }],
+};
+(async () => { const result = {};
+  for (const [name, [vs, run]] of Object.entries(cases)) {
+    try { const gl = ctx(vs); await run(gl); const d = new Uint8Array(4); gl.readPixels(32, 32, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, d); const err = gl.getError();
+      result[name] = String([...d]) === '255,0,0,255' && !err ? 'ok' : `got ${[...d]} glError ${err}`;
+      gl.getExtension('WEBGL_lose_context')?.loseContext(); gl.canvas.remove();
+    } catch (e) { result[name] = 'threw ' + e.message; } }
+  window.__result = result; document.getElementById('out').textContent = JSON.stringify(result, null, 1); })();
+</script>

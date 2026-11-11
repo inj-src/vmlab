@@ -1,0 +1,226 @@
+vl, gtk: vmlab: the window's clipboard is on; full screen at the screen's size; the offered size in a file
+
+The GTK window opened beside egl-headless (0002) had QEMU's clipboard sharing off, GTK's
+default, so nothing copied on one side reached the other: it is on (0009 gives it pictures).
+
+A guest that keeps the window's first size (VMLAB_WINDOW_FIXED_SIZE=first) is offered the
+window's size again when the window goes to the whole screen and when it comes back: full
+screen is the screen's own size, with no bands beside the picture.
+
+VMLAB_WINDOW_SIZE_FILE names a file that gets the size last offered to such a guest, as WxH.
+Windows, shown a size it has not seen before while it starts, sometimes settles on 1024x768
+and keeps that for the size; a helper outside reads the file and sets the mode in the guest
+(win-venus.sh).
+
+The picture's surface (0007) comes off the window at the full screen toggle and goes back
+when GTK has drawn the window at its new size. A picture that covers the window whole, as in
+full screen, leaves the compositor nothing of the window to draw, so mutter sends the window
+no frame callback; GTK 3 waits for one before it draws, and never drew the window at the size
+it got when leaving full screen (the window stayed over the whole screen with no title bar).
+
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -1398,6 +1398,9 @@
+         dpy_window.gl = DISPLAY_GL_MODE_OFF;
+         dpy_window.u.gtk.has_zoom_to_fit = true;
+         dpy_window.u.gtk.zoom_to_fit = true;
++        /* vmlab: the host's clipboard is the guest's (the qemu-vdagent channel) */
++        dpy_window.u.gtk.has_clipboard = true;
++        dpy_window.u.gtk.clipboard = true;
+         qemu_display_early_init(&dpy_window);
+     }
+ }
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -150,6 +150,8 @@
+  * so the guest keeps the size the window opened with and the window scales it.
+  */
+ static int vmlab_first_w, vmlab_first_h;
++/* vmlab: the size the guest had when the window went to or left the whole screen */
++static int vmlab_first_skip_w, vmlab_first_skip_h;
+ static bool vmlab_first_taken;
+ /* vmlab: the guest's pointer shape as it gave it, and the zoom the host's pointer has it at */
+ static QEMUCursor *vmlab_cursor;
+@@ -948,8 +950,18 @@
+         if (vmlab_first_taken || width < 800 || height < 600) {
+             return;
+         }
++        if (width == vmlab_first_skip_w && height == vmlab_first_skip_h) {
++            return;
++        }
++        vmlab_first_skip_w = vmlab_first_skip_h = 0;
+         vmlab_first_w = width;
+         vmlab_first_h = height;
++        if (g_getenv("VMLAB_WINDOW_SIZE_FILE")) {
++            /* for a helper outside, which sets that mode in a guest that did not take it */
++            g_autofree char *size = g_strdup_printf("%dx%d\n", width, height);
++
++            g_file_set_contents(g_getenv("VMLAB_WINDOW_SIZE_FILE"), size, -1, NULL);
++        }
+     } else if (g_getenv("VMLAB_WINDOW_FIXED_SIZE")) {
+         int fixed_w, fixed_h;
+ 
+@@ -1166,6 +1178,7 @@
+     gd_update_monitor_refresh_rate(vc, vc->window ? vc->window : s->window);
+ 
+     /* vmlab: the picture is on a surface of its own over this one (gtk-vmlab-wl.c) */
++    vmlab_wl_cover(vc);
+     vmlab_wl_layout(vc);
+     if (vmlab_wl_active(vc)) {
+         cairo_set_source_rgb(cr, 0, 0, 0);
+@@ -1874,6 +1887,28 @@
+     GtkDisplayState *s = opaque;
+     VirtualConsole *vc = gd_vc_find_current(s);
+ 
++    /*
++     * vmlab: a guest that keeps the window's first size is offered the window's new one when
++     * the window goes to the whole screen and when it comes back, so the picture fills the
++     * screen, a guest pixel to a screen pixel, and no bands are left beside it.
++     */
++    if (g_getenv("VMLAB_WINDOW") &&
++        !g_strcmp0(g_getenv("VMLAB_WINDOW_FIXED_SIZE"), "first")) {
++        vmlab_first_taken = false;
++        vmlab_first_w = vmlab_first_h = 0;
++        /* (the size it has is not offered again: taking that would pin it before the window's
++         * new size is known) */
++        if (vc && vc->type == GD_VC_GFX && vc->gfx.ds && !surface_is_placeholder(vc->gfx.ds)) {
++            vmlab_first_skip_w = surface_width(vc->gfx.ds);
++            vmlab_first_skip_h = surface_height(vc->gfx.ds);
++        }
++    }
++
++    /* vmlab: the window is drawn at its new size only if the picture does not cover it whole */
++    if (vc && vc->type == GD_VC_GFX) {
++        vmlab_wl_uncover(vc);
++    }
++
+     if (!s->full_screen) {
+         gtk_notebook_set_show_tabs(GTK_NOTEBOOK(s->notebook), FALSE);
+         gtk_widget_hide(s->menu_bar);
+--- a/ui/gtk-vmlab-wl.c
++++ b/ui/gtk-vmlab-wl.c
+@@ -62,6 +62,8 @@
+     int aw, ah;                 /* the drawing area's size as last laid out */
+     bool rescale_wanted;        /* the guest has yet to take a size for this scale */
+     guint rescale_timer;
++    bool uncovered;             /* the picture is off the window (vmlab_wl_uncover) */
++    guint cover_timer;
+ } wl = { .scale120 = 120 };
+ 
+ static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h);
+@@ -224,6 +226,11 @@
+         g_source_remove(wl.rescale_timer);
+         wl.rescale_timer = 0;
+     }
++    if (wl.cover_timer) {
++        g_source_remove(wl.cover_timer);
++        wl.cover_timer = 0;
++    }
++    wl.uncovered = false;
+     for (i = 0; i < VMLAB_BUFFERS; i++) {
+         buffer_free(&wl.buf[i]);
+     }
+@@ -450,7 +457,7 @@
+     if (!wl.tried) {
+         vmlab_wl_start(vc);
+     }
+-    if (!vmlab_wl_active(vc) || !vc->gfx.ds) {
++    if (!vmlab_wl_active(vc) || !vc->gfx.ds || wl.uncovered) {
+         return;
+     }
+     ww = gtk_widget_get_allocated_width(area);
+@@ -580,12 +587,70 @@
+     b->x1 = b->y1 = b->x2 = b->y2 = 0;
+ }
+ 
++/*
++ * Takes the picture off the window until GTK has drawn the window again (vmlab_wl_cover). A
++ * picture that covers the whole window, as in full screen at the screen's size, leaves the
++ * compositor nothing of the window itself to draw, so the window gets no frame callbacks; GTK
++ * waits for one before it draws, and would never draw the window at the size it is given when
++ * it leaves full screen. With the picture off, the window is drawn and the callback comes.
++ */
++static void cover(VirtualConsole *vc)
++{
++    wl.uncovered = false;
++    if (wl.cover_timer) {
++        g_source_remove(wl.cover_timer);
++        wl.cover_timer = 0;
++    }
++    vmlab_wl_switch(vc);
++}
++
++static gboolean cover_cb(gpointer opaque)
++{
++    wl.cover_timer = 0;
++    cover(wl.vc);
++    return G_SOURCE_REMOVE;
++}
++
++void vmlab_wl_uncover(VirtualConsole *vc)
++{
++    if (!vmlab_wl_active(vc) || wl.uncovered) {
++        return;
++    }
++    wl.uncovered = true;
++    wl_surface_attach(wl.surface, NULL, 0, 0);
++    wl_surface_commit(wl.surface);
++    /* (should the window's size stay as it is) */
++    wl.cover_timer = g_timeout_add(500, cover_cb, NULL);
++}
++
++/*
++ * GTK draws the window. Once that is at the window's new size the picture goes back on it. (A
++ * draw at the old size can come first, the one the frame callback set off: the picture put back
++ * then would cover the window again before it has its new size.)
++ */
++void vmlab_wl_cover(VirtualConsole *vc)
++{
++    GtkWidget *area;
++
++    if (!wl.uncovered || !vmlab_wl_active(vc)) {
++        return;
++    }
++    area = vc->gfx.drawing_area;
++    if (gtk_widget_get_allocated_width(area) != wl.aw ||
++        gtk_widget_get_allocated_height(area) != wl.ah) {
++        cover(vc);
++    }
++}
++
+ /* The guest changed that part of its picture. False: GTK is to draw it. */
+ bool vmlab_wl_update(VirtualConsole *vc, int x, int y, int w, int h)
+ {
+     if (!vmlab_wl_active(vc)) {
+         return false;
+     }
++    if (wl.uncovered) {
++        return true;            /* shown whole when the picture is back (vmlab_wl_cover) */
++    }
+     if (!wl.w || surface_width(vc->gfx.ds) != wl.fbw || surface_height(vc->gfx.ds) != wl.fbh) {
+         vmlab_wl_layout(vc);
+     }
+@@ -650,4 +715,12 @@
+ {
+ }
+ 
++void vmlab_wl_uncover(VirtualConsole *vc)
++{
++}
++
++void vmlab_wl_cover(VirtualConsole *vc)
++{
++}
++
+ #endif
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -250,6 +250,8 @@
+ void vmlab_wl_layout(VirtualConsole *vc);
+ bool vmlab_wl_update(VirtualConsole *vc, int x, int y, int w, int h);
+ void vmlab_wl_switch(VirtualConsole *vc);
++void vmlab_wl_uncover(VirtualConsole *vc);
++void vmlab_wl_cover(VirtualConsole *vc);
+ /* and what it asks of ui/gtk.c */
+ void gd_vmlab_rescale(VirtualConsole *vc);
+ void gd_vmlab_layout_changed(VirtualConsole *vc);

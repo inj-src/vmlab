@@ -1,0 +1,14 @@
+cua-driver     textedit FAIL   29.1s turns=16 $0.349  <<missing>>
+cua-driver     textedit PASS   85.2s turns=47 $0.457  vmlab benchmark 42
+cua-driver     calc     PASS   15.3s turns=4 $0.047  running
+cua-driver     calc     PASS   28.5s turns=6 $0.075  running
+cua-driver     form     PASS   13.2s turns=5 $0.060  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     form     PASS   12.7s turns=5 $0.049  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     export   PASS  104.9s turns=59 $0.573  bench export ok
+cua-driver     export   PASS   38.8s turns=18 $0.213  bench export ok
+cua-driver     folder   PASS   21.3s turns=13 $0.128  yes
+cua-driver     folder   PASS   26.5s turns=14 $0.146  yes
+cua-driver     vscode   PASS   76.2s turns=47 $0.408  console.log('vmlab')
+cua-driver     vscode   PASS   27.5s turns=13 $0.136  console.log('vmlab')
+cua-driver     version  PASS   18.8s turns=11 $0.137  real=26.7.1
+cua-driver     version  PASS   11.6s turns=7 $0.088  real=26.7.1

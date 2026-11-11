@@ -1,0 +1,1741 @@
+libdecor-cairo: vmlab: the title bar looks like GTK's Yaru-dark header bar, with a full screen button
+
+For the Mac VM's window (mac26.sh), whose title bar this plugin draws: the same height, colours,
+title font (VMLAB_DECOR_FONT, a Pango font name, in bold; VMLAB_DECOR_FONT_AA=rgba for subpixel
+text), round buttons and icons (vmlab-icons.h, made by ../gen-icons.py from the desktop's icon
+theme) as the Windows VM's GTK title bar, so the two windows match. One more button, left of
+minimize, makes the window full screen. No title bar is drawn while the window is full screen.
+
+Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
+
+--- a/src/plugins/cairo/libdecor-cairo.c
++++ b/src/plugins/cairo/libdecor-cairo.c
+@@ -35,6 +35,8 @@
+ #include <stdio.h>
+ #include <errno.h>
+ #include <limits.h>
++#include <math.h>
++#include <stdlib.h>
+ #include <wayland-cursor.h>
+ 
+ #include "libdecor-plugin.h"
+@@ -47,20 +49,41 @@
+ 
+ #include "common/libdecor-cairo-blur.h"
+ 
++#include "vmlab-icons.h"
++
++/*
++ * vmlab: this plugin draws the title bar of GTK 3's Yaru-dark header bar (the one QEMU's GTK
++ * window has), with cairo and pango only: no GTK in the process. All sizes are in the
++ * desktop's units, measured on a GTK window at 100%.
++ *
++ * VMLAB_DECOR_FONT       the desktop's font ("Ubuntu Sans 11"); the title is its bold
++ * VMLAB_DECOR_FONT_AA    "rgba" for subpixel text, as the desktop's setting says
++ *
++ * Left of the window's buttons is a round one that makes the window full screen. A full
++ * screen window has no title bar: the way back is the window's program's (a key).
++ */
+ static const size_t SHADOW_MARGIN = 24;	/* graspable part of the border */
+-static const size_t TITLE_HEIGHT = 24;
+-static const size_t BUTTON_WIDTH = 32;
+-static const size_t SYM_DIM = 14;
+-
+-static const uint32_t COL_TITLE = 0xFF080706;
+-static const uint32_t COL_TITLE_INACT = 0xFF303030;
+-static const uint32_t COL_BUTTON_MIN = 0xFFFFBB00;
+-static const uint32_t COL_BUTTON_MAX = 0xFF238823;
+-static const uint32_t COL_BUTTON_CLOSE = 0xFFFB6542;
+-static const uint32_t COL_BUTTON_INACT = 0xFF404040;
+-static const uint32_t COL_SYM = 0xFFF4F4EF;
+-static const uint32_t COL_SYM_ACT = 0xFF20322A;
+-static const uint32_t COL_SYM_INACT = 0xFF909090;
++static const size_t TITLE_HEIGHT = 39;
++static const size_t BUTTON_WIDTH = 34;	/* from one window button's centre to the next */
++
++/* centres of the buttons, from the bar's right edge and from its top */
++static const int CLOSE_CENTRE = 18;
++static const int FULLSCREEN_CENTRE = 129;
++static const double BUTTON_CENTRE_Y = 19;
++static const double WINDOW_BUTTON_RADIUS = 11;
++static const double ROUND_BUTTON_RADIUS = 15;
++static const double CORNER_RADIUS = 8;	/* the bar's top corners, of a window that is not maximized */
++
++/* greys of the bar: the window with the keyboard, and any other */
++struct palette {
++	double bg, highlight, border, fg;
++};
++static const struct palette PALETTE_ACTIVE = { 34 / 255., 49 / 255., 24 / 255., 247 / 255. };
++static const struct palette PALETTE_BACKDROP = { 44 / 255., 58 / 255., 28 / 255., 181 / 255. };
++
++/* the round button under the pointer, and held down: fill and rim */
++static const double ROUND_BUTTON_HOVER[2] = { 60 / 255., 24 / 255. };
++static const double ROUND_BUTTON_PRESSED[2] = { 21 / 255., 10 / 255. };
+ 
+ static const uint32_t DOUBLE_CLICK_TIME_MS = 400;
+ 
+@@ -123,6 +146,7 @@
+ 	BUTTON_MIN,
+ 	BUTTON_MAX,
+ 	BUTTON_CLOSE,
++	BUTTON_FULLSCREEN,
+ };
+ 
+ enum composite_mode {
+@@ -137,7 +161,6 @@
+ 
+ 	struct wl_seat *wl_seat;
+ 	struct wl_pointer *wl_pointer;
+-
+ 	struct wl_surface *cursor_surface;
+ 	struct wl_cursor *current_cursor;
+ 	int cursor_scale;
+@@ -247,6 +270,7 @@
+ 		struct border_component min;
+ 		struct border_component max;
+ 		struct border_component close;
++		struct border_component fullscreen;
+ 	} title_bar;
+ 
+ 	/* store pre-processed shadow tile */
+@@ -279,6 +303,7 @@
+ 	int cursor_size;
+ 
+ 	PangoFontDescription *font;
++	bool subpixel_text;
+ };
+ 
+ static const char *libdecor_cairo_proxy_tag = "libdecor-cairo";
+@@ -352,6 +377,9 @@
+ update_local_cursor(struct seat *seat);
+ 
+ static void
++draw_decoration(struct libdecor_frame_cairo *frame_cairo);
++
++static void
+ libdecor_plugin_cairo_destroy(struct libdecor_plugin *plugin)
+ {
+ 	struct libdecor_plugin_cairo *plugin_cairo =
+@@ -454,6 +482,9 @@
+ 	init_client_component(&frame_cairo->title_bar.close,
+ 			      &frame_cairo->title_bar.title,
+ 			      BUTTON_CLOSE);
++	init_client_component(&frame_cairo->title_bar.fullscreen,
++			      &frame_cairo->title_bar.title,
++			      BUTTON_FULLSCREEN);
+ 	init_server_component(&frame_cairo->shadow,
+ 			      SHADOW);
+ }
+@@ -1029,7 +1060,8 @@
+ static void
+ ensure_title_bar_surfaces(struct libdecor_frame_cairo *frame_cairo)
+ {
+-	frame_cairo->title_bar.title.opaque = true;
++	/* its top corners are round, and see-through outside the curve */
++	frame_cairo->title_bar.title.opaque = false;
+ 	ensure_component(frame_cairo, &frame_cairo->title_bar.title);
+ 
+ 	frame_cairo->title_bar.min.opaque = true;
+@@ -1042,6 +1074,26 @@
+ 	ensure_component(frame_cairo, &frame_cairo->title_bar.close);
+ }
+ 
++/* in the title bar's own units, from its left edge */
++static int
++button_centre_x(struct libdecor_frame_cairo *frame_cairo, enum component component)
++{
++	int width = libdecor_frame_get_content_width(&frame_cairo->frame);
++
++	switch (component) {
++	case BUTTON_CLOSE:
++		return width - CLOSE_CENTRE;
++	case BUTTON_MAX:
++		return width - CLOSE_CENTRE - (int)BUTTON_WIDTH;
++	case BUTTON_MIN:
++		return width - CLOSE_CENTRE - 2 * (int)BUTTON_WIDTH;
++	case BUTTON_FULLSCREEN:
++		return width - FULLSCREEN_CENTRE;
++	default:
++		return 0;
++	}
++}
++
+ static void
+ calculate_component_size(struct libdecor_frame_cairo *frame_cairo,
+ 			 enum component component,
+@@ -1075,23 +1127,27 @@
+ 		*component_width = content_width;
+ 		*component_height = TITLE_HEIGHT;
+ 		return;
++	/*
++	 * The buttons: where a press counts, not what is drawn. A window button takes its
++	 * column of the bar from the top row down, and the close button the corner too, so
++	 * that the pointer pushed against a screen edge still hits it.
++	 */
+ 	case BUTTON_MIN:
+-		*component_x = content_width - 3 * BUTTON_WIDTH;
+-		*component_y = 0;
+-		*component_width = BUTTON_WIDTH;
+-		*component_height = TITLE_HEIGHT;
+-		return;
+ 	case BUTTON_MAX:
+-		*component_x = content_width - 2 * BUTTON_WIDTH;
+-		*component_y = 0;
+-		*component_width = BUTTON_WIDTH;
+-		*component_height = TITLE_HEIGHT;
+-		return;
+ 	case BUTTON_CLOSE:
+-		*component_x = content_width - BUTTON_WIDTH;
++		*component_x = button_centre_x(frame_cairo, component)
++			       - (int)BUTTON_WIDTH / 2;
+ 		*component_y = 0;
+-		*component_width = BUTTON_WIDTH;
+-		*component_height = TITLE_HEIGHT;
++		*component_width = component == BUTTON_CLOSE ?
++			content_width - *component_x : (int)BUTTON_WIDTH;
++		*component_height = TITLE_HEIGHT - 3;
++		return;
++	case BUTTON_FULLSCREEN:
++		*component_x = button_centre_x(frame_cairo, component)
++			       - (int)ROUND_BUTTON_RADIUS;
++		*component_y = (int)(BUTTON_CENTRE_Y - ROUND_BUTTON_RADIUS);
++		*component_width = 2 * (int)ROUND_BUTTON_RADIUS;
++		*component_height = 2 * (int)ROUND_BUTTON_RADIUS;
+ 		return;
+ 	}
+ 
+@@ -1111,73 +1167,221 @@
+ 	return 0;
+ }
+ 
++/* text as the desktop draws it */
++static PangoLayout *
++create_text_layout(struct libdecor_plugin_cairo *plugin_cairo,
++		   cairo_t *cr,
++		   const PangoFontDescription *font,
++		   const char *text)
++{
++	PangoLayout *layout = pango_cairo_create_layout(cr);
++	PangoContext *context = pango_layout_get_context(layout);
++	cairo_font_options_t *options = cairo_font_options_create();
++
++	if (plugin_cairo->subpixel_text) {
++		cairo_font_options_set_antialias(options, CAIRO_ANTIALIAS_SUBPIXEL);
++		cairo_font_options_set_subpixel_order(options, CAIRO_SUBPIXEL_ORDER_RGB);
++	} else {
++		cairo_font_options_set_antialias(options, CAIRO_ANTIALIAS_GRAY);
++	}
++	cairo_font_options_set_hint_style(options, CAIRO_HINT_STYLE_SLIGHT);
++	cairo_font_options_set_hint_metrics(options, CAIRO_HINT_METRICS_ON);
++	pango_cairo_context_set_font_options(context, options);
++	pango_cairo_context_set_resolution(context, 96);
++	cairo_font_options_destroy(options);
++
++	pango_layout_set_font_description(layout, font);
++	pango_layout_set_text(layout, text, -1);
++
++	return layout;
++}
++
+ static void
+-draw_title_text(struct libdecor_frame_cairo *frame_cairo,
+-		cairo_t *cr,
+-		const int *title_width,
+-		bool active)
++set_grey(cairo_t *cr, double grey, double alpha)
+ {
+-	const uint32_t col_title = active ? COL_TITLE : COL_TITLE_INACT;
+-	const uint32_t col_title_text = active ? COL_SYM : COL_SYM_INACT;
++	cairo_set_source_rgba(cr, grey, grey, grey, alpha);
++}
+ 
+-	PangoLayout *layout;
++/* one of vmlab-icons.h, its top left corner at x, y */
++static void
++draw_icon(cairo_t *cr,
++	  const unsigned char *const *icon,
++	  int scale,
++	  double x,
++	  double y)
++{
++	int mask_scale = MIN(MAX(scale, 1), VMLAB_ICON_SCALES);
++	int dim = VMLAB_ICON_UNITS * mask_scale;
++	cairo_surface_t *mask;
+ 
+-	/* title fade out at buttons */
+-	const int fade_width = 5 * BUTTON_WIDTH;
+-	int fade_start;
+-	cairo_pattern_t *fade;
+-
+-	/* text position and dimensions */
+-	int text_extents_width, text_extents_height;
+-	double text_x, text_y;
+-	double text_width, text_height;
++	mask = cairo_image_surface_create_for_data(
++			(unsigned char *) icon[mask_scale - 1], CAIRO_FORMAT_A8,
++			dim, dim,
++			cairo_format_stride_for_width(CAIRO_FORMAT_A8, dim));
++	cairo_surface_set_device_scale(mask, mask_scale, mask_scale);
++	cairo_mask_surface(cr, mask, x, y);
++	cairo_surface_destroy(mask);
++}
+ 
++static void
++draw_title_text(struct libdecor_frame_cairo *frame_cairo,
++		cairo_t *cr,
++		int title_width,
++		int right_limit,
++		const struct palette *palette)
++{
++	static const int margin = 6;
++	PangoLayout *layout;
++	int text_width, text_height;
++	int text_x, text_y;
++	int room = right_limit - 2 * margin;
+ 	const char *title;
+ 
+ 	title = libdecor_frame_get_title((struct libdecor_frame*) frame_cairo);
+-	if (!title)
++	if (!title || room <= 0)
+ 		return;
+ 
+-	layout = pango_cairo_create_layout(cr);
+-
+-	pango_layout_set_text(layout,
+-			      title,
+-			      -1);
+-	pango_layout_set_font_description(layout, frame_cairo->plugin_cairo->font);
+-	pango_layout_get_size(layout, &text_extents_width, &text_extents_height);
+-
+-	/* set text position and dimensions */
+-	text_width = text_extents_width / PANGO_SCALE;
+-	text_height = text_extents_height / PANGO_SCALE;
+-	text_x = *title_width / 2.0 - text_width / 2.0;
+-	text_x += MIN(0.0, ((*title_width - fade_width) - (text_x + text_width)));
+-	text_x = MAX(text_x, BUTTON_WIDTH);
+-	text_y = TITLE_HEIGHT / 2.0 - text_height / 2.0;
++	layout = create_text_layout(frame_cairo->plugin_cairo, cr,
++				    frame_cairo->plugin_cairo->font, title);
++	pango_layout_get_pixel_size(layout, &text_width, &text_height);
++	if (text_width > room) {
++		pango_layout_set_width(layout, room * PANGO_SCALE);
++		pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
++		pango_layout_get_pixel_size(layout, &text_width, &text_height);
++	}
++
++	/* in the middle of the window, unless the buttons are in the way */
++	text_x = (title_width - text_width) / 2;
++	text_x = MIN(text_x, right_limit - margin - text_width);
++	text_x = MAX(text_x, margin);
++	text_y = ((int)TITLE_HEIGHT - 1 - text_height) / 2;
+ 
+-	/* draw title text */
+ 	cairo_move_to(cr, text_x, text_y);
+-	cairo_set_rgba32(cr, &col_title_text);
++	set_grey(cr, palette->fg, 1);
+ 	pango_cairo_show_layout(cr, layout);
+ 
+-	/* draw fade-out from title text to buttons */
+-	fade_start = *title_width - fade_width;
+-	fade = cairo_pattern_create_linear(fade_start, 0,
+-					   fade_start + 2 * BUTTON_WIDTH, 0);
+-	cairo_pattern_add_color_stop_rgba(fade, 0,
+-					  red(&col_title),
+-					  green(&col_title),
+-					  blue(&col_title),
+-					  0);
+-	cairo_pattern_add_color_stop_rgb(fade, 1,
+-					 red(&col_title),
+-					 green(&col_title),
+-					 blue(&col_title));
+-	cairo_rectangle(cr, fade_start, 0, fade_width, TITLE_HEIGHT);
+-	cairo_set_source(cr, fade);
++	g_object_unref(layout);
++}
++
++static void
++draw_window_button(struct libdecor_frame_cairo *frame_cairo,
++		   cairo_t *cr,
++		   struct border_component *button,
++		   const unsigned char *const *icon,
++		   bool usable,
++		   bool window_active,
++		   const struct palette *palette,
++		   int scale)
++{
++	const double x = button_centre_x(frame_cairo, button->type);
++	double disc = window_active ? 0.10 : 0;
++
++	if (usable && frame_cairo->active == button) {
++		/* under the pointer; held down */
++		disc = 0.15;
++		if (frame_cairo->grab == button && frame_cairo->focus == button)
++			disc = 0.25;
++	}
++
++	if (disc > 0) {
++		cairo_arc(cr, x, BUTTON_CENTRE_Y, WINDOW_BUTTON_RADIUS, 0, 2 * M_PI);
++		set_grey(cr, palette->fg, disc);
++		cairo_fill(cr);
++	}
++
++	set_grey(cr, palette->fg, usable ? 1 : 0.5);
++	draw_icon(cr, icon, scale,
++		  x - VMLAB_ICON_UNITS / 2, BUTTON_CENTRE_Y - VMLAB_ICON_UNITS / 2);
++}
++
++static void
++draw_round_button(struct libdecor_frame_cairo *frame_cairo,
++		  cairo_t *cr,
++		  struct border_component *button,
++		  const unsigned char *const *icon,
++		  const struct palette *palette,
++		  int scale)
++{
++	const double x = button_centre_x(frame_cairo, button->type);
++	const double *look = NULL;
++
++	if (frame_cairo->active == button)
++		look = frame_cairo->grab == button && frame_cairo->focus == button ?
++			ROUND_BUTTON_PRESSED : ROUND_BUTTON_HOVER;
++
++	if (look) {
++		cairo_arc(cr, x, BUTTON_CENTRE_Y, ROUND_BUTTON_RADIUS, 0, 2 * M_PI);
++		set_grey(cr, look[0], 1);
++		cairo_fill(cr);
++		cairo_arc(cr, x, BUTTON_CENTRE_Y, ROUND_BUTTON_RADIUS - 0.5, 0, 2 * M_PI);
++		set_grey(cr, look[1], 1);
++		cairo_set_line_width(cr, 1);
++		cairo_stroke(cr);
++	}
++
++	set_grey(cr, palette->fg, 1);
++	draw_icon(cr, icon, scale,
++		  x - VMLAB_ICON_UNITS / 2, BUTTON_CENTRE_Y - VMLAB_ICON_UNITS / 2);
++}
++
++/* the bar's outline: its top corners round when the window is not maximized or tiled */
++static void
++title_bar_path(cairo_t *cr, double width, double height, double radius)
++{
++	cairo_new_path(cr);
++	cairo_move_to(cr, 0, height);
++	cairo_arc(cr, radius, radius, radius, M_PI, 1.5 * M_PI);
++	cairo_arc(cr, width - radius, radius, radius, 1.5 * M_PI, 2 * M_PI);
++	cairo_line_to(cr, width, height);
++	cairo_close_path(cr);
++}
++
++/* the whole bar: its buttons are drawn here, not as components of their own */
++static void
++draw_title_bar_content(struct libdecor_frame_cairo *frame_cairo,
++		       cairo_t *cr,
++		       int width,
++		       int scale)
++{
++	enum libdecor_window_state state =
++		libdecor_frame_get_window_state(&frame_cairo->frame);
++	bool active = state & LIBDECOR_WINDOW_STATE_ACTIVE;
++	const struct palette *palette = active ? &PALETTE_ACTIVE : &PALETTE_BACKDROP;
++	double radius =
++		frame_cairo->decoration_type == DECORATION_TYPE_ALL ? CORNER_RADIUS : 0;
++	int leftmost = button_centre_x(frame_cairo, BUTTON_FULLSCREEN) -
++		       (int)ROUND_BUTTON_RADIUS;
++
++	/* a light line along the top edge, the bar's grey from one row below it */
++	title_bar_path(cr, width, TITLE_HEIGHT, radius);
++	cairo_clip(cr);
++	set_grey(cr, palette->highlight, 1);
++	cairo_paint(cr);
++	cairo_save(cr);
++	cairo_translate(cr, 0, 1);
++	title_bar_path(cr, width, TITLE_HEIGHT, radius);
++	set_grey(cr, palette->bg, 1);
++	cairo_fill(cr);
++	cairo_restore(cr);
++	cairo_rectangle(cr, 0, TITLE_HEIGHT - 1, width, 1);
++	set_grey(cr, palette->border, 1);
+ 	cairo_fill(cr);
+ 
+-	cairo_pattern_destroy(fade);
+-	g_object_unref(layout);
++	draw_round_button(frame_cairo, cr, &frame_cairo->title_bar.fullscreen,
++			  vmlab_icon_fullscreen, palette, scale);
++
++	draw_window_button(frame_cairo, cr, &frame_cairo->title_bar.min,
++			   vmlab_icon_minimize, minimizable(frame_cairo),
++			   active, palette, scale);
++	draw_window_button(frame_cairo, cr, &frame_cairo->title_bar.max,
++			   (state & LIBDECOR_WINDOW_STATE_MAXIMIZED) ?
++				vmlab_icon_restore : vmlab_icon_maximize,
++			   resizable(frame_cairo), active, palette, scale);
++	draw_window_button(frame_cairo, cr, &frame_cairo->title_bar.close,
++			   vmlab_icon_close, closeable(frame_cairo),
++			   active, palette, scale);
++
++	draw_title_text(frame_cairo, cr, width, leftmost, palette);
+ }
+ 
+ static void
+@@ -1187,60 +1391,23 @@
+ 		       int component_height,
+ 		       enum component component)
+ {
+-	struct buffer *buffer;
+-	cairo_surface_t *surface = NULL;
+-	int width = 0, height = 0;
++	struct buffer *buffer = border_component->server.buffer;
++	cairo_surface_t *surface;
+ 	int scale;
+ 	cairo_t *cr;
+ 
+-	/* button symbol origin */
+-	const double x = BUTTON_WIDTH / 2 - SYM_DIM / 2 + 0.5;
+-	const double y = TITLE_HEIGHT / 2 - SYM_DIM / 2 + 0.5;
+-
+-	enum libdecor_window_state state;
+-
+-	bool active;
+-
+-	uint32_t col_title;
+-
+-	bool cap_min, cap_max, cap_close;
+-
+-	/* capabilities of decorations */
+-	cap_min = minimizable(frame_cairo);
+-	cap_max = resizable(frame_cairo);
+-	cap_close = closeable(frame_cairo);
+-
+ 	scale = border_component_get_scale(border_component);
+ 
+-	state = libdecor_frame_get_window_state((struct libdecor_frame *) frame_cairo);
+-
+-	active = state & LIBDECOR_WINDOW_STATE_ACTIVE;
+-
+-	col_title = active ? COL_TITLE : COL_TITLE_INACT;
++	surface = cairo_image_surface_create_for_data(
++			  buffer->data, CAIRO_FORMAT_ARGB32,
++			  buffer->buffer_width, buffer->buffer_height,
++			  cairo_format_stride_for_width(
++				  CAIRO_FORMAT_ARGB32,
++				  buffer->buffer_width)
++			  );
++	cairo_surface_set_device_scale(surface, scale, scale);
+ 
+ 	/* clear buffer */
+-	switch (border_component->composite_mode) {
+-	case COMPOSITE_SERVER:
+-		buffer = border_component->server.buffer;
+-
+-		surface = cairo_image_surface_create_for_data(
+-				  buffer->data, CAIRO_FORMAT_ARGB32,
+-				  buffer->buffer_width, buffer->buffer_height,
+-				  cairo_format_stride_for_width(
+-					  CAIRO_FORMAT_ARGB32,
+-					  buffer->buffer_width)
+-				  );
+-		cairo_surface_set_device_scale(surface, scale, scale);
+-		width = buffer->width;
+-		height = buffer->height;
+-		break;
+-	case COMPOSITE_CLIENT:
+-		surface = cairo_surface_reference(border_component->client.image);
+-		width = cairo_image_surface_get_width(surface);
+-		height = cairo_image_surface_get_height(surface);
+-		break;
+-	}
+-
+ 	cr = cairo_create(surface);
+ 	cairo_save(cr);
+ 	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
+@@ -1248,135 +1415,22 @@
+ 	cairo_paint(cr);
+ 	cairo_restore(cr);
+ 
+-	/* background */
+-	switch (component) {
+-	case NONE:
+-		break;
+-	case SHADOW:
++	if (component == TITLE) {
++		draw_title_bar_content(frame_cairo, cr, component_width, scale);
++	} else if (component == SHADOW) {
++		int component_x, component_y, component_width, component_height;
++
+ 		if (frame_cairo->decoration_type != DECORATION_TYPE_TILED)
+ 			render_shadow(cr,
+ 				      frame_cairo->shadow_blur,
+ 				      -(int)SHADOW_MARGIN/2,
+ 				      -(int)SHADOW_MARGIN/2,
+-				      width + SHADOW_MARGIN,
+-				      height + SHADOW_MARGIN,
++				      buffer->width + SHADOW_MARGIN,
++				      buffer->height + SHADOW_MARGIN,
+ 				      64,
+ 				      64);
+-		break;
+-	case TITLE:
+-		cairo_set_rgba32(cr, &col_title);
+-		cairo_paint(cr);
+-		break;
+-	case BUTTON_MIN:
+-		if (cap_min && frame_cairo->active == &frame_cairo->title_bar.min)
+-			cairo_set_rgba32(cr, active ? &COL_BUTTON_MIN : &COL_BUTTON_INACT);
+-		else
+-			cairo_set_rgba32(cr, &col_title);
+-		cairo_paint(cr);
+-		break;
+-	case BUTTON_MAX:
+-		if (cap_max && frame_cairo->active == &frame_cairo->title_bar.max)
+-			cairo_set_rgba32(cr, active ? &COL_BUTTON_MAX : &COL_BUTTON_INACT);
+-		else
+-			cairo_set_rgba32(cr, &col_title);
+-		cairo_paint(cr);
+-		break;
+-	case BUTTON_CLOSE:
+-		if (cap_close && frame_cairo->active == &frame_cairo->title_bar.close)
+-			cairo_set_rgba32(cr, active ? &COL_BUTTON_CLOSE : &COL_BUTTON_INACT);
+-		else
+-			cairo_set_rgba32(cr, &col_title);
+-		cairo_paint(cr);
+-		break;
+-	}
+ 
+-	/* button symbols */
+-	/* https://www.cairographics.org/FAQ/#sharp_lines */
+-	cairo_set_line_width(cr, 1);
+-
+-	switch (component) {
+-	case TITLE:
+-		draw_title_text(frame_cairo,cr, &component_width, active);
+-		break;
+-	case BUTTON_MIN:
+-		if (!active) {
+-			/* inactive: use single desaturated color */
+-			cairo_set_rgba32(cr, &COL_SYM_INACT);
+-		} else {
+-			if (!cap_min ||
+-			    frame_cairo->active == &frame_cairo->title_bar.min) {
+-				/* active (a.k.a. prelight) */
+-				cairo_set_rgba32(cr, &COL_SYM_ACT);
+-			} else {
+-				/* normal */
+-				cairo_set_rgba32(cr, &COL_SYM);
+-			}
+-		}
+-		cairo_move_to(cr, x, y + SYM_DIM - 1);
+-		cairo_rel_line_to(cr, SYM_DIM - 1, 0);
+-		cairo_stroke(cr);
+-		break;
+-	case BUTTON_MAX:
+-		if (!active) {
+-			/* inactive: use single desaturated color */
+-			cairo_set_rgba32(cr, &COL_SYM_INACT);
+-		} else {
+-			if (!cap_max ||
+-			    frame_cairo->active == &frame_cairo->title_bar.max) {
+-				/* active (a.k.a. prelight) */
+-				cairo_set_rgba32(cr, &COL_SYM_ACT);
+-			} else {
+-				/* normal */
+-				cairo_set_rgba32(cr, &COL_SYM);
+-			}
+-		}
+-
+-		if (state & LIBDECOR_WINDOW_STATE_MAXIMIZED) {
+-			const size_t small = 12;
+-			cairo_rectangle(cr,
+-					x,
+-					y + SYM_DIM - small,
+-					small - 1,
+-					small - 1);
+-			cairo_move_to(cr,
+-				      x + SYM_DIM - small,
+-				      y + SYM_DIM - small);
+-			cairo_line_to(cr, x + SYM_DIM - small, y);
+-			cairo_rel_line_to(cr, small - 1, 0);
+-			cairo_rel_line_to(cr, 0, small - 1);
+-			cairo_line_to(cr, x + small - 1, y + small - 1);
+-		} else {
+-			cairo_rectangle(cr, x, y, SYM_DIM - 1, SYM_DIM - 1);
+-		}
+-		cairo_stroke(cr);
+-		break;
+-	case BUTTON_CLOSE:
+-		if (!active) {
+-			/* inactive: use single desaturated color */
+-			cairo_set_rgba32(cr, &COL_SYM_INACT);
+-		} else {
+-			if (!cap_close ||
+-			    frame_cairo->active == &frame_cairo->title_bar.close) {
+-				/* active (a.k.a. prelight) */
+-				cairo_set_rgba32(cr, &COL_SYM_ACT);
+-			} else {
+-				/* normal */
+-				cairo_set_rgba32(cr, &COL_SYM);
+-			}
+-		}
+-		cairo_move_to(cr, x, y);
+-		cairo_rel_line_to(cr, SYM_DIM - 1, SYM_DIM - 1);
+-		cairo_move_to(cr, x + SYM_DIM - 1, y);
+-		cairo_line_to(cr, x, y + SYM_DIM - 1);
+-		cairo_stroke(cr);
+-		break;
+-	default:
+-		break;
+-	}
+-
+-	/* mask the toplevel surface */
+-	if (component == SHADOW) {
+-		int component_x, component_y, component_width, component_height;
++		/* mask the toplevel surface */
+ 		calculate_component_size(frame_cairo, component,
+ 					 &component_x, &component_y,
+ 					 &component_width, &component_height);
+@@ -1458,124 +1512,24 @@
+ }
+ 
+ static void
+-ensure_component_realized_client(struct libdecor_frame_cairo *frame_cairo,
+-				 struct border_component *border_component,
+-				 int component_width,
+-				 int component_height,
+-				 int scale)
+-{
+-	cairo_surface_t *old_image;
+-
+-	old_image = border_component->client.image;
+-	if (old_image) {
+-		int cairo_buffer_width;
+-		int cairo_buffer_height;
+-		double x_scale;
+-		double y_scale;
+-
+-		cairo_surface_get_device_scale(old_image, &x_scale, &y_scale);
+-		cairo_buffer_width =
+-			(int) round(cairo_image_surface_get_width(old_image) *
+-				    x_scale);
+-		cairo_buffer_height =
+-			(int) round(cairo_image_surface_get_height(old_image) *
+-				    y_scale);
+-
+-		if (cairo_buffer_width != component_width * scale ||
+-		    cairo_buffer_height != component_height * scale) {
+-			cairo_surface_destroy(old_image);
+-			border_component->client.image = NULL;
+-		}
+-	}
+-
+-	if (!border_component->client.image) {
+-		cairo_surface_t *new_image;
+-
+-		new_image =
+-			cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+-						   component_width * scale,
+-						   component_height * scale);
+-		cairo_surface_set_device_scale(new_image, scale, scale);
+-		border_component->client.image = new_image;
+-	}
+-
+-}
+-
+-static void
+-ensure_component_realized(struct libdecor_frame_cairo *frame_cairo,
+-			  struct border_component *border_component,
+-			  int component_width,
+-			  int component_height,
+-			  int scale)
+-{
+-	switch (border_component->composite_mode) {
+-	case COMPOSITE_SERVER:
+-		ensure_component_realized_server(frame_cairo, border_component,
+-						 component_width,
+-						 component_height,
+-						 scale);
+-		break;
+-	case COMPOSITE_CLIENT:
+-		ensure_component_realized_client(frame_cairo, border_component,
+-						 component_width,
+-						 component_height,
+-						 scale);
+-		break;
+-	}
+-}
+-
+-static cairo_t *
+-create_cairo_for_parent(struct border_component *border_component)
+-{
+-	struct border_component *parent =
+-		border_component->client.parent_component;
+-	struct buffer *buffer;
+-	struct border_component *server_component;
+-	cairo_surface_t *parent_surface;
+-	cairo_t *cr;
+-
+-	switch (parent->composite_mode) {
+-	case COMPOSITE_SERVER:
+-		buffer = parent->server.buffer;
+-		parent_surface = cairo_image_surface_create_for_data(
+-				  buffer->data, CAIRO_FORMAT_ARGB32,
+-				  buffer->buffer_width, buffer->buffer_height,
+-				  cairo_format_stride_for_width(
+-					  CAIRO_FORMAT_ARGB32,
+-					  buffer->buffer_width)
+-				  );
+-		cr = cairo_create(parent_surface);
+-		cairo_surface_destroy(parent_surface);
+-		cairo_scale(cr, buffer->scale, buffer->scale);
+-		return cr;
+-	case COMPOSITE_CLIENT:
+-		cr = cairo_create(parent->client.image);
+-		server_component = get_server_component(border_component);
+-		cairo_scale(cr,
+-			    server_component->server.scale,
+-			    server_component->server.scale);
+-		return cr;
+-	}
+-	return NULL;
+-}
+-
+-static void
+ draw_border_component(struct libdecor_frame_cairo *frame_cairo,
+ 		      struct border_component *border_component)
+ {
+ 	enum component component = border_component->type;
+ 	struct buffer *buffer;
+-	cairo_t *cr;
+ 	int component_x;
+ 	int component_y;
+ 	int component_width;
+ 	int component_height;
+ 	int scale;
+-	struct border_component *child_component;
+ 
+ 	if (border_component->is_hidden)
+ 		return;
+ 
++	/* the buttons are part of the title bar's picture (draw_title_bar_content) */
++	if (border_component->composite_mode == COMPOSITE_CLIENT)
++		return;
++
+ 	calculate_component_size(frame_cairo, component,
+ 				 &component_x, &component_y,
+ 				 &component_width, &component_height);
+@@ -1583,44 +1537,29 @@
+ 	set_component_input_region(frame_cairo, border_component);
+ 
+ 	scale = border_component_get_scale(border_component);
+-	ensure_component_realized(frame_cairo, border_component,
+-				  component_width,
+-				  component_height,
+-				  scale);
++	ensure_component_realized_server(frame_cairo, border_component,
++					 component_width,
++					 component_height,
++					 scale);
+ 
+ 	draw_component_content(frame_cairo,
+ 			       border_component,
+ 			       component_width, component_height,
+ 			       component);
+ 
+-	switch(border_component->composite_mode) {
+-	case COMPOSITE_SERVER:
+-		buffer = border_component->server.buffer;
+-		wl_surface_attach(border_component->server.wl_surface,
+-				  buffer->wl_buffer,
+-				  0, 0);
+-		wl_surface_set_buffer_scale(border_component->server.wl_surface,
+-					    buffer->scale);
+-		buffer->in_use = true;
+-		wl_surface_commit(border_component->server.wl_surface);
+-		wl_surface_damage_buffer(border_component->server.wl_surface, 0, 0,
+-					 component_width * scale,
+-					 component_height * scale);
+-		wl_subsurface_set_position(border_component->server.wl_subsurface,
+-					   component_x, component_y);
+-		break;
+-	case COMPOSITE_CLIENT:
+-		cr = create_cairo_for_parent(border_component);
+-		cairo_set_source_surface(cr,
+-					 border_component->client.image,
+-					 component_x, component_y);
+-		cairo_paint(cr);
+-		cairo_destroy(cr);
+-		break;
+-	}
+-
+-	wl_list_for_each(child_component, &border_component->child_components, link)
+-		draw_border_component(frame_cairo, child_component);
++	buffer = border_component->server.buffer;
++	wl_surface_attach(border_component->server.wl_surface,
++			  buffer->wl_buffer,
++			  0, 0);
++	wl_surface_set_buffer_scale(border_component->server.wl_surface,
++				    buffer->scale);
++	buffer->in_use = true;
++	wl_surface_damage_buffer(border_component->server.wl_surface, 0, 0,
++				 component_width * scale,
++				 component_height * scale);
++	wl_surface_commit(border_component->server.wl_surface);
++	wl_subsurface_set_position(border_component->server.wl_subsurface,
++				   component_x, component_y);
+ }
+ 
+ static void
+@@ -2364,7 +2303,11 @@
+ 			case BUTTON_MIN:
+ 			case BUTTON_MAX:
+ 			case BUTTON_CLOSE:
++			case BUTTON_FULLSCREEN:
+ 				frame_cairo->grab = frame_cairo->active;
++				/* the look of a button held down */
++				draw_decoration(frame_cairo);
++				libdecor_frame_toplevel_commit(&frame_cairo->frame);
+ 				break;
+ 			default:
+ 				break;
+@@ -2396,6 +2339,10 @@
+ 					if (closeable(frame_cairo))
+ 						libdecor_frame_close(&frame_cairo->frame);
+ 					break;
++				case BUTTON_FULLSCREEN:
++					libdecor_frame_set_fullscreen(&frame_cairo->frame,
++								      NULL);
++					break;
+ 				default:
+ 					break;
+ 				}
+@@ -2701,6 +2648,7 @@
+ {
+ 	struct libdecor_plugin_cairo *plugin_cairo;
+ 	struct wl_display *wl_display;
++	const char *font_name;
+ 
+ 	plugin_cairo = zalloc(sizeof *plugin_cairo);
+ 	libdecor_plugin_init(&plugin_cairo->plugin,
+@@ -2719,11 +2667,14 @@
+ 		plugin_cairo->cursor_size = 24;
+ 	}
+ 
+-	/* define a sens-serif bold font at symbol size */
+-	plugin_cairo->font = pango_font_description_new();
+-	pango_font_description_set_family(plugin_cairo->font, "sans");
++	/* the desktop's font: the title in its bold */
++	font_name = getenv("VMLAB_DECOR_FONT");
++	if (!font_name || !*font_name)
++		font_name = "Ubuntu Sans 11";
++	plugin_cairo->font = pango_font_description_from_string(font_name);
+ 	pango_font_description_set_weight(plugin_cairo->font, PANGO_WEIGHT_BOLD);
+-	pango_font_description_set_absolute_size(plugin_cairo->font, SYM_DIM * PANGO_SCALE);
++	plugin_cairo->subpixel_text =
++		streql(getenv("VMLAB_DECOR_FONT_AA"), "rgba");
+ 
+ 	wl_display = libdecor_get_wl_display(context);
+ 	plugin_cairo->wl_registry = wl_display_get_registry(wl_display);
+--- a/src/plugins/cairo/vmlab-icons.h
++++ b/src/plugins/cairo/vmlab-icons.h
+@@ -0,0 +1,803 @@
++/* made by gen-icons.py: alpha masks of the symbolic icons, 16 units at scales 1 to 3 */
++#define VMLAB_ICON_UNITS 16
++#define VMLAB_ICON_SCALES 3
++/* window-close-symbolic, /usr/share/icons/Yaru/scalable/ui/window-close-symbolic.svg */
++static const unsigned char vmlab_icon_close_1[256] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,2,0,0,0,0,0,0,2,0,0,0,0,0,0,0,2,188,99,0,0,
++	0,0,99,188,2,0,0,0,0,0,0,0,98,252,105,0,0,98,252,105,0,0,0,0,
++	0,0,0,0,0,98,252,105,98,252,105,0,0,0,0,0,0,0,0,0,0,0,99,252,
++	252,99,0,0,0,0,0,0,0,0,0,0,0,0,99,252,252,99,0,0,0,0,0,0,
++	0,0,0,0,0,98,252,105,98,252,105,0,0,0,0,0,0,0,0,0,98,252,105,0,
++	0,98,252,105,0,0,0,0,0,0,0,2,187,99,0,0,0,0,99,188,2,0,0,0,
++	0,0,0,0,2,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_close_2[1024] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,
++	0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	44,226,74,0,0,0,0,0,0,0,0,0,0,75,227,44,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,8,227,255,248,74,0,0,0,0,0,0,0,0,75,248,255,227,
++	8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,72,247,255,249,78,0,0,0,
++	0,0,0,72,247,255,249,78,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,72,247,255,249,78,0,0,0,0,72,247,255,249,78,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,72,247,255,249,78,0,0,72,247,255,249,78,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,72,247,255,249,78,
++	72,247,255,249,78,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,75,248,255,248,248,255,248,75,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,72,247,255,255,249,78,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,72,247,255,
++	255,249,78,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,75,248,255,248,248,255,248,75,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,72,247,255,249,78,72,247,255,249,78,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,72,247,255,249,78,0,
++	0,72,247,255,249,78,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,72,247,255,249,78,0,0,0,0,72,247,255,249,78,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,72,247,255,249,78,0,0,0,0,0,0,72,247,255,249,78,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8,226,255,248,75,0,0,0,0,
++	0,0,0,0,75,248,255,227,8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	43,226,75,0,0,0,0,0,0,0,0,0,0,75,227,44,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,8,0,0,0,0,0,0,0,0,0,0,0,0,8,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_close_3[2304] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,98,237,53,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,53,238,98,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,98,253,255,240,55,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,50,237,255,254,105,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,18,238,255,255,255,239,53,0,0,0,0,0,0,
++	0,0,0,0,0,0,53,239,255,255,255,238,18,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,
++	0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,
++	0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,
++	0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,
++	0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,
++	0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,
++	50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,53,239,255,255,255,239,
++	239,255,255,255,239,53,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,
++	255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,
++	255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,
++	255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,
++	255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,53,239,255,255,255,239,
++	239,255,255,255,239,53,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,
++	50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,
++	0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,
++	0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,
++	0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,
++	0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,
++	0,0,0,0,0,50,237,255,255,255,240,55,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,17,237,255,255,255,239,53,0,0,0,0,0,0,
++	0,0,0,0,0,0,53,239,255,255,255,238,18,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,97,253,255,240,55,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,50,237,255,254,104,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,98,237,53,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,53,238,98,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,18,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,18,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++static const unsigned char *const vmlab_icon_close[3] = { vmlab_icon_close_1, vmlab_icon_close_2, vmlab_icon_close_3 };
++/* window-maximize-symbolic, /usr/share/icons/Yaru/scalable/ui/window-maximize-symbolic.svg */
++static const unsigned char vmlab_icon_maximize_1[256] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,
++	255,255,255,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,255,0,0,0,0,
++	0,0,0,0,255,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,
++	0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,0,0,0,255,0,0,0,0,
++	0,0,0,0,255,0,0,0,0,0,0,255,0,0,0,0,0,0,0,0,255,0,0,0,
++	0,0,0,255,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_maximize_2[1024] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,
++	0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,
++	0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,
++	0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,
++	0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,255,255,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_maximize_3[2304] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++static const unsigned char *const vmlab_icon_maximize[3] = { vmlab_icon_maximize_1, vmlab_icon_maximize_2, vmlab_icon_maximize_3 };
++/* window-restore-symbolic, /usr/share/icons/Yaru/scalable/ui/window-restore-symbolic.svg */
++static const unsigned char vmlab_icon_restore_1[256] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,128,
++	128,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,0,0,0,0,
++	0,0,0,0,255,255,255,255,255,255,0,128,0,0,0,0,0,0,0,0,255,0,0,0,
++	0,255,0,128,0,0,0,0,0,0,0,0,255,0,0,0,0,255,0,128,0,0,0,0,
++	0,0,0,0,255,0,0,0,0,255,0,128,0,0,0,0,0,0,0,0,255,0,0,0,
++	0,255,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_restore_2[1024] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,128,128,128,128,128,128,128,128,128,128,128,128,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,128,128,128,128,128,128,128,128,128,128,128,128,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,128,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,0,0,128,128,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,
++	255,255,255,255,0,0,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,255,255,0,0,128,128,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,255,255,0,0,128,128,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,
++	0,0,255,255,0,0,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,255,255,0,0,128,128,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,255,255,0,0,128,128,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,
++	0,0,255,255,0,0,128,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,0,0,0,0,0,0,0,0,255,255,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,
++	255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_restore_3[2304] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,128,128,128,128,128,
++	128,128,128,128,128,128,128,128,128,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,128,128,128,128,128,
++	128,128,128,128,128,128,128,128,128,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128,128,128,128,128,128,
++	128,128,128,128,128,128,128,128,128,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,128,128,128,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++static const unsigned char *const vmlab_icon_restore[3] = { vmlab_icon_restore_1, vmlab_icon_restore_2, vmlab_icon_restore_3 };
++/* window-minimize-symbolic, /usr/share/icons/Yaru/scalable/ui/window-minimize-symbolic.svg */
++static const unsigned char vmlab_icon_minimize_1[256] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,
++	255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_minimize_2[1024] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_minimize_3[2304] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,
++	255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++static const unsigned char *const vmlab_icon_minimize[3] = { vmlab_icon_minimize_1, vmlab_icon_minimize_2, vmlab_icon_minimize_3 };
++/* view-fullscreen-symbolic, /usr/share/icons/Yaru/scalable/actions/view-fullscreen-symbolic.svg */
++static const unsigned char vmlab_icon_fullscreen_1[256] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,218,255,255,255,251,0,0,0,0,0,0,0,0,0,0,0,0,0,60,233,255,0,
++	0,0,0,0,0,0,0,0,0,0,0,60,233,66,255,0,0,0,0,0,0,0,0,0,
++	0,0,60,233,66,0,255,0,0,0,0,0,0,0,0,0,0,60,233,66,0,0,218,0,
++	0,0,0,0,0,0,0,0,0,206,64,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,64,207,0,0,0,0,0,0,0,0,0,0,218,0,0,60,233,66,0,
++	0,0,0,0,0,0,0,0,0,255,0,60,233,66,0,0,0,0,0,0,0,0,0,0,
++	0,255,60,233,66,0,0,0,0,0,0,0,0,0,0,0,0,255,233,66,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,251,255,255,255,218,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_fullscreen_2[1024] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,197,255,255,255,255,255,255,255,255,241,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,195,255,255,255,
++	255,255,255,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,21,210,255,255,255,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,210,255,215,255,255,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,
++	210,255,215,24,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,21,210,255,215,24,0,255,255,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,21,210,255,215,24,0,0,255,255,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,210,255,215,
++	24,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,21,210,255,215,24,0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,21,210,255,215,24,0,0,0,0,0,195,194,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,204,255,211,22,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,195,203,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,22,198,195,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,211,255,203,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,197,195,0,0,0,0,
++	0,21,210,255,215,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,255,255,0,0,0,0,21,210,255,215,24,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,21,210,255,215,24,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,21,210,
++	255,215,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,255,255,0,21,210,255,215,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,255,255,21,210,255,215,24,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,210,255,215,24,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,255,255,255,215,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,255,255,255,195,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,241,255,255,255,255,255,
++	255,255,255,194,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_fullscreen_3[2304] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,134,249,255,255,255,255,255,255,255,255,255,255,255,255,197,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,243,255,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,133,249,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,249,255,248,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,133,243,132,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,145,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,243,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,131,242,144,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,145,244,133,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,157,255,255,241,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,157,255,255,255,144,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,134,244,133,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,249,255,248,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,255,249,133,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,255,255,242,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,196,255,255,255,255,255,255,255,255,255,255,255,255,249,132,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++static const unsigned char *const vmlab_icon_fullscreen[3] = { vmlab_icon_fullscreen_1, vmlab_icon_fullscreen_2, vmlab_icon_fullscreen_3 };

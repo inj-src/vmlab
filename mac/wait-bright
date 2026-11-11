@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# wait-bright [max_secs]: block until the screen is no longer a mostly-black boot/progress screen
+# (mean luminance > 45 for 3 polls in a row), e.g. Setup Assistant or the desktop. Saves a screenshot.
+max=${1:-7000}; d=$(mktemp -d); t0=$SECONDS; ok=0
+while (( SECONDS - t0 < max )); do
+  if virsh -c qemu:///system screenshot macos "$d/s.ppm" >/dev/null 2>&1; then
+    m=$(/vmlab/tools/vmlab/mac/venv/bin/python -W ignore -c "
+from PIL import Image, ImageStat; print(int(ImageStat.Stat(Image.open('$d/s.ppm').convert('L')).mean[0]))")
+    if (( m > 45 )); then ok=$((ok+1)); else ok=0; fi
+    (( ok >= 3 )) && { echo "bright (mean=$m) after $((SECONDS - t0))s"; /vmlab/tools/vmlab/mac/shot >/dev/null; rm -rf "$d"; exit 0; }
+  fi
+  sleep 20
+done
+rm -rf "$d"; echo timeout; exit 1

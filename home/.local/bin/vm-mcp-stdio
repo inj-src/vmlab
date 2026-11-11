@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# vm-mcp-stdio <win|mac> <remote command>: run a stdio MCP server inside a vmlab VM over SSH.
+set -euo pipefail
+ip=$(vm ip "$1"); port=$(vm port "$1"); shift
+exec ssh -T -i "$HOME/.ssh/vmlab_ed25519" -o UserKnownHostsFile="$HOME/.cache/vmlab/known_hosts" \
+  -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=30 -p "$port" "dev@$ip" "$@"

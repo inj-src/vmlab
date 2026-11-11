@@ -1,0 +1,61 @@
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 8d312d6..cef4ace 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -138,6 +138,12 @@ static struct touch_slot touch_slots[INPUT_EVENT_SLOTS_MAX];
+ 
+ bool gtk_use_gl_area;
+ 
++/*
++ * vmlab: beside egl-headless (VMLAB_WINDOW set, system/vl.c) the window is a plain 2D one,
++ * which shows the frames egl-headless reads back, whatever display_opengl says.
++ */
++#define display_opengl (display_opengl && !g_getenv("VMLAB_WINDOW"))
++
+ static void gd_grab_pointer(VirtualConsole *vc, const char *reason);
+ static void gd_ungrab_pointer(GtkDisplayState *s);
+ static void gd_grab_keyboard(VirtualConsole *vc, const char *reason);
+@@ -233,7 +239,9 @@ static void gd_update_caption(GtkDisplayState *s)
+     bool is_paused = !runstate_is_running();
+     int i;
+ 
+-    if (qemu_name) {
++    if (g_getenv("VMLAB_WINDOW_TITLE")) {
++        prefix = g_strdup(g_getenv("VMLAB_WINDOW_TITLE"));
++    } else if (qemu_name) {
+         prefix = g_strdup_printf("QEMU (%s)", qemu_name);
+     } else {
+         prefix = g_strdup_printf("QEMU");
+@@ -736,6 +744,12 @@ static gboolean gd_window_close(GtkWidget *widget, GdkEvent *event,
+         allow_close = false;
+     }
+ 
++    /* vmlab: closing the window asks the guest to shut down, as a power button does */
++    if (g_getenv("VMLAB_WINDOW_CLOSE_POWERS_DOWN")) {
++        qemu_system_powerdown_request();
++        return TRUE;
++    }
++
+     if (allow_close) {
+         qmp_quit(NULL);
+     }
+@@ -2826,7 +2840,8 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+     dir = get_relocated_path(CONFIG_QEMU_ICONDIR);
+     gtk_icon_theme_prepend_search_path(theme, dir);
+     g_free(dir);
+-    g_set_prgname("qemu");
++    /* vmlab: the desktop finds a window's icon and name through this id */
++    g_set_prgname(g_getenv("VMLAB_WINDOW_APP_ID") ?: "qemu");
+ 
+     s->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+     s->vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+@@ -2859,7 +2874,8 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+     qemu_add_mouse_mode_change_notifier(&s->mouse_mode_notifier);
+     s->vmse = qemu_add_vm_change_state_handler(gd_change_runstate, s);
+ 
+-    gtk_window_set_icon_name(GTK_WINDOW(s->window), "qemu");
++    gtk_window_set_icon_name(GTK_WINDOW(s->window),
++                             g_getenv("VMLAB_WINDOW_APP_ID") ?: "qemu");
+ 
+     gd_create_menus(s, opts);
+ 

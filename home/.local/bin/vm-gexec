@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Run a PowerShell command in a Windows VM via qemu-guest-agent (no network needed). Usage: vm-gexec <domain> '<ps command>'
+set -euo pipefail
+dom=$1; shift; cmd=$*
+b64=$(printf '%s' "$cmd" | iconv -t UTF-16LE | base64 -w0)
+pid=$(virsh -c qemu:///system qemu-agent-command "$dom" "{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"powershell.exe\",\"arg\":[\"-NoProfile\",\"-EncodedCommand\",\"$b64\"],\"capture-output\":true}}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["return"]["pid"])')
+for _ in $(seq 600); do
+  r=$(virsh -c qemu:///system qemu-agent-command "$dom" "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":$pid}}")
+  if python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1])["return"]["exited"] else 1)' "$r"; then
+    python3 -c 'import json,sys,base64; r=json.loads(sys.argv[1])["return"]; sys.stdout.write(base64.b64decode(r.get("out-data","")).decode("utf-8","replace")); sys.stderr.write(base64.b64decode(r.get("err-data","")).decode("utf-8","replace")); sys.exit(r.get("exitcode",0))' "$r"
+    exit $?
+  fi
+  sleep 1
+done
+echo "timeout" >&2; exit 124

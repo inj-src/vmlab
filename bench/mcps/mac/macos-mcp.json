@@ -1,0 +1,14 @@
+{
+  "about": "NOT INSTALLED (removed after round 2, 2026-11-10). CursorTouch/MacOS-MCP 0.4.7: LaunchAgent com.vmlab.macos-mcp serves streamable-http in the GUI session, reached via: vm tunnel mac 8000 18000",
+  "server": {
+    "type": "http",
+    "url": "http://127.0.0.1:18000/mcp",
+    "headers": {
+      "Authorization": "Bearer 47230941913d346aa8c94759b4c1f3c1d9a05f780d55b3cd"
+    }
+  },
+  "deny": [
+    "mcp__cu__Shell",
+    "mcp__cu__Scrape"
+  ]
+}

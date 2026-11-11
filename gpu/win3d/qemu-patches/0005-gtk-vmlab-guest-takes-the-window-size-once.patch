@@ -1,0 +1,95 @@
+gtk: vmlab: the guest takes the window's size once, and no menu bar
+
+VMLAB_WINDOW_FIXED_SIZE=first: the window's size is offered to the guest (its width a multiple
+of 8, its height even) until the guest's picture comes in that size; from then on nothing more
+is offered. The guest so runs at the size the window opened with, drawn a guest pixel to a
+window pixel (a picture short of the window by less than those steps is drawn unscaled, not
+stretched by a fraction), and a later resize of the window scales it (zoom-to-fit) without
+changing the guest's mode. A fixed WxH (0003) is scaled whenever the window is not exactly
+that size, which on a 1920x1080 screen is always (the title bar takes 37 rows): soft.
+The VMLAB_WINDOW window also opens without QEMU's menu bar, whose rows the guest gets
+(Ctrl+Alt+M shows it; VMLAB_WINDOW_MENUBAR keeps it).
+
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -1398,6 +1398,9 @@
+         dpy_window.gl = DISPLAY_GL_MODE_OFF;
+         dpy_window.u.gtk.has_zoom_to_fit = true;
+         dpy_window.u.gtk.zoom_to_fit = true;
++        /* no menu bar (Ctrl+Alt+M shows it): its rows are the guest's; VMLAB_WINDOW_MENUBAR keeps it */
++        dpy_window.u.gtk.has_show_menubar = true;
++        dpy_window.u.gtk.show_menubar = g_getenv("VMLAB_WINDOW_MENUBAR") != NULL;
+         qemu_display_early_init(&dpy_window);
+     }
+ }
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -144,6 +144,14 @@
+  */
+ #define display_opengl (display_opengl && !g_getenv("VMLAB_WINDOW"))
+ 
++/*
++ * vmlab: VMLAB_WINDOW_FIXED_SIZE=first. The size last offered to the guest, and whether the
++ * guest has taken it (its picture came in that size): from then on nothing more is offered,
++ * so the guest keeps the size the window opened with and the window scales it.
++ */
++static int vmlab_first_w, vmlab_first_h;
++static bool vmlab_first_taken;
++
+ static void gd_grab_pointer(VirtualConsole *vc, const char *reason);
+ static void gd_ungrab_pointer(GtkDisplayState *s);
+ static void gd_grab_keyboard(VirtualConsole *vc, const char *reason);
+@@ -572,6 +580,14 @@
+ 
+     trace_gd_switch(vc->label, surface_width(surface), surface_height(surface));
+ 
++    if (!vmlab_first_taken && vmlab_first_w && !surface_is_placeholder(surface) &&
++        surface_width(surface) == vmlab_first_w &&
++        surface_height(surface) == vmlab_first_h) {
++        vmlab_first_taken = true;
++        info_report("vmlab: the guest took the window's size, %dx%d: pinned",
++                    vmlab_first_w, vmlab_first_h);
++    }
++
+     if (vc->gfx.surface) {
+         cairo_surface_destroy(vc->gfx.surface);
+         vc->gfx.surface = NULL;
+@@ -838,7 +854,20 @@
+      * is, and the window scales it. Otherwise every change of the window's size is offered to
+      * the guest as a mode. (Offering nothing leaves Windows at 1024x768.)
+      */
+-    if (g_getenv("VMLAB_WINDOW_FIXED_SIZE")) {
++    if (!g_strcmp0(g_getenv("VMLAB_WINDOW_FIXED_SIZE"), "first")) {
++        /*
++         * vmlab: =first offers the window's size (its width a multiple of 8 and its height
++         * even, which every guest takes) until the guest has taken one: a guest pixel is then
++         * a window pixel until the person resizes the window, which scales from then on.
++         */
++        width &= ~7;
++        height &= ~1;
++        if (vmlab_first_taken || width < 800 || height < 600) {
++            return;
++        }
++        vmlab_first_w = width;
++        vmlab_first_h = height;
++    } else if (g_getenv("VMLAB_WINDOW_FIXED_SIZE")) {
+         int fixed_w, fixed_h;
+ 
+         if (sscanf(g_getenv("VMLAB_WINDOW_FIXED_SIZE"), "%dx%d", &fixed_w, &fixed_h) != 2 ||
+@@ -926,6 +955,16 @@
+     } else if (vc->s->free_scale) {
+         double sx, sy;
+ 
++        /*
++         * vmlab: a picture of the window's size, or short of it by less than the step sizes
++         * are offered in (gd_set_ui_size), is drawn a guest pixel to a window pixel
++         */
++        if (g_getenv("VMLAB_WINDOW") && fbw <= ww && fbh <= wh &&
++            ww - fbw < 8 && wh - fbh < 2) {
++            vc->gfx.scale_x = vc->gfx.scale_y = 1.0;
++            return;
++        }
++
+         sx = (double)ww / fbw;
+         sy = (double)wh / fbh;
+         if (vc->s->keep_aspect_ratio) {

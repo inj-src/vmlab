@@ -1,0 +1,66 @@
+vmlab (this lab), 2026-11-11: yttrium: publish buffer copies into stream-output buffers
+
+Chrome's WebGL (ANGLE on Direct3D 11) drew nothing from STATIC_DRAW vertex
+buffers: the WebGL Aquarium showed its clear colour and no fish. ANGLE fills
+such a buffer with CopySubresourceRegion from a staging buffer, and creates it
+as VERTEX_BUFFER | STREAM_OUTPUT. A stream-output buffer here is a device-local
+Venus buffer with a detached CPU shadow. resource_copy_region copied into the
+shadow and only marked it dirty, and draws bind the Venus buffer as it is, so
+they read zeros. transfer_unmap and buffer_subdata already publish what they
+write; the copy now does too.
+
+Applies after patches/mesa of vmlab-win3d 45ec46ca (release 0.1.2-alpha).
+Test: bench/gl-vertex.html through bench/page-shot.mjs (bufStatic and the
+cases after it).
+
+--- a/src/gallium/winsys/yttrium/gdi/yttrium_resource.c	2026-11-11 16:14:10.193146660 +0600
++++ b/src/gallium/winsys/yttrium/gdi/yttrium_resource.c	2026-11-11 16:14:10.194146664 +0600
+@@ -5006,6 +5006,48 @@
+       ydst->contents_serial++;
+       return;
+    }
++   /*
++    * A stream-output buffer the GPU has not written yet has a device-local
++    * Venus buffer and a detached CPU shadow, and draws bind the Venus buffer
++    * as it is: nothing uploads the shadow later.  transfer_unmap and
++    * buffer_subdata publish the range they wrote, and a copy into the shadow
++    * has to as well, or the draw reads zeros.  This is how ANGLE (Chrome's
++    * WebGL) fills every static vertex buffer: D3D11 CopySubresourceRegion
++    * from a staging buffer into a VERTEX_BUFFER | STREAM_OUTPUT buffer.
++    * vkCmdUpdateBuffer takes whole 32-bit words, so the range is widened to
++    * them; the shadow is current for the bytes around it.
++    */
++   if (buffer_copy && ydst->data && !ydst->gpu_buffer_written &&
++       (ydst->base.bind & PIPE_BIND_STREAM_OUTPUT) &&
++       !yttrium_resource_uses_mapped_venus_buffer(ydst) &&
++       ydst->venus.initialized && ydst->venus.buffer_backed &&
++       ydst->venus.buffer &&
++       (ydst->venus.buffer_usage & VK_BUFFER_USAGE_TRANSFER_DST_BIT) &&
++       (copy_path == YTTRIUM_TRACE_COPY_CPU_TO_CPU ||
++        copy_path == YTTRIUM_TRACE_COPY_BUFFER_TO_CPU) &&
++       dstx <= ydst->size && width <= ydst->size - dstx) {
++      const uint64_t publish_offset = (uint64_t)dstx & ~(uint64_t)3;
++      const uint64_t publish_end =
++         MIN2(align64((uint64_t)dstx + width, 4), ydst->size);
++      if (yttrium_venus_update_buffer(
++             screen->venus, &ydst->venus, publish_offset,
++             publish_end - publish_offset,
++             (const uint8_t *)ydst->data + publish_offset)) {
++         ydst->data_dirty = false;
++         ydst->venus.contents_initialized = true;
++      } else {
++         YTTRIUM_WARN("yttrium: buffer copy publication failed owner=yttrium_resource reason=stream-output-buffer-range-upload-failed action=fail-draw offset=0x%llx size=0x%llx resource_size=0x%llx\n",
++                      (unsigned long long)publish_offset,
++                      (unsigned long long)(publish_end - publish_offset),
++                      (unsigned long long)ydst->size);
++         InterlockedExchange(&yttrium_context(ctx)->draw_failure, 1);
++      }
++      ydst->contents_serial++;
++      yttrium_trace_copy_target(ctx, copy_id,
++                                YTTRIUM_TRACE_RESOURCE_COPY_COPIED, copy_path,
++                                ysrc, ydst, dstx, dsty, width, height);
++      return;
++   }
+    if (ydst && ydst->data &&
+        (copy_path == YTTRIUM_TRACE_COPY_CPU_TO_CPU ||
+         copy_path == YTTRIUM_TRACE_COPY_DISPLAY_IMAGE_TO_CPU ||

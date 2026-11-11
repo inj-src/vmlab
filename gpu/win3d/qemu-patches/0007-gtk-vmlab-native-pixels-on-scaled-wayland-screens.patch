@@ -1,0 +1,924 @@
+gtk: vmlab: the picture at the screen's own pixels on a scaled Wayland screen
+
+GTK 3 knows whole-number scales only: on a screen the desktop scales by 1.25 it draws at 2
+and the compositor shrinks that, so the guest's picture was resampled twice and soft. The
+VMLAB_WINDOW window now shows the picture on a Wayland sub-surface of its own over the
+drawing area (ui/gtk-vmlab-wl.c): the guest's frame as it is, in shared memory, with a
+viewport (wp_viewporter) for its size in the desktop's units, at the scale the compositor
+tells for the window (wp_fractional_scale_v1). GTK keeps the window, the title bar and all
+input (the sub-surface has an empty input region).
+
+- VMLAB_WINDOW_FIXED_SIZE=first offers the guest the drawing area's size in the screen's
+  pixels (1536x832 units at 1.25: 1920x1040), and again, once, when the window fills a
+  screen of another scale (maximized or full screen there, and settled: a window dragged
+  across is small until it is maximized again, and until then the picture is scaled to fit).
+  The picture starts on a whole screen pixel inside the window
+  (mutter puts the window's surface on one, and samples a surface exactly only where it
+  starts on one and has its own size), so a guest pixel is a screen pixel: measured on mutter
+  46 at 1.0, 1.25 and 1.5, every pixel of the screen's picture equal to the guest's.
+- VMLAB_WINDOW_SCALE_FILE names a file kept at the scale in percent, for whoever sets the
+  guest's own scaling (win-venus.sh scale-watch).
+- The host's pointer, which wears the guest's shape (0004), is as large as the guest means
+  it: GDK shows pointer images at whole-number scales only, so at 1.25 the image is made 1.6
+  times the guest's and shown at 2.
+- VMLAB_WINDOW_NATIVE_SCALE=0 turns it off. Under X11 (GDK_BACKEND=x11) nothing changes.
+
+The protocol headers are made at build time (wayland-scanner, wayland-protocols); without
+them the file compiles to nothing and GTK draws the picture as before.
+
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -242,4 +242,16 @@
+ 
+ void gd_update_scale(VirtualConsole *vc, int ww, int wh, int fbw, int fbh);
+ 
++/* vmlab: ui/gtk-vmlab-wl.c, the picture at the screen's own pixels on a scaled Wayland screen */
++bool vmlab_wl_active(VirtualConsole *vc);
++void vmlab_wl_guest_size(VirtualConsole *vc, int *width, int *height);
++double vmlab_wl_cursor_zoom(VirtualConsole *vc, int *buffer_scale);
++void vmlab_wl_offsets(VirtualConsole *vc, int *x, int *y);
++void vmlab_wl_layout(VirtualConsole *vc);
++bool vmlab_wl_update(VirtualConsole *vc, int x, int y, int w, int h);
++void vmlab_wl_switch(VirtualConsole *vc);
++/* and what it asks of ui/gtk.c */
++void gd_vmlab_rescale(VirtualConsole *vc);
++void gd_vmlab_layout_changed(VirtualConsole *vc);
++
+ #endif /* UI_GTK_H */
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -151,6 +151,10 @@
+  */
+ static int vmlab_first_w, vmlab_first_h;
+ static bool vmlab_first_taken;
++/* vmlab: the guest's pointer shape as it gave it, and the zoom the host's pointer has it at */
++static QEMUCursor *vmlab_cursor;
++static double vmlab_cursor_zoom;
++static int vmlab_cursor_buffer_scale;
+ 
+ static void gd_grab_pointer(VirtualConsole *vc, const char *reason);
+ static void gd_ungrab_pointer(GtkDisplayState *s);
+@@ -449,6 +453,11 @@
+                                fbx, fby, 0, 0, fbx, fby, fbw, fbh);
+     }
+ 
++    /* vmlab: shown at the screen's own pixels, past GTK's drawing (gtk-vmlab-wl.c) */
++    if (vmlab_wl_update(vc, fbx, fby, fbw, fbh)) {
++        return;
++    }
++
+     wx1 = floor(fbx * vc->gfx.scale_x);
+     wy1 = floor(fby * vc->gfx.scale_y);
+ 
+@@ -560,9 +569,41 @@
+     pixbuf = gdk_pixbuf_new_from_data(rgba, GDK_COLORSPACE_RGB, true, 8,
+                                       c->width, c->height, c->width * 4,
+                                       NULL, NULL);
+-    cursor = gdk_cursor_new_from_pixbuf
+-        (gtk_widget_get_display(vc->gfx.drawing_area),
+-         pixbuf, c->hot_x, c->hot_y);
++    /*
++     * vmlab: as large on the screen as the guest means it. GDK shows a pointer image at a
++     * whole-number scale only, so on a screen scaled by 1.25 the image is made 1.6 times the
++     * guest's and shown at 2: 0.8 of the guest's size in the desktop's units, which the
++     * screen's 1.25 makes the guest's pixels again.
++     */
++    if (c != vmlab_cursor) {
++        cursor_ref(c);
++        cursor_unref(vmlab_cursor);
++        vmlab_cursor = c;
++    }
++    vmlab_cursor_zoom = vmlab_wl_cursor_zoom(vc, &vmlab_cursor_buffer_scale);
++    if (vmlab_cursor_zoom == 1.0 && vmlab_cursor_buffer_scale == 1) {
++        cursor = gdk_cursor_new_from_pixbuf
++            (gtk_widget_get_display(vc->gfx.drawing_area),
++             pixbuf, c->hot_x, c->hot_y);
++    } else {
++        double zoom = vmlab_cursor_zoom;
++        int bs = vmlab_cursor_buffer_scale;
++        cairo_surface_t *image = cairo_image_surface_create(
++            CAIRO_FORMAT_ARGB32, MAX(bs, (int)ceil(c->width * zoom)),
++            MAX(bs, (int)ceil(c->height * zoom)));
++        cairo_t *cr = cairo_create(image);
++
++        cairo_scale(cr, zoom, zoom);
++        gdk_cairo_set_source_pixbuf(cr, pixbuf, 0, 0);
++        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
++        cairo_paint(cr);
++        cairo_destroy(cr);
++        cairo_surface_set_device_scale(image, bs, bs);
++        cursor = gdk_cursor_new_from_surface
++            (gtk_widget_get_display(vc->gfx.drawing_area),
++             image, c->hot_x * zoom / bs, c->hot_y * zoom / bs);
++        cairo_surface_destroy(image);
++    }
+     g_object_unref(pixbuf);
+     g_free(rgba);
+     /* kept: gd_update_cursor() puts it back after a grab, a mode change... */
+@@ -575,6 +616,43 @@
+     }
+ }
+ 
++static void gd_set_ui_size(VirtualConsole *vc, gint width, gint height);
++
++/* vmlab: the picture's zoom in the window changed (gtk-vmlab-wl.c): the pointer's follows */
++void gd_vmlab_layout_changed(VirtualConsole *vc)
++{
++    int buffer_scale;
++
++    if (vmlab_cursor &&
++        (vmlab_wl_cursor_zoom(vc, &buffer_scale) != vmlab_cursor_zoom ||
++         buffer_scale != vmlab_cursor_buffer_scale)) {
++        gd_cursor_define(&vc->gfx.dcl, vmlab_cursor);
++    }
++}
++
++/*
++ * vmlab: the window is on a screen of another scale (gtk-vmlab-wl.c). A guest that keeps the
++ * size the window opened with (VMLAB_WINDOW_FIXED_SIZE=first) is offered this screen's pixels
++ * of the window, once, as when the window opened.
++ */
++void gd_vmlab_rescale(VirtualConsole *vc)
++{
++    if (!gtk_widget_get_realized(vc->gfx.drawing_area)) {
++        return;
++    }
++    if (!g_strcmp0(g_getenv("VMLAB_WINDOW_FIXED_SIZE"), "first")) {
++        vmlab_first_taken = false;
++        vmlab_first_w = vmlab_first_h = 0;
++    }
++    gd_set_ui_size(vc, gtk_widget_get_allocated_width(vc->gfx.drawing_area),
++                   gtk_widget_get_allocated_height(vc->gfx.drawing_area));
++    if (vmlab_first_w && vc->gfx.ds && !surface_is_placeholder(vc->gfx.ds) &&
++        surface_width(vc->gfx.ds) == vmlab_first_w &&
++        surface_height(vc->gfx.ds) == vmlab_first_h) {
++        vmlab_first_taken = true;       /* the guest has that size already */
++    }
++}
++
+ static void gd_switch(DisplayChangeListener *dcl,
+                       DisplaySurface *surface)
+ {
+@@ -644,6 +722,7 @@
+     } else {
+         gd_update_full_redraw(vc);
+     }
++    vmlab_wl_switch(vc);
+ }
+ 
+ static const DisplayChangeListenerOps dcl_ops = {
+@@ -861,10 +940,11 @@
+         /*
+          * vmlab: =first offers the window's size (its width a multiple of 8 and its height
+          * even, which every guest takes) until the guest has taken one: a guest pixel is then
+-         * a window pixel until the person resizes the window, which scales from then on.
++         * a window pixel until the person resizes the window, which scales from then on. On
++         * a scaled Wayland screen the size is the window's in that screen's pixels
++         * (gtk-vmlab-wl.c).
+          */
+-        width &= ~7;
+-        height &= ~1;
++        vmlab_wl_guest_size(vc, &width, &height);
+         if (vmlab_first_taken || width < 800 || height < 600) {
+             return;
+         }
+@@ -879,6 +959,8 @@
+         }
+         width = fixed_w;
+         height = fixed_h;
++    } else if (vmlab_wl_active(vc)) {
++        vmlab_wl_guest_size(vc, &width, &height);
+     }
+ 
+     info = *qemu_console_get_ui_info(vc->gfx.dcl.con);
+@@ -1083,6 +1165,14 @@
+ 
+     gd_update_monitor_refresh_rate(vc, vc->window ? vc->window : s->window);
+ 
++    /* vmlab: the picture is on a surface of its own over this one (gtk-vmlab-wl.c) */
++    vmlab_wl_layout(vc);
++    if (vmlab_wl_active(vc)) {
++        cairo_set_source_rgb(cr, 0, 0, 0);
++        cairo_paint(cr);
++        return TRUE;
++    }
++
+     fbw = surface_width(vc->gfx.ds);
+     fbh = surface_height(vc->gfx.ds);
+ 
+@@ -1154,6 +1244,7 @@
+     if (wh_widget > wh_surface) {
+         wy_offset = (wh_widget - wh_surface) / 2;
+     }
++    vmlab_wl_offsets(vc, &wx_offset, &wy_offset);
+ 
+     /*
+      * `motion` is reported in `widget` coordinates
+@@ -2433,10 +2524,22 @@
+ 
+ /** Window Creation **/
+ 
++/* vmlab: the drawing area has another size or place: the picture's follows (gtk-vmlab-wl.c) */
++static void gd_vmlab_size_allocate(GtkWidget *widget, GdkRectangle *allocation, void *opaque)
++{
++    VirtualConsole *vc = opaque;
++
++    if (vmlab_wl_active(vc)) {
++        vmlab_wl_layout(vc);
++    }
++}
++
+ static void gd_connect_vc_gfx_signals(VirtualConsole *vc)
+ {
+     g_signal_connect(vc->gfx.drawing_area, "draw",
+                      G_CALLBACK(gd_draw_event), vc);
++    g_signal_connect_after(vc->gfx.drawing_area, "size-allocate",
++                           G_CALLBACK(gd_vmlab_size_allocate), vc);
+ #if defined(CONFIG_OPENGL)
+     if (gtk_use_gl_area) {
+         /* wire up GtkGlArea events */
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -157,6 +157,26 @@
+   gtk_ss = ss.source_set()
+   gtk_ss.add(gtk, vte, pixman, files('gtk.c'))
+   gtk_ss.add(files('gtk-clipboard.c'))
++  # vmlab: the picture at the screen's own pixels on a scaled Wayland screen (gtk-vmlab-wl.c)
++  vmlab_wl = dependency('wayland-client', required: false, method: 'pkg-config')
++  vmlab_wlp = dependency('wayland-protocols', required: false, method: 'pkg-config')
++  vmlab_scanner = find_program('wayland-scanner', required: false)
++  if vmlab_wl.found() and vmlab_wlp.found() and vmlab_scanner.found()
++    vmlab_wlp_dir = vmlab_wlp.get_variable('pkgdatadir')
++    foreach p : [['viewporter', 'stable/viewporter/viewporter.xml'],
++                 ['fractional-scale-v1', 'staging/fractional-scale/fractional-scale-v1.xml']]
++      gtk_ss.add(custom_target('vmlab-' + p[0] + '-client-protocol.h',
++                               input: vmlab_wlp_dir / p[1],
++                               output: 'vmlab-' + p[0] + '-client-protocol.h',
++                               command: [vmlab_scanner, 'client-header', '@INPUT@', '@OUTPUT@']))
++      gtk_ss.add(custom_target('vmlab-' + p[0] + '-protocol.c',
++                               input: vmlab_wlp_dir / p[1],
++                               output: 'vmlab-' + p[0] + '-protocol.c',
++                               command: [vmlab_scanner, 'private-code', '@INPUT@', '@OUTPUT@']))
++    endforeach
++    gtk_ss.add(vmlab_wl)
++  endif
++  gtk_ss.add(files('gtk-vmlab-wl.c'))
+   gtk_ss.add(when: x11, if_true: files('x_keymap.c'))
+   gtk_ss.add(when: opengl, if_true: files('gtk-gl-area.c'))
+   gtk_ss.add(when: [x11, opengl], if_true: files('gtk-egl.c'))
+--- /dev/null
++++ b/ui/gtk-vmlab-wl.c
+@@ -0,0 +1,653 @@
++/*
++ * vmlab: the guest's picture at the screen's own pixels on a scaled Wayland screen.
++ *
++ * GTK 3 knows whole-number scales only. On a screen the desktop scales by 1.25 it draws the
++ * window at 2 and the compositor shrinks that, so a picture drawn through GTK is resampled
++ * twice and a guest pixel is never a screen pixel. Here the picture goes round GTK: a Wayland
++ * sub-surface over the drawing area holds the guest's frame as it is, with a viewport
++ * (wp_viewporter) that says how large it is in the desktop's units. At a guest size of the
++ * drawing area's size times the scale, a guest pixel is a screen pixel. The scale is the
++ * compositor's (wp_fractional_scale_v1, in 120ths), told for the window's own surface, and
++ * told again when the window moves to a screen of another scale.
++ *
++ * GTK keeps the window, its title bar and all input: the sub-surface takes no input (an empty
++ * input region), so the pointer and keys go to the drawing area under it as before.
++ *
++ * Used where VMLAB_WINDOW is set and GDK runs on Wayland; VMLAB_WINDOW_NATIVE_SCALE=0 turns it
++ * off (the picture then goes through GTK's drawing as before). VMLAB_WINDOW_SCALE_FILE names a
++ * file that is kept at the scale in percent ("125"), for whoever sets the guest's own scaling.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/error-report.h"
++#include "ui/console.h"
++#include "ui/gtk.h"
++
++#if defined(GDK_WINDOWING_WAYLAND) && __has_include("ui/vmlab-viewporter-client-protocol.h")
++
++#include <sys/mman.h>
++#include <wayland-client.h>
++#include "ui/vmlab-viewporter-client-protocol.h"
++#include "ui/vmlab-fractional-scale-v1-client-protocol.h"
++
++#define VMLAB_BUFFERS 3
++
++typedef struct VmlabBuffer {
++    struct wl_buffer *wl;
++    void *data;
++    size_t size;
++    int w, h;
++    bool busy;                  /* the compositor has it */
++    int x1, y1, x2, y2;         /* what changed since it was last filled */
++} VmlabBuffer;
++
++static struct {
++    bool tried, on;
++    VirtualConsole *vc;
++    struct wl_compositor *compositor;
++    struct wl_subcompositor *subcompositor;
++    struct wl_shm *shm;
++    struct wp_viewporter *viewporter;
++    struct wp_fractional_scale_manager_v1 *scales;
++    struct wp_fractional_scale_v1 *scale_of_window;
++    struct wl_surface *surface;
++    struct wl_subsurface *sub;
++    struct wp_viewport *viewport;
++    int scale120;               /* the screen's scale, in 120ths */
++    VmlabBuffer buf[VMLAB_BUFFERS];
++    bool pending;               /* a frame waits for a buffer */
++    int x, y, w, h;             /* where the picture is in the window's surface */
++    int ox, oy;                 /* and in the drawing area */
++    int fbw, fbh;               /* the picture's size as last laid out */
++    int aw, ah;                 /* the drawing area's size as last laid out */
++    bool rescale_wanted;        /* the guest has yet to take a size for this scale */
++    guint rescale_timer;
++} wl = { .scale120 = 120 };
++
++static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h);
++
++/* registry */
++
++static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
++                            const char *interface, uint32_t version)
++{
++    if (!strcmp(interface, wl_compositor_interface.name) && version >= 4) {
++        wl.compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
++    } else if (!strcmp(interface, wl_subcompositor_interface.name)) {
++        wl.subcompositor = wl_registry_bind(registry, name, &wl_subcompositor_interface, 1);
++    } else if (!strcmp(interface, wl_shm_interface.name)) {
++        wl.shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
++    } else if (!strcmp(interface, wp_viewporter_interface.name)) {
++        wl.viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
++    } else if (!strcmp(interface, wp_fractional_scale_manager_v1_interface.name)) {
++        wl.scales = wl_registry_bind(registry, name,
++                                     &wp_fractional_scale_manager_v1_interface, 1);
++    }
++}
++
++static void registry_global_remove(void *data, struct wl_registry *registry, uint32_t name)
++{
++}
++
++static const struct wl_registry_listener registry_listener = {
++    registry_global, registry_global_remove,
++};
++
++/* the screen's scale */
++
++static void write_scale_file(void)
++{
++    const char *path = g_getenv("VMLAB_WINDOW_SCALE_FILE");
++    g_autofree char *text = g_strdup_printf("%d\n", (wl.scale120 * 100 + 60) / 120);
++
++    if (path) {
++        g_file_set_contents(path, text, -1, NULL);
++    }
++}
++
++/*
++ * The guest takes a size for the screen's scale once the window fills that screen (maximized
++ * or full screen, as it opened) and has settled: a window moved to another screen changes its
++ * scale first and its size after, and one dragged there is small until it is maximized again.
++ * Until then the picture is scaled to fit.
++ */
++static gboolean rescale_cb(gpointer opaque)
++{
++    GdkWindow *top;
++
++    wl.rescale_timer = 0;
++    if (!wl.on || !wl.rescale_wanted) {
++        return G_SOURCE_REMOVE;
++    }
++    top = gtk_widget_get_window(gtk_widget_get_toplevel(wl.vc->gfx.drawing_area));
++    if (top && (gdk_window_get_state(top) &
++                (GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN))) {
++        wl.rescale_wanted = false;
++        gd_vmlab_rescale(wl.vc);
++    }
++    return G_SOURCE_REMOVE;
++}
++
++static void rescale_soon(void)
++{
++    if (wl.rescale_timer) {
++        g_source_remove(wl.rescale_timer);
++    }
++    wl.rescale_timer = g_timeout_add(300, rescale_cb, NULL);
++}
++
++static void scale_preferred(void *data, struct wp_fractional_scale_v1 *obj, uint32_t scale)
++{
++    if (scale < 60 || scale > 120 * 8 || (int)scale == wl.scale120) {
++        return;
++    }
++    wl.scale120 = scale;
++    info_report("vmlab: the screen's scale is %g", scale / 120.0);
++    write_scale_file();
++    vmlab_wl_layout(wl.vc);
++    wl.rescale_wanted = true;
++    rescale_soon();
++}
++
++static const struct wp_fractional_scale_v1_listener scale_listener = {
++    scale_preferred,
++};
++
++/* buffers */
++
++static void buffer_release(void *data, struct wl_buffer *buffer)
++{
++    VmlabBuffer *b = data;
++
++    b->busy = false;
++    if (wl.on && wl.pending) {
++        wl.pending = false;
++        vmlab_wl_present(wl.vc, 0, 0, 0, 0);
++    }
++}
++
++static const struct wl_buffer_listener buffer_listener = {
++    buffer_release,
++};
++
++static void buffer_free(VmlabBuffer *b)
++{
++    if (b->wl) {
++        wl_buffer_destroy(b->wl);
++        munmap(b->data, b->size);
++    }
++    memset(b, 0, sizeof(*b));
++}
++
++static bool buffer_make(VmlabBuffer *b, int w, int h)
++{
++    struct wl_shm_pool *pool;
++    size_t size = (size_t)w * h * 4;
++    int fd = memfd_create("vmlab-frame", MFD_CLOEXEC);
++    void *data;
++
++    if (fd < 0) {
++        return false;
++    }
++    if (ftruncate(fd, size) < 0) {
++        close(fd);
++        return false;
++    }
++    data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (data == MAP_FAILED) {
++        close(fd);
++        return false;
++    }
++    pool = wl_shm_create_pool(wl.shm, fd, size);
++    b->wl = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_XRGB8888);
++    wl_shm_pool_destroy(pool);
++    close(fd);
++    wl_buffer_add_listener(b->wl, &buffer_listener, b);
++    b->data = data;
++    b->size = size;
++    b->w = w;
++    b->h = h;
++    b->busy = false;
++    b->x1 = b->y1 = 0;          /* nothing of the picture is in it yet */
++    b->x2 = w;
++    b->y2 = h;
++    return true;
++}
++
++/* start and stop */
++
++static void vmlab_wl_stop(void)
++{
++    int i;
++
++    if (wl.rescale_timer) {
++        g_source_remove(wl.rescale_timer);
++        wl.rescale_timer = 0;
++    }
++    for (i = 0; i < VMLAB_BUFFERS; i++) {
++        buffer_free(&wl.buf[i]);
++    }
++    g_clear_pointer(&wl.viewport, wp_viewport_destroy);
++    g_clear_pointer(&wl.sub, wl_subsurface_destroy);
++    g_clear_pointer(&wl.surface, wl_surface_destroy);
++    g_clear_pointer(&wl.scale_of_window, wp_fractional_scale_v1_destroy);
++    wl.on = false;
++    wl.pending = false;
++    wl.w = wl.h = 0;
++}
++
++/* the window goes off the screen, and its Wayland surface with it: start again when it is back */
++static void window_unmapped(GtkWidget *window, gpointer opaque)
++{
++    if (wl.on) {
++        vmlab_wl_stop();
++        wl.tried = false;
++    }
++}
++
++static void vmlab_wl_start(VirtualConsole *vc)
++{
++    GtkWidget *window = gtk_widget_get_toplevel(vc->gfx.drawing_area);
++    GdkWindow *gdk_window = gtk_widget_get_window(window);
++    GdkDisplay *gdk_display = gtk_widget_get_display(window);
++    struct wl_display *display;
++    struct wl_display *wrapper;
++    struct wl_event_queue *queue;
++    struct wl_registry *registry;
++    struct wl_surface *parent;
++    struct wl_region *nothing;
++
++    if (wl.tried || !gdk_window || !gtk_widget_get_mapped(window)) {
++        return;
++    }
++    wl.tried = true;
++    if (!g_getenv("VMLAB_WINDOW") || !g_strcmp0(g_getenv("VMLAB_WINDOW_NATIVE_SCALE"), "0") ||
++        !GDK_IS_WAYLAND_DISPLAY(gdk_display)) {
++        return;
++    }
++    display = gdk_wayland_display_get_wl_display(gdk_display);
++    parent = gdk_wayland_window_get_wl_surface(gdk_window);
++    if (!display || !parent) {
++        return;
++    }
++
++    if (!wl.compositor) {
++        /*
++         * The globals are found on a queue of their own, so that GDK's events stay where GDK
++         * reads them, and then moved to the display's queue, which GDK's main loop reads:
++         * what is made from them answers there.
++         */
++        queue = wl_display_create_queue(display);
++        wrapper = wl_proxy_create_wrapper(display);
++        wl_proxy_set_queue((struct wl_proxy *)wrapper, queue);
++        registry = wl_display_get_registry(wrapper);
++        wl_proxy_wrapper_destroy(wrapper);
++        wl_registry_add_listener(registry, &registry_listener, NULL);
++        wl_display_roundtrip_queue(display, queue);
++        wl_display_roundtrip_queue(display, queue);
++        if (wl.compositor) {
++            wl_proxy_set_queue((struct wl_proxy *)wl.compositor, NULL);
++        }
++        if (wl.subcompositor) {
++            wl_proxy_set_queue((struct wl_proxy *)wl.subcompositor, NULL);
++        }
++        if (wl.shm) {
++            wl_proxy_set_queue((struct wl_proxy *)wl.shm, NULL);
++        }
++        if (wl.viewporter) {
++            wl_proxy_set_queue((struct wl_proxy *)wl.viewporter, NULL);
++        }
++        if (wl.scales) {
++            wl_proxy_set_queue((struct wl_proxy *)wl.scales, NULL);
++        }
++        wl_registry_destroy(registry);
++        wl_event_queue_destroy(queue);
++        g_signal_connect(window, "unmap", G_CALLBACK(window_unmapped), NULL);
++    }
++    if (!wl.compositor || !wl.subcompositor || !wl.shm || !wl.viewporter || !wl.scales) {
++        warn_report("vmlab: the compositor lacks a protocol for showing the picture at the "
++                    "screen's pixels (wp_viewporter, wp_fractional_scale_v1): GTK draws it");
++        return;
++    }
++
++    wl.vc = vc;
++    wl.surface = wl_compositor_create_surface(wl.compositor);
++    wl.sub = wl_subcompositor_get_subsurface(wl.subcompositor, wl.surface, parent);
++    wl_subsurface_set_desync(wl.sub);
++    wl.viewport = wp_viewporter_get_viewport(wl.viewporter, wl.surface);
++    nothing = wl_compositor_create_region(wl.compositor);
++    wl_surface_set_input_region(wl.surface, nothing);
++    wl_region_destroy(nothing);
++    wl.scale_of_window = wp_fractional_scale_manager_v1_get_fractional_scale(wl.scales, parent);
++    wp_fractional_scale_v1_add_listener(wl.scale_of_window, &scale_listener, NULL);
++    wl.on = true;
++    write_scale_file();
++    info_report("vmlab: the picture is shown at the screen's own pixels (a Wayland sub-surface)");
++}
++
++/* the interface */
++
++bool vmlab_wl_active(VirtualConsole *vc)
++{
++    return wl.on && wl.vc == vc;
++}
++
++/* the largest size in pixels, a multiple of step, that is a whole size no larger than logical */
++static int pixels_for(int logical, int step)
++{
++    int l;
++
++    for (l = logical; l > 0 && l > logical - 40; l--) {
++        int64_t p = (int64_t)l * wl.scale120;
++
++        if (p % 120 == 0 && (p / 120) % step == 0) {
++            return p / 120;
++        }
++    }
++    return (int)((int64_t)logical * wl.scale120 / 120) / step * step;
++}
++
++/* the first place at or after logical, and the last at or before it, that is a whole screen pixel */
++static int whole_after(int logical)
++{
++    int l;
++
++    for (l = logical; l < logical + 16; l++) {
++        if ((int64_t)l * wl.scale120 % 120 == 0) {
++            return l;
++        }
++    }
++    return logical;
++}
++
++static int whole_before(int logical)
++{
++    int l;
++
++    for (l = logical; l >= 0 && l > logical - 16; l--) {
++        if ((int64_t)l * wl.scale120 % 120 == 0) {
++            return l;
++        }
++    }
++    return logical;
++}
++
++/*
++ * The room for an unscaled picture in a drawing area of that size: what is left of it from
++ * the first whole screen pixel on. The compositor puts the window's surface on a whole screen
++ * pixel (mutter: surface_container_apply_transform) and samples a surface exactly, not
++ * blended, only where it starts on one too and is shown at its own size, so the picture
++ * starts where its place in the window's surface, times the scale, is whole: on a screen
++ * scaled by 1.25, at a multiple of 4.
++ */
++static void room_in(VirtualConsole *vc, int ww, int wh, int *x, int *y,
++                    int *rx, int *ry, int *rw, int *rh)
++{
++    GtkWidget *area = vc->gfx.drawing_area;
++
++    if (!gtk_widget_translate_coordinates(area, gtk_widget_get_toplevel(area), 0, 0, x, y)) {
++        *x = *y = 0;
++    }
++    *rx = whole_after(*x) - *x;
++    *ry = whole_after(*y) - *y;
++    *rw = MAX(ww - *rx, 1);
++    *rh = MAX(wh - *ry, 1);
++}
++
++/*
++ * The size to offer the guest for a drawing area of that size: the pixels of its room on this
++ * screen, the width a multiple of 8 and the height even (which every guest takes), and a
++ * whole size in the desktop's units where one is near, so that the viewport shows it unscaled.
++ */
++void vmlab_wl_guest_size(VirtualConsole *vc, int *width, int *height)
++{
++    int x, y, rx, ry, rw, rh;
++
++    if (vmlab_wl_active(vc)) {
++        room_in(vc, *width, *height, &x, &y, &rx, &ry, &rw, &rh);
++        *width = pixels_for(rw, 8);
++        *height = pixels_for(rh, 2);
++    } else {
++        *width &= ~7;
++        *height &= ~1;
++    }
++}
++
++/*
++ * How many pixels of a pointer image make one guest pixel, and the whole-number scale GDK is
++ * to show that image at: together they make the pointer as large on the screen as the guest
++ * means it, a guest pixel to a screen pixel where the picture is unscaled.
++ */
++double vmlab_wl_cursor_zoom(VirtualConsole *vc, int *buffer_scale)
++{
++    *buffer_scale = 1;
++    if (!vmlab_wl_active(vc) || !wl.w) {
++        return 1.0;
++    }
++    *buffer_scale = (wl.scale120 + 119) / 120;
++    return vc->gfx.scale_x * *buffer_scale;
++}
++
++/* where the picture starts in the drawing area */
++void vmlab_wl_offsets(VirtualConsole *vc, int *x, int *y)
++{
++    if (vmlab_wl_active(vc) && wl.w) {
++        *x = wl.ox;
++        *y = wl.oy;
++    }
++}
++
++/*
++ * Places the picture in the drawing area: a guest pixel to a screen pixel where the picture
++ * is the size this window asks of the guest, else the largest of its shape that fits.
++ */
++void vmlab_wl_layout(VirtualConsole *vc)
++{
++    GtkWidget *area = vc->gfx.drawing_area;
++    GtkWidget *window = gtk_widget_get_toplevel(area);
++    int ww, wh, fbw, fbh, w, h, x, y, ox, oy, rx, ry, rw, rh;
++
++    if (!wl.tried) {
++        vmlab_wl_start(vc);
++    }
++    if (!vmlab_wl_active(vc) || !vc->gfx.ds) {
++        return;
++    }
++    ww = gtk_widget_get_allocated_width(area);
++    wh = gtk_widget_get_allocated_height(area);
++    fbw = surface_width(vc->gfx.ds);
++    fbh = surface_height(vc->gfx.ds);
++    if (ww < 1 || wh < 1) {
++        return;
++    }
++    if (wl.rescale_wanted && (ww != wl.aw || wh != wl.ah)) {
++        rescale_soon();
++    }
++    wl.aw = ww;
++    wl.ah = wh;
++
++    room_in(vc, ww, wh, &x, &y, &rx, &ry, &rw, &rh);
++    if (pixels_for(rw, 8) == fbw && pixels_for(rh, 2) == fbh) {
++        /* unscaled, in the middle of its room, on a whole screen pixel */
++        w = MIN((int)((int64_t)fbw * 120 / wl.scale120), rw);
++        h = MIN((int)((int64_t)fbh * 120 / wl.scale120), rh);
++        ox = rx + whole_before((rw - w) / 2);
++        oy = ry + whole_before((rh - h) / 2);
++    } else {
++        double fit = MIN((double)ww / fbw, (double)wh / fbh);
++
++        w = MIN(MAX(1, (int)(fbw * fit + 0.5)), ww);
++        h = MIN(MAX(1, (int)(fbh * fit + 0.5)), wh);
++        ox = (ww - w) / 2;
++        oy = (wh - h) / 2;
++    }
++    vc->gfx.scale_x = (double)w / fbw;
++    vc->gfx.scale_y = (double)h / fbh;
++
++    if (x + ox == wl.x && y + oy == wl.y && w == wl.w && h == wl.h &&
++        fbw == wl.fbw && fbh == wl.fbh) {
++        return;
++    }
++    wl.x = x + ox;
++    wl.y = y + oy;
++    wl.ox = ox;
++    wl.oy = oy;
++    wl.w = w;
++    wl.h = h;
++    wl.fbw = fbw;
++    wl.fbh = fbh;
++    wl_subsurface_set_position(wl.sub, wl.x, wl.y);
++    wp_viewport_set_destination(wl.viewport, w, h);
++    /* the size goes with a commit of the picture, the place with one of the window */
++    vmlab_wl_present(vc, 0, 0, 0, 0);
++    gtk_widget_queue_draw(window);
++    gd_vmlab_layout_changed(vc);
++}
++
++/* Shows the picture, of which that part changed (nothing: only what has not been shown yet). */
++static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h)
++{
++    VmlabBuffer *b = NULL;
++    int fbw, fbh, stride, i, row;
++    uint8_t *src;
++
++    if (!vmlab_wl_active(vc) || !vc->gfx.ds || !wl.w) {
++        return;
++    }
++    fbw = surface_width(vc->gfx.ds);
++    fbh = surface_height(vc->gfx.ds);
++    if (fbw != wl.fbw || fbh != wl.fbh) {
++        return;                 /* laid out for another picture: vmlab_wl_layout shows this one */
++    }
++    if (vc->gfx.convert) {
++        src = (uint8_t *)pixman_image_get_data(vc->gfx.convert);
++        stride = pixman_image_get_stride(vc->gfx.convert);
++    } else {
++        src = surface_data(vc->gfx.ds);
++        stride = surface_stride(vc->gfx.ds);
++    }
++
++    for (i = 0; i < VMLAB_BUFFERS; i++) {
++        VmlabBuffer *o = &wl.buf[i];
++
++        if (o->wl && (o->w != fbw || o->h != fbh)) {
++            buffer_free(o);
++        }
++        if (o->wl && w > 0 && h > 0) {
++            if (o->x2 <= o->x1 || o->y2 <= o->y1) {
++                o->x1 = x;
++                o->y1 = y;
++                o->x2 = x + w;
++                o->y2 = y + h;
++            } else {
++                o->x1 = MIN(o->x1, x);
++                o->y1 = MIN(o->y1, y);
++                o->x2 = MAX(o->x2, x + w);
++                o->y2 = MAX(o->y2, y + h);
++            }
++        }
++    }
++    for (i = 0; i < VMLAB_BUFFERS && !b; i++) {
++        if (wl.buf[i].wl && !wl.buf[i].busy) {
++            b = &wl.buf[i];
++        }
++    }
++    for (i = 0; i < VMLAB_BUFFERS && !b; i++) {
++        if (!wl.buf[i].wl && buffer_make(&wl.buf[i], fbw, fbh)) {
++            b = &wl.buf[i];
++        }
++    }
++    if (!b) {
++        wl.pending = true;      /* shown when the compositor gives a buffer back */
++        return;
++    }
++
++    b->x1 = MAX(b->x1, 0);
++    b->y1 = MAX(b->y1, 0);
++    b->x2 = MIN(b->x2, fbw);
++    b->y2 = MIN(b->y2, fbh);
++    if (b->x2 > b->x1 && b->y2 > b->y1) {
++        for (row = b->y1; row < b->y2; row++) {
++            memcpy((uint8_t *)b->data + ((size_t)row * fbw + b->x1) * 4,
++                   src + (size_t)row * stride + (size_t)b->x1 * 4,
++                   (size_t)(b->x2 - b->x1) * 4);
++        }
++        wl_surface_damage_buffer(wl.surface, b->x1, b->y1, b->x2 - b->x1, b->y2 - b->y1);
++    }
++    wl_surface_attach(wl.surface, b->wl, 0, 0);
++    wl_surface_commit(wl.surface);
++    b->busy = true;
++    b->x1 = b->y1 = b->x2 = b->y2 = 0;
++}
++
++/* The guest changed that part of its picture. False: GTK is to draw it. */
++bool vmlab_wl_update(VirtualConsole *vc, int x, int y, int w, int h)
++{
++    if (!vmlab_wl_active(vc)) {
++        return false;
++    }
++    if (!wl.w || surface_width(vc->gfx.ds) != wl.fbw || surface_height(vc->gfx.ds) != wl.fbh) {
++        vmlab_wl_layout(vc);
++    }
++    vmlab_wl_present(vc, x, y, w, h);
++    return true;
++}
++
++/* The guest has a new picture (another size, or another memory). */
++void vmlab_wl_switch(VirtualConsole *vc)
++{
++    int i;
++
++    if (!vmlab_wl_active(vc)) {
++        return;
++    }
++    for (i = 0; i < VMLAB_BUFFERS; i++) {
++        VmlabBuffer *b = &wl.buf[i];
++
++        if (b->wl) {
++            b->x1 = b->y1 = 0;
++            b->x2 = b->w;
++            b->y2 = b->h;
++        }
++    }
++    wl.fbw = wl.fbh = 0;        /* lay out again, which shows it */
++    vmlab_wl_layout(vc);
++}
++
++#else /* no Wayland, or no protocol headers at build time */
++
++bool vmlab_wl_active(VirtualConsole *vc)
++{
++    return false;
++}
++
++void vmlab_wl_guest_size(VirtualConsole *vc, int *width, int *height)
++{
++    *width &= ~7;
++    *height &= ~1;
++}
++
++double vmlab_wl_cursor_zoom(VirtualConsole *vc, int *buffer_scale)
++{
++    *buffer_scale = 1;
++    return 1.0;
++}
++
++void vmlab_wl_offsets(VirtualConsole *vc, int *x, int *y)
++{
++}
++
++void vmlab_wl_layout(VirtualConsole *vc)
++{
++}
++
++bool vmlab_wl_update(VirtualConsole *vc, int x, int y, int w, int h)
++{
++    return false;
++}
++
++void vmlab_wl_switch(VirtualConsole *vc)
++{
++}
++
++#endif

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Askpass for root-once.sh: says what the password is for.
+exec zenity --password --title="Claude (vmlab): remove the 23:00-03:00 login rule + install GPU build packages (updates Mesa/GLib)" 2>/dev/null

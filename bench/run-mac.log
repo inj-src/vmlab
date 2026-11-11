@@ -1,0 +1,51 @@
+cua-driver     textedit FAIL   41.1s turns=18 $0.398  <<missing>>
+cua-driver     textedit PASS   91.4s turns=42 $0.414  vmlab benchmark 42
+cua-driver     calc     PASS   18.7s turns=4 $0.051  running
+cua-driver     calc     PASS   18.7s turns=4 $0.049  running
+cua-driver     form     PASS   23.7s turns=8 $0.099  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     form     PASS   18.9s turns=6 $0.070  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     export   PASS   50.9s turns=25 $0.214  bench export ok
+cua-driver     export   FAIL   26.3s turns=7 $0.085  <<missing>>
+cua-driver     folder   PASS   72.0s turns=34 $0.321  yes
+cua-driver     folder   PASS   66.0s turns=35 $0.289  yes
+cua-driver     vscode   PASS  113.1s turns=47 $0.597  console.log('vmlab')
+cua-driver     vscode   PASS   32.0s turns=15 $0.143  console.log('vmlab')
+cua-driver     version  PASS   14.4s turns=8 $0.080  real=15.8.3
+cua-driver     version  PASS   10.7s turns=5 $0.050  real=15.8.3
+macos-mcp      textedit PASS   50.3s turns=32 $0.162  vmlab benchmark 42
+macos-mcp      textedit PASS   47.4s turns=25 $0.137  vmlab benchmark 42
+macos-mcp      calc     PASS   23.6s turns=16 $0.048  running
+macos-mcp      calc     PASS   23.0s turns=28 $0.068  running
+macos-mcp      form     PASS   23.6s turns=11 $0.068  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+macos-mcp      form     PASS   24.9s turns=15 $0.079  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+macos-mcp      export   PASS   28.1s turns=16 $0.086  bench export ok
+macos-mcp      export   PASS   33.5s turns=22 $0.116  bench export ok
+macos-mcp      folder   PASS   31.3s turns=24 $0.103  yes
+macos-mcp      folder   PASS   21.0s turns=12 $0.052  yes
+macos-mcp      vscode   PASS   60.3s turns=41 $0.149  console.log('vmlab')
+macos-mcp      vscode   PASS   61.4s turns=36 $0.163  console.log('vmlab')
+macos-mcp      version  PASS   13.3s turns=8 $0.044  real=15.8.3
+macos-mcp      version  PASS    6.1s turns=2 $0.017  real=15.8.3
+peekaboo       textedit FAIL   36.4s turns=1 $0.019  <<missing>>
+peekaboo       textedit FAIL   36.8s turns=1 $0.011  <<missing>>
+peekaboo       calc     FAIL   37.1s turns=1 $0.013  gone
+peekaboo       calc     FAIL   36.0s turns=1 $0.010  gone
+peekaboo       form     FAIL   16.8s turns=1 $0.012  <<missing>>
+peekaboo       form     FAIL   15.8s turns=1 $0.010  <<missing>>
+peekaboo       export   FAIL   16.5s turns=1 $0.012  <<missing>>
+Terminated
+peekaboo       textedit FAIL   31.9s turns=2 $0.103  <<missing>>
+peekaboo       textedit PASS   99.1s turns=40 $0.414  vmlab benchmark 42
+peekaboo       textedit PASS   69.1s turns=26 $0.192  vmlab benchmark 42
+peekaboo       calc     PASS   74.2s turns=34 $0.246  running
+peekaboo       calc     PASS   60.8s turns=35 $0.218  running
+peekaboo       form     PASS   71.2s turns=31 $0.257  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+peekaboo       form     PASS   49.4s turns=24 $0.163  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+peekaboo       export   PASS   62.9s turns=31 $0.267  bench export ok
+peekaboo       export   PASS   49.4s turns=23 $0.180  bench export ok
+peekaboo       folder   PASS  101.9s turns=43 $0.486  yes
+peekaboo       folder   PASS  121.9s turns=53 $0.624  yes
+peekaboo       vscode   PASS   42.6s turns=17 $0.129  console.log('vmlab')
+peekaboo       vscode   PASS   66.1s turns=20 $0.146  console.log('vmlab')
+peekaboo       version  PASS   47.5s turns=11 $0.130  real=15.8.3
+peekaboo       version  PASS   31.3s turns=3 $0.029  real=15.8.3

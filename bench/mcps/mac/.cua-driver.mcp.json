@@ -1,0 +1,1 @@
+{"mcpServers": {"cu": {"type": "stdio", "command": "/home/inj-src/.local/bin/vm-mcp-stdio", "args": ["mac", "/Users/dev/.local/bin/cua-driver mcp"]}}}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadVersion</key><integer>1</integer>
+  <key>PayloadScope</key><string>System</string>
+  <key>PayloadIdentifier</key><string>local.vmlab.chrome</string>
+  <key>PayloadUUID</key><string>6B0F3C1E-6E4B-4E0B-9C59-2D3B7A1E9F10</string>
+  <key>PayloadDisplayName</key><string>vmlab Chrome policies</string>
+  <key>PayloadDescription</key><string>Test VM: no Chrome sign-in, sync, password manager, promotions or default-browser prompt.</string>
+  <key>PayloadContent</key><array><dict>
+    <key>PayloadType</key><string>com.google.Chrome</string>
+    <key>PayloadVersion</key><integer>1</integer>
+    <key>PayloadIdentifier</key><string>local.vmlab.chrome.policies</string>
+    <key>PayloadUUID</key><string>A3C9D2F4-1B7E-4C8A-8F21-5E6D9B0C4A77</string>
+    <key>PayloadDisplayName</key><string>Google Chrome</string>
+    <key>BrowserSignin</key><integer>0</integer>
+    <key>SyncDisabled</key><true/>
+    <key>DefaultBrowserSettingEnabled</key><false/>
+    <key>PromotionsEnabled</key><false/>
+    <key>PasswordManagerEnabled</key><false/>
+  </dict></array>
+</dict></plist>

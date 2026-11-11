@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# vm-mcp-tcp <win|mac> <port>: connect stdio to a stdio MCP server that the VM's desktop session
+# serves on its own 127.0.0.1:<port> (one server process per connection). Uses ssh -W, so the VM
+# needs no extra tools. Run only by MCP clients.
+set -euo pipefail
+ip=$(vm ip "$1"); port=$(vm port "$1")
+exec ssh -i "$HOME/.ssh/vmlab_ed25519" -o UserKnownHostsFile="$HOME/.cache/vmlab/known_hosts" \
+  -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=30 -W "127.0.0.1:$2" -p "$port" "dev@$ip"

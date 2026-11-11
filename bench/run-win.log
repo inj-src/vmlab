@@ -1,0 +1,42 @@
+windows-mcp    notepad  PASS   53.2s turns=15 $0.075  vmlab benchmark 42
+windows-mcp    notepad  PASS   48.3s turns=18 $0.087  vmlab benchmark 42
+windows-mcp    calc     PASS   31.2s turns=15 $0.037  display='Display is 7,006,652'
+windows-mcp    calc     PASS   41.8s turns=7 $0.036  display='Display is 7,006,652'
+windows-mcp    form     PASS   39.6s turns=14 $0.063  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+windows-mcp    form     PASS   35.7s turns=13 $0.056  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+windows-mcp    export   PASS   33.5s turns=9 $0.047  bench export ok
+windows-mcp    export   PASS   35.1s turns=9 $0.048  bench export ok
+windows-mcp    folder   PASS   63.3s turns=26 $0.119  True
+windows-mcp    folder   PASS   33.8s turns=25 $0.088  True
+windows-mcp    build    PASS   32.3s turns=10 $0.047  real=26300.9457
+windows-mcp    build    PASS   29.4s turns=10 $0.043  real=26300.9457
+cua-driver     notepad  PASS   65.9s turns=34 $0.545  vmlab benchmark 42
+cua-driver     notepad  PASS   72.1s turns=29 $0.307  vmlab benchmark 42
+cua-driver     calc     PASS   16.3s turns=3 $0.042  display='Display is 7,006,652'
+cua-driver     calc     PASS   16.4s turns=3 $0.039  display='Display is 7,006,652'
+cua-driver     form     PASS   28.9s turns=15 $0.134  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     form     PASS   28.1s turns=16 $0.122  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     export   PASS   19.2s turns=9 $0.106  bench export ok
+cua-driver     export   PASS   18.8s turns=8 $0.078  bench export ok
+cua-driver     folder   PASS   26.1s turns=11 $0.122  True
+cua-driver     folder   PASS   21.5s turns=9 $0.081  True
+cua-driver     build    PASS   19.7s turns=7 $0.068  real=26300.9457
+cua-driver     build    PASS   20.4s turns=7 $0.066  real=26300.9457
+terminator     notepad  PASS   81.2s turns=25 $0.493  vmlab benchmark 42
+terminator     notepad  PASS   75.5s turns=27 $0.279  vmlab benchmark 42
+terminator     calc     PASS  103.1s turns=8 $0.113  display='Display is 7,006,652'
+terminator     calc     PASS   87.2s turns=5 $0.087  display='Display is 7,006,652'
+terminator     form     PASS   42.8s turns=19 $0.199  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+terminator     form     PASS   99.4s turns=28 $0.290  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+terminator     export   PASS   20.6s turns=5 $0.074  bench export ok
+terminator     export   PASS   18.5s turns=4 $0.062  bench export ok
+terminator     folder   FAIL  268.9s turns=83 $0.940  False
+terminator     folder   FAIL  107.2s turns=38 $0.434  False
+terminator     build    PASS   18.6s turns=6 $0.071  real=26300.9457
+terminator     build    PASS   17.4s turns=6 $0.068  real=26300.9457
+windows-mcp    vscode   PASS   98.9s turns=47 $0.178  console.log('vmlab')
+windows-mcp    vscode   PASS   49.3s turns=19 $0.081  console.log('vmlab')
+windows-mcp    vscode   PASS   69.2s turns=19 $0.078  console.log('vmlab')
+cua-driver     vscode   PASS   31.5s turns=18 $0.152  console.log('vmlab')
+cua-driver     vscode   PASS   33.5s turns=13 $0.245  console.log('vmlab')
+cua-driver     vscode   PASS   28.7s turns=14 $0.214  console.log('vmlab')

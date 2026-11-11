@@ -1,0 +1,3 @@
+#!/bin/sh
+# GUI askpass for `sudo -A` so agents can request root without a TTY.
+exec zenity --password --title="Claude (vmlab setup) needs sudo" 2>/dev/null

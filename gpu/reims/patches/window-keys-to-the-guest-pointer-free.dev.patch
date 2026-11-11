@@ -1,0 +1,248 @@
+window: vmlab: every key goes to macOS while the window has the keyboard; the pointer is free
+
+One rule for the keyboard and the pointer, the same as the Windows window's:
+  - the keyboard is captured from the moment the window gains it until it loses it (upstream:
+    from a click into the picture), the desktop's own shortcuts included (Super is Command);
+  - the pointer is never held in the picture (upstream confines it), so the title bar and
+    the rest of the desktop stay one move away;
+  - no release chord (upstream: Ctrl+Alt+Super): another window takes the keyboard with a
+    click, and GNOME's own Super+Escape gives the desktop its shortcuts back;
+  - the click that gives the window the keyboard is sent to macOS (upstream: swallowed).
+
+Applies after window-full-screen-clipboard-file-drop.dev.patch.
+---
+diff --git a/crates/reims-vgpu-window/features.md b/crates/reims-vgpu-window/features.md
+index cc8186c2..f537a6ca 100644
+--- a/crates/reims-vgpu-window/features.md
++++ b/crates/reims-vgpu-window/features.md
+@@ -364,11 +364,11 @@ runtime's own device. The switches above apply, and `resolution=` too.
+   `test: sdl::shell::the_last_show_or_hide_of_a_batch_decides`,
+   `test: native::linux::render::a_hidden_window_takes_no_retry`, `manual`
+ - Pointer: absolute, held at the image's nearest edge; five buttons; a
+-  drag ends in the guest; the click that focuses the window is not sent;
+-  nothing is sent before the guest has a mode.
++  drag ends in the guest; the click that focuses the window is sent (vmlab;
++  upstream: not sent); nothing is sent before the guest has a mode.
+   `test: native::linux::input::sdl_buttons_are_the_hosts_bits`,
+   `test: native::linux::input::a_drag_ends_in_the_guest_outside_the_window`,
+-  `test: native::linux::input::the_click_that_focuses_the_window_is_not_sent`,
++  `test: native::linux::input::gaining_the_keyboard_captures_and_its_click_is_sent`,
+   `test: native::linux::input::before_the_guest_has_a_mode_the_pointer_sends_nothing`,
+   `test: native::linux::input::moves_are_sent_where_the_guest_pixel_changes`
+ - Keys by position, as evdev reports them, so the guest's layout applies and
+@@ -393,9 +393,12 @@ runtime's own device. The switches above apply, and `resolution=` too.
+   releases both; losing the keyboard releases; the window's end releases
+   both, and the grab and the hold go with the capture before it hides; the
+   title says whether input is captured, as on macOS, with Ctrl+Alt+Super to
+-  release.
+-  `test: native::linux::input::a_click_in_the_image_captures_and_is_sent`,
+-  `test: native::linux::input::ctrl_alt_super_releases_capture`,
++  release. vmlab changes this on Linux: the keyboard is captured from the
++  moment the window gains it until it loses it, the pointer is never held,
++  and no chord releases.
++  `test: native::linux::input::a_click_in_the_image_is_sent`,
++  `test: native::linux::input::the_pointer_is_never_held`,
++  `test: native::linux::input::ctrl_alt_super_releases_nothing`,
+   `test: sdl::shell::the_end_lets_go_of_the_grab_and_the_holds`,
+   `test: sdl::shell::the_pointer_is_held_over_the_image_in_whole_points`,
+   `manual` (the grab and the hold)
+diff --git a/crates/reims-vgpu-window/src/native/linux/input.rs b/crates/reims-vgpu-window/src/native/linux/input.rs
+index 6f279cf0..48518b23 100644
+--- a/crates/reims-vgpu-window/src/native/linux/input.rs
++++ b/crates/reims-vgpu-window/src/native/linux/input.rs
+@@ -24,15 +24,17 @@
+ //!   callbacks take it.
+ //! - **Keys** by position ([`super::keymap`]), one down and one up each: the host's repeats are
+ //!   dropped, since the guest repeats a held key itself. With no menu of the host's to drive,
+-//!   every key goes to the guest, captured or not, but what the compositor keeps for itself while
+-//!   not captured. Pressing Ctrl, Alt and Super together while captured lifts every key held and
+-//!   releases capture: the chord the title names.
++//!   every key goes to the guest, the compositor's own shortcuts too.
+ //! - **No stuck keys**: losing the keyboard, releasing capture and closing send an up for every
+ //!   key held; losing the keyboard and closing lift the buttons held too.
+ //!
+-//! While captured, the window grabs the keyboard (`SDL_SetWindowKeyboardGrab`): on Wayland the
+-//! compositor's shortcuts inhibitor, so its own shortcuts reach the guest; and SDL holds the
+-//! pointer over the image ([`Input::pointer_confinement`], `crate::sdl::shell`).
++//! vmlab: the keyboard is captured for as long as the window has it, from the moment it gains
++//! it to the moment it loses it, and the pointer is never held. While captured, the window grabs
++//! the keyboard (`SDL_SetWindowKeyboardGrab`): on Wayland the compositor's shortcuts inhibitor,
++//! so its own shortcuts (Super, Alt+Tab) reach the guest. The pointer goes where the person
++//! moves it, to the title bar and to other windows, and a click on another window is how the
++//! keyboard is given back; there is no chord that releases it. (Upstream captures at a click
++//! into the image, holds the pointer over the image, and releases at Ctrl+Alt+Super.)
+ 
+ use crate::capture::{Capture, UNCAPTURED_SUFFIX};
+ use crate::config::{
+@@ -162,10 +164,10 @@ impl Input {
+         self.capture.is_captured()
+     }
+ 
+-    /// Where the pointer is held over `image`, the image's rectangle in the window's points: the
+-    /// image while captured ([`Capture::pointer_confinement`]).
+-    pub(crate) fn pointer_confinement(&self, image: Rect) -> Option<Rect> {
+-        self.capture.pointer_confinement(image)
++    /// Where the pointer is held over `image`, the image's rectangle in the window's points:
++    /// nowhere (the module doc; upstream: [`Capture::pointer_confinement`]).
++    pub(crate) fn pointer_confinement(&self, _image: Rect) -> Option<Rect> {
++        None
+     }
+ 
+     /// What the title ends with: the release chord while captured, that a click captures while not.
+@@ -280,16 +282,18 @@ impl Input {
+         if let Some(event) = self.keys.key_down(usage, repeat) {
+             self.out.push(ToHost::Key(event));
+         }
+-        if self.capture.release_chord(self.keys.held_modifiers()) {
+-            return self.release_capture();
+-        }
+         Reaction::default()
+     }
+ 
+-    /// The window gained the keyboard at `timestamp`.
+-    pub(crate) fn focus_gained(&mut self, timestamp: u64) {
++    /// The window gained the keyboard at `timestamp`: the keyboard is captured (the module doc).
++    pub(crate) fn focus_gained(&mut self, timestamp: u64) -> Reaction {
+         self.focused = true;
+         self.focused_at = Some(timestamp);
++        let was_captured = self.is_captured();
++        self.capture.click_in_image(true);
++        Reaction {
++            capture_changed: !was_captured,
++        }
+     }
+ 
+     /// The window lost the keyboard: every key and button held is lifted, and capture released.
+@@ -302,14 +306,6 @@ impl Input {
+         }
+     }
+ 
+-    /// Releases capture, lifting every key held.
+-    pub(crate) fn release_capture(&mut self) -> Reaction {
+-        self.lift_keys();
+-        Reaction {
+-            capture_changed: self.capture.release(),
+-        }
+-    }
+-
+     /// The window is closing: every key and button held is lifted.
+     pub(crate) fn closing(&mut self) {
+         self.lift_keys();
+@@ -406,22 +402,25 @@ mod tests {
+         }
+     }
+ 
+-    /// The click that focuses the window is not sent, but captures; the next one is sent
++    /// Gaining the keyboard captures it, and the click that came with it is sent
+     #[test]
+-    fn the_click_that_focuses_the_window_is_not_sent() {
++    fn gaining_the_keyboard_captures_and_its_click_is_sent() {
+         let mut input = Input::new();
+-        input.focus_gained(1_000_000_000);
++        assert!(!input.is_captured());
++        assert!(input.focus_gained(1_000_000_000).capture_changed);
++        assert!(input.is_captured());
+         let r = input.button_down(BUTTON_LEFT, 1_010_000_000, &at((10.0, 10.0)));
+-        assert!(r.capture_changed);
++        assert!(!r.capture_changed);
+         input.button_up(BUTTON_LEFT, &at((10.0, 10.0)));
+-        assert_eq!(input.take(), vec![]);
+-        input.button_down(BUTTON_LEFT, 2_000_000_000, &at((10.0, 10.0)));
+-        assert_eq!(input.take(), vec![pointer(20, 20, BUTTON_LEFT)]);
++        assert_eq!(
++            input.take(),
++            vec![pointer(20, 20, BUTTON_LEFT), pointer(20, 20, 0)]
++        );
+     }
+ 
+-    /// A click in the image captures and is sent; one outside starts nothing
++    /// A click in the image is sent; one outside starts nothing; neither changes capture
+     #[test]
+-    fn a_click_in_the_image_captures_and_is_sent() {
++    fn a_click_in_the_image_is_sent() {
+         let mut input = focused();
+         assert!(
+             !input
+@@ -430,10 +429,18 @@ mod tests {
+         );
+         assert_eq!(input.take(), vec![]);
+         let r = input.button_down(BUTTON_RIGHT, 1_000_000_000, &at((50.0, 25.0)));
+-        assert!(r.capture_changed && input.is_captured());
++        assert!(!r.capture_changed && input.is_captured());
+         assert_eq!(input.take(), vec![pointer(100, 50, BUTTON_RIGHT)]);
+     }
+ 
++    /// The pointer is never held, captured or not
++    #[test]
++    fn the_pointer_is_never_held() {
++        let input = focused();
++        assert!(input.is_captured());
++        assert_eq!(input.pointer_confinement(at((10.0, 10.0)).image), None);
++    }
++
+     /// A drag ends in the guest wherever the button comes up, held at the nearest edge
+     #[test]
+     fn a_drag_ends_in_the_guest_outside_the_window() {
+@@ -490,29 +497,23 @@ mod tests {
+         );
+     }
+ 
+-    /// Ctrl+Alt+Super while captured lifts every key and releases capture
++    /// Ctrl+Alt+Super are the guest's keys like any others: no chord releases capture
+     #[test]
+-    fn ctrl_alt_super_releases_capture() {
++    fn ctrl_alt_super_releases_nothing() {
+         let mut input = focused();
+-        input.button_down(BUTTON_LEFT, 1_000_000_000, &at((10.0, 10.0)));
+-        input.button_up(BUTTON_LEFT, &at((10.0, 10.0)));
+-        assert!(input.is_captured());
+-        input.take();
+         input.key(0xE0, true, false);
+         input.key(0xE2, true, false);
+         let r = input.key(0xE3, true, false);
+-        assert!(r.capture_changed && !input.is_captured());
++        assert!(!r.capture_changed && input.is_captured());
+         assert_eq!(
+             input.take(),
+             vec![
+                 ToHost::Key(KeyEvent::down(0xE0)),
+                 ToHost::Key(KeyEvent::down(0xE2)),
+                 ToHost::Key(KeyEvent::down(0xE3)),
+-                ToHost::Key(KeyEvent::up(0xE3)),
+-                ToHost::Key(KeyEvent::up(0xE2)),
+-                ToHost::Key(KeyEvent::up(0xE0)),
+             ]
+         );
++        assert!(input.focus_lost().capture_changed);
+         assert_eq!(input.title_suffix(), UNCAPTURED_SUFFIX);
+     }
+ 
+diff --git a/crates/reims-vgpu-window/src/native/linux/sdl.rs b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+index 7df58762..52e96270 100644
+--- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
++++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+@@ -82,8 +82,8 @@ impl Input {
+     }
+ 
+     /// The window gained the keyboard at `timestamp` (SDL's event clock).
+-    pub(crate) fn focus_gained(&mut self, timestamp: u64) {
+-        self.0.focus_gained(timestamp);
++    pub(crate) fn focus_gained(&mut self, timestamp: u64) -> bool {
++        self.0.focus_gained(timestamp).capture_changed
+     }
+ 
+     /// The window lost the keyboard: whether capture changed.
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index 6c3d807c..382f4303 100644
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -358,8 +358,7 @@ impl Shell {
+             }
+             k if k == SDL_EVENT_WINDOW_FOCUS_GAINED.0 => {
+                 // SAFETY: a window event.
+-                self.input.focus_gained(unsafe { event.window.timestamp });
+-                false
++                self.input.focus_gained(unsafe { event.window.timestamp })
+             }
+             k if k == SDL_EVENT_WINDOW_FOCUS_LOST.0 => self.input.focus_lost(),
+             k if k == SDL_EVENT_WINDOW_MOUSE_ENTER.0 || k == SDL_EVENT_WINDOW_MOUSE_LEAVE.0 => {

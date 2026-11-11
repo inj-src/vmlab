@@ -1,0 +1,43 @@
+gtk: vmlab: a fixed guest size and a window that opens maximized
+
+VMLAB_WINDOW_FIXED_SIZE=1920x1080: the guest is offered that size as its display mode whatever
+the window's size is, and the window scales it, keeping its shape (zoom-to-fit, which 0002
+turns on). Without it every change of the window's size is offered to the guest as a mode.
+VMLAB_WINDOW_MAXIMIZE: the window opens maximized.
+
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -777,6 +777,21 @@
+     if (!qemu_console_ui_info_supported(vc->gfx.dcl.con)) {
+         return;
+     }
++    /*
++     * vmlab: VMLAB_WINDOW_FIXED_SIZE=1920x1080 offers the guest that size whatever the window's
++     * is, and the window scales it. Otherwise every change of the window's size is offered to
++     * the guest as a mode. (Offering nothing leaves Windows at 1024x768.)
++     */
++    if (g_getenv("VMLAB_WINDOW_FIXED_SIZE")) {
++        int fixed_w, fixed_h;
++
++        if (sscanf(g_getenv("VMLAB_WINDOW_FIXED_SIZE"), "%dx%d", &fixed_w, &fixed_h) != 2 ||
++            fixed_w < 640 || fixed_h < 480) {
++            return;
++        }
++        width = fixed_w;
++        height = fixed_h;
++    }
+ 
+     info = *qemu_console_get_ui_info(vc->gfx.dcl.con);
+     info.width = width;
+@@ -2894,6 +2909,11 @@
+ 
+     gtk_container_add(GTK_CONTAINER(s->window), s->vbox);
+ 
++    /* vmlab: open filling the screen (the desktop's bars and the title bar stay) */
++    if (g_getenv("VMLAB_WINDOW_MAXIMIZE")) {
++        gtk_window_maximize(GTK_WINDOW(s->window));
++    }
++
+     gtk_widget_show_all(s->window);
+ 
+     for (idx = 0; idx < s->vcs->len; idx++) {

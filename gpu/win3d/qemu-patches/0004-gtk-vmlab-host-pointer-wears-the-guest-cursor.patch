@@ -1,0 +1,136 @@
+gtk: vmlab: the host's pointer wears the guest's cursor
+
+With an absolute pointer (usb-tablet) QEMU hid the host's pointer and relied on the guest
+drawing its own into the frame, which reaches the window a few frames late. When the guest
+hands its cursor over instead (virtio-gpu's cursor queue; the Windows driver does with
+../kmd-patches/0003), the host's pointer takes that shape and the guest's "hidden" state, and
+keeps them across grabs and mode changes. Also: the cursor's 0xAARRGGBB words were given to
+the pixbuf as R, G, B, A bytes (red and blue swapped), with colour still multiplied by alpha.
+
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index 6b62e97..c1733be 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -141,6 +141,8 @@ struct GtkDisplayState {
+     gboolean full_screen;
+ 
+     GdkCursor *null_cursor;
++    GdkCursor *guest_cursor;      /* vmlab: the guest's pointer shape, for an absolute pointer */
++    bool guest_cursor_hidden;
+     Notifier mouse_mode_notifier;
+     VMChangeStateEntry *vmse;
+     Notifier console_notifier;
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 9a81570..d081058 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -223,7 +223,21 @@ static void gd_update_cursor(VirtualConsole *vc)
+     }
+ 
+     window = gtk_widget_get_window(GTK_WIDGET(vc->gfx.drawing_area));
+-    if (s->full_screen || qemu_input_is_absolute(vc->gfx.dcl.con) || s->ptr_owner == vc) {
++    if (qemu_input_is_absolute(vc->gfx.dcl.con) && s->guest_cursor) {
++        /*
++         * vmlab: the guest has handed over its pointer's shape and does not
++         * draw it into the frame: the host's pointer wears it, which is
++         * instant where the frame is a few behind.
++         */
++        if (s->guest_cursor_hidden) {
++            GdkCursor *blank = gdk_cursor_new_for_display(
++                gdk_window_get_display(window), GDK_BLANK_CURSOR);
++            gdk_window_set_cursor(window, blank);
++            g_object_unref(blank);
++        } else {
++            gdk_window_set_cursor(window, s->guest_cursor);
++        }
++    } else if (s->full_screen || qemu_input_is_absolute(vc->gfx.dcl.con) || s->ptr_owner == vc) {
+         gdk_window_set_cursor(window, s->null_cursor);
+     } else {
+         gdk_window_set_cursor(window, NULL);
+@@ -470,8 +484,15 @@ static void gd_mouse_set(DisplayChangeListener *dcl,
+     GdkDisplay *dpy;
+     gint x_root, y_root;
+ 
+-    if (!gtk_widget_get_realized(vc->gfx.drawing_area) ||
+-        qemu_input_is_absolute(dcl->con)) {
++    if (!gtk_widget_get_realized(vc->gfx.drawing_area)) {
++        return;
++    }
++    if (qemu_input_is_absolute(dcl->con)) {
++        /* vmlab: the host's pointer is the pointer; only follow "hidden" */
++        if (vc->s->guest_cursor_hidden != !visible) {
++            vc->s->guest_cursor_hidden = !visible;
++            gd_update_cursor(vc);
++        }
+         return;
+     }
+ 
+@@ -491,21 +512,56 @@ static void gd_cursor_define(DisplayChangeListener *dcl,
+     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
+     GdkPixbuf *pixbuf;
+     GdkCursor *cursor;
++    guchar *rgba;
++    bool premultiplied = true;
++    int i, n = c->width * c->height;
+ 
+     if (!gtk_widget_get_realized(vc->gfx.drawing_area)) {
+         return;
+     }
+ 
+-    pixbuf = gdk_pixbuf_new_from_data((guchar *)(c->data),
+-                                      GDK_COLORSPACE_RGB, true, 8,
++    /*
++     * vmlab: the cursor is 0xAARRGGBB words; a pixbuf wants R, G, B, A bytes
++     * with colour not multiplied by alpha. Guests send either; it is
++     * premultiplied if no colour anywhere exceeds its alpha.
++     */
++    for (i = 0; i < n; i++) {
++        uint32_t p = c->data[i], a = p >> 24;
++        if (((p >> 16) & 0xff) > a || ((p >> 8) & 0xff) > a || (p & 0xff) > a) {
++            premultiplied = false;
++            break;
++        }
++    }
++    rgba = g_malloc(n * 4);
++    for (i = 0; i < n; i++) {
++        uint32_t p = c->data[i], a = p >> 24;
++        uint32_t r = (p >> 16) & 0xff, g = (p >> 8) & 0xff, b = p & 0xff;
++        if (premultiplied && a > 0 && a < 255) {
++            r = r * 255 / a;
++            g = g * 255 / a;
++            b = b * 255 / a;
++        }
++        rgba[i * 4] = r;
++        rgba[i * 4 + 1] = g;
++        rgba[i * 4 + 2] = b;
++        rgba[i * 4 + 3] = a;
++    }
++    pixbuf = gdk_pixbuf_new_from_data(rgba, GDK_COLORSPACE_RGB, true, 8,
+                                       c->width, c->height, c->width * 4,
+                                       NULL, NULL);
+     cursor = gdk_cursor_new_from_pixbuf
+         (gtk_widget_get_display(vc->gfx.drawing_area),
+          pixbuf, c->hot_x, c->hot_y);
+-    gdk_window_set_cursor(gtk_widget_get_window(vc->gfx.drawing_area), cursor);
+     g_object_unref(pixbuf);
+-    g_object_unref(cursor);
++    g_free(rgba);
++    /* kept: gd_update_cursor() puts it back after a grab, a mode change... */
++    g_clear_object(&vc->s->guest_cursor);
++    vc->s->guest_cursor = cursor;
++    if (qemu_input_is_absolute(dcl->con)) {
++        gd_update_cursor(vc);
++    } else {
++        gdk_window_set_cursor(gtk_widget_get_window(vc->gfx.drawing_area), cursor);
++    }
+ }
+ 
+ static void gd_switch(DisplayChangeListener *dcl,
+@@ -3030,6 +3086,7 @@ static void gtk_display_cleanup(void)
+     g_clear_pointer(&s->vcs, g_ptr_array_unref);
+     g_clear_pointer(&s->window, gtk_widget_destroy);
+     g_clear_object(&s->null_cursor);
++    g_clear_object(&s->guest_cursor);
+     g_clear_pointer(&gtk_display_state, g_free);
+ }
+ 

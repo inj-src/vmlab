@@ -1,0 +1,12 @@
+{
+  "about": "NOT INSTALLED (removed after round 2, 2026-11-10). vercel-labs/agent-desktop 1.2.0 (npm, unsigned native x64 binary). launchd socket-activated LaunchAgent com.vmlab.agent-desktop runs `agent-desktop mcp` per connection on the VM's 127.0.0.1:8010 inside the GUI session (the binary holds Accessibility + Screen Recording); the host bridges stdio with ssh -W (vm-mcp-tcp).",
+  "server": {
+    "type": "stdio",
+    "command": "/home/inj-src/.local/bin/vm-mcp-tcp",
+    "args": [
+      "mac",
+      "8010"
+    ]
+  },
+  "deny": []
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""vtype 'text' [--enter]: type text into the macOS VM over VNC with explicit Shift for US layout
+(plain vncdo 'type' drops Shift in this setup). vncdo 'key' takes a literal character; only
+space and '-' need names ('-' would be split as a modifier separator)."""
+import subprocess, sys
+SHIFT = {'~':'`','!':'1','@':'2','#':'3','$':'4','%':'5','^':'6','&':'7','*':'8','(':'9',')':'0',
+         '_':'minus','+':'=','{':'[','}':']','|':'\\',':':';','"':"'",'<':',','>':'.','?':'/'}
+NAMED = {' ':'space','-':'minus'}
+args = []
+for ch in sys.argv[1]:
+    if ch.isupper(): k = 'shift-' + ch.lower()
+    elif ch in SHIFT: k = 'shift-' + SHIFT[ch]
+    else: k = NAMED.get(ch, ch)
+    args += ['key', k]
+if '--enter' in sys.argv[2:]: args += ['key', 'enter']
+subprocess.run(['/vmlab/tools/vmlab/mac/venv/bin/vncdo', '-s', '127.0.0.1::5900', '--delay', '40', *args], check=True)

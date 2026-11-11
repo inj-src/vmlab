@@ -1,0 +1,439 @@
+--- a/crates/reims-vgpu-window/src/env.rs
++++ b/crates/reims-vgpu-window/src/env.rs
+@@ -12,6 +12,7 @@
+ //!   value.
+ 
+ use std::sync::OnceLock;
++use std::time::{Duration, Instant};
+ 
+ /// The borderless switch's variable.
+ pub const BORDERLESS_VAR: &str = "REIMS_VGPU_WINDOW_BORDERLESS";
+@@ -21,6 +22,123 @@
+ pub const IMPL_VAR: &str = "REIMS_VGPU_WINDOW_IMPL";
+ /// The maximized switch's variable (vmlab).
+ pub const MAXIMIZED_VAR: &str = "REIMS_VGPU_WINDOW_MAXIMIZED";
++/// The pinned mode's variable (vmlab).
++pub const MODE_VAR: &str = "REIMS_VGPU_WINDOW_MODE";
++
++/// Which mode a window that keeps its size offers the guest (vmlab; `REIMS_VGPU_WINDOW_MODE`).
++/// Pinned, a resize of the window changes nothing for the guest: the window fits the guest's
++/// image into its new size, scaled, between black bars.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum PinnedMode {
++    /// The window's size, each time it changes: unset, or a value that is neither of the others.
++    #[default]
++    Follows,
++    /// The mode of the guest's first scanout, which is the window's size as it opened, from then
++    /// on: `first`. The image is a guest pixel to a pixel until the person resizes the window.
++    First,
++    /// This mode, width then height, always: `1920x1080`.
++    Fixed(u16, u16),
++}
++
++/// The pinned mode a value names: `first`, or `WxH` in pixels, each side at least 1; in any case,
++/// spaces aside.
++pub fn parse_pinned_mode(value: Option<&str>) -> PinnedMode {
++    let Some(value) = value.map(|value| value.trim().to_ascii_lowercase()) else {
++        return PinnedMode::Follows;
++    };
++    if value == "first" {
++        return PinnedMode::First;
++    }
++    let side = |side: &str| side.trim().parse::<u16>().ok().filter(|side| *side > 0);
++    match value.split_once('x') {
++        Some((width, height)) => match (side(width), side(height)) {
++            (Some(width), Some(height)) => PinnedMode::Fixed(width, height),
++            _ => PinnedMode::Follows,
++        },
++        None => PinnedMode::Follows,
++    }
++}
++
++/// What an open window last measured of itself, for a pinned mode taken from the window
++/// (vmlab; [`PinnedMode::First`], [`Pin`]).
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct Measured {
++    /// Its content's size in pixels.
++    pub pixels: (u32, u32),
++    /// Its screen's scale as the window system tells it (1.25 on a 125% Wayland screen).
++    pub scale: f64,
++    /// Whether it is maximized or full screen: the size it was opened to have.
++    pub fills: bool,
++}
++
++/// How long a window's measures stay the same before a mode is pinned from them: a move between
++/// screens changes the scale first and the size after.
++pub const PIN_SETTLE: Duration = Duration::from_millis(400);
++
++/// The mode a display is pinned at (vmlab; [`PinnedMode`]). For [`PinnedMode::First`] it is the
++/// pixels of the window while it fills its screen, taken once per screen scale: on a screen of
++/// another scale the guest's pixels would be stretched, so the mode is taken again there, once
++/// the window fills that screen and has kept its measures for [`PIN_SETTLE`]. A window that does
++/// not fill its screen never changes the mode.
++#[derive(Debug, Default)]
++pub struct Pin {
++    /// The pinned mode, once there is one.
++    size: Option<(u32, u32)>,
++    /// The scale `size` was measured at, as bits; `None` for a size that was not measured.
++    scale: Option<u64>,
++    /// Measures that would change the mode, and when they were first seen.
++    steady: Option<(Measured, Instant)>,
++}
++
++impl Pin {
++    /// A mode pinned from the start.
++    pub fn fixed(width: u32, height: u32) -> Self {
++        Self {
++            size: Some((width, height)),
++            ..Self::default()
++        }
++    }
++
++    /// The pinned mode, once there is one.
++    pub fn size(&self) -> Option<(u32, u32)> {
++        self.size
++    }
++
++    /// The guest set a mode: it is the pinned one where nothing was pinned yet (a window that
++    /// never filled its screen).
++    pub fn guest_set(&mut self, width: u32, height: u32) {
++        self.size.get_or_insert((width, height));
++    }
++
++    /// The window measures `measured` at `now`: the pinned mode after it. The mode is
++    /// `rounded(pixels)`, the mode a display offers for a window of those pixels.
++    pub fn measured(
++        &mut self,
++        measured: Option<Measured>,
++        now: Instant,
++        rounded: impl FnOnce((u32, u32)) -> (u32, u32),
++    ) -> Option<(u32, u32)> {
++        let wanted = measured.filter(|m| m.fills && self.scale != Some(m.scale.to_bits()));
++        match (wanted, self.steady) {
++            (Some(m), Some((seen, since))) if seen == m => {
++                if now.duration_since(since) >= PIN_SETTLE {
++                    self.size = Some(rounded(m.pixels));
++                    self.scale = Some(m.scale.to_bits());
++                    self.steady = None;
++                }
++            }
++            (Some(m), _) => self.steady = Some((m, now)),
++            (None, _) => self.steady = None,
++        }
++        self.size
++    }
++}
++
++/// The process's pinned mode ([`MODE_VAR`]). Read once per process.
++pub fn pinned_mode() -> PinnedMode {
++    static MODE: OnceLock<PinnedMode> = OnceLock::new();
++    *MODE.get_or_init(|| parse_pinned_mode(std::env::var(MODE_VAR).ok().as_deref()))
++}
+ 
+ /// What the variables say.
+ #[derive(Clone, Debug, Default, PartialEq)]
+@@ -149,6 +267,110 @@
+         assert_eq!(parse_impl(None), WindowImpl::AppKit);
+     }
+ 
++    /// The pinned mode is `first` or a size; anything else follows the window
++    #[test]
++    fn the_pinned_mode_is_first_or_a_size() {
++        assert_eq!(parse_pinned_mode(None), PinnedMode::Follows);
++        for first in ["first", " First ", "FIRST"] {
++            assert_eq!(
++                parse_pinned_mode(Some(first)),
++                PinnedMode::First,
++                "{first:?}"
++            );
++        }
++        assert_eq!(
++            parse_pinned_mode(Some("1920x1080")),
++            PinnedMode::Fixed(1920, 1080)
++        );
++        assert_eq!(
++            parse_pinned_mode(Some(" 2560 X 1440 ")),
++            PinnedMode::Fixed(2560, 1440)
++        );
++        for other in [
++            "", "1", "on", "1920", "1920x", "x1080", "0x1080", "1920x0", "ax1",
++        ] {
++            assert_eq!(
++                parse_pinned_mode(Some(other)),
++                PinnedMode::Follows,
++                "{other:?}"
++            );
++        }
++    }
++
++    /// A window that fills its screen pins its pixels once they are steady, and again on a screen
++    /// of another scale; a window that does not fill its screen changes nothing
++    #[test]
++    fn the_first_mode_is_the_filling_window_s_per_scale() {
++        let same = |pixels| pixels;
++        let at = |pixels, scale, fills| {
++            Some(Measured {
++                pixels,
++                scale,
++                fills,
++            })
++        };
++        let start = Instant::now();
++        let later = |ms| start + Duration::from_millis(ms);
++        let mut pin = Pin::default();
++        assert_eq!(pin.measured(None, start, same), None);
++        // opening: not maximized yet
++        assert_eq!(pin.measured(at((1446, 816), 1.0, false), start, same), None);
++        assert_eq!(pin.measured(at((1920, 1056), 1.0, true), later(10), same), None);
++        assert_eq!(pin.measured(at((1920, 1056), 1.0, true), later(300), same), None);
++        assert_eq!(
++            pin.measured(at((1920, 1056), 1.0, true), later(410), same),
++            Some((1920, 1056))
++        );
++        // restored and resized on the same screen: the mode stays
++        assert_eq!(
++            pin.measured(at((800, 600), 1.0, false), later(1000), same),
++            Some((1920, 1056))
++        );
++        // maximized again at another size, same scale: it stays too
++        assert_eq!(
++            pin.measured(at((1920, 1080), 1.0, true), later(3000), same),
++            Some((1920, 1056))
++        );
++        // dragged to a 125% screen, not maximized: it stays
++        assert_eq!(
++            pin.measured(at((1000, 750), 1.25, false), later(4000), same),
++            Some((1920, 1056))
++        );
++        // maximized there: the scale comes before the size, and each change starts the wait again
++        assert_eq!(
++            pin.measured(at((2400, 1320), 1.25, true), later(5000), same),
++            Some((1920, 1056))
++        );
++        assert_eq!(
++            pin.measured(at((1920, 1050), 1.25, true), later(5300), same),
++            Some((1920, 1056))
++        );
++        assert_eq!(
++            pin.measured(at((1920, 1050), 1.25, true), later(5600), same),
++            Some((1920, 1056))
++        );
++        assert_eq!(
++            pin.measured(at((1920, 1050), 1.25, true), later(5700), |(w, h)| (w - 16, h)),
++            Some((1904, 1050))
++        );
++        assert_eq!(
++            pin.measured(at((1920, 1050), 1.25, true), later(9000), same),
++            Some((1904, 1050))
++        );
++    }
++
++    /// A fixed mode stays, and the guest's own first mode is pinned only where none was
++    #[test]
++    fn a_fixed_mode_and_the_guest_s_first() {
++        let mut fixed = Pin::fixed(2560, 1440);
++        fixed.guest_set(1920, 1080);
++        assert_eq!(fixed.size(), Some((2560, 1440)));
++        let mut first = Pin::default();
++        first.guest_set(1920, 1080);
++        first.guest_set(1280, 720);
++        assert_eq!(first.size(), Some((1920, 1080)));
++    }
++
+     /// The settings are read once and kept
+     #[test]
+     fn the_settings_are_read_once() {
+--- a/crates/reims-vgpu-window/src/handle.rs
++++ b/crates/reims-vgpu-window/src/handle.rs
+@@ -229,6 +229,8 @@
+     guest: Mutex<GuestState>,
+     /// The first mode the display offers the guest, once it offers one.
+     offered: Mutex<Option<(u16, u16)>>,
++    /// vmlab: what the open window last measured of itself (`crate::env::Measured`).
++    measured: Mutex<Option<crate::env::Measured>>,
+     /// What draws the display's frames, once the display exists.
+     sink: Mutex<Option<Arc<dyn FrameSink>>>,
+     /// Set at the window's end.
+@@ -280,6 +282,7 @@
+             callbacks: Mutex::new(Some(config.callbacks)),
+             guest: Mutex::new(GuestState::default()),
+             offered: Mutex::new(None),
++            measured: Mutex::new(None),
+             sink: Mutex::new(None),
+             closed: AtomicBool::new(false),
+             attached: AtomicBool::new(false),
+@@ -462,6 +465,17 @@
+         *self.offered.lock()
+     }
+ 
++    /// vmlab: the open window's pixels, scale and whether it fills its screen, as its UI thread
++    /// last measured them; `None` before it opened.
++    pub fn measured(&self) -> Option<crate::env::Measured> {
++        *self.measured.lock()
++    }
++
++    /// vmlab: the UI thread measured the window.
++    pub(crate) fn set_measured(&self, measured: crate::env::Measured) {
++        *self.measured.lock() = Some(measured);
++    }
++
+     /// Whether the window never resizes for the guest's mode (`WindowConfig::keeps_its_size`).
+     pub fn keeps_its_size(&self) -> bool {
+         self.keeps_its_size
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -370,6 +370,9 @@
+             }
+             _ => os::input_event(self, kind, event),
+         };
++        if (SDL_EVENT_WINDOW_FIRST.0..=SDL_EVENT_WINDOW_LAST.0).contains(&kind) {
++            self.measure();
++        }
+         self.flush();
+         if capture_changed {
+             self.capture_changed();
+@@ -441,6 +444,32 @@
+         unsafe { SDL_SetWindowTitle(self.sdl, title.as_ptr()) };
+     }
+ 
++    /// vmlab: tells the window its pixels, its screen's scale and whether it fills its screen
++    /// (`crate::env::Measured`), which a mode pinned from the window is taken from.
++    fn measure(&self) {
++        let (mut width, mut height) = (0, 0);
++        // SAFETY: the window is SDL's, on this thread.
++        let (scale, flags) = unsafe {
++            SDL_GetWindowSizeInPixels(self.sdl, &mut width, &mut height);
++            (
++                SDL_GetWindowDisplayScale(self.sdl),
++                SDL_GetWindowFlags(self.sdl),
++            )
++        };
++        let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
++            return;
++        };
++        if width == 0 || height == 0 || !(scale > 0.0) {
++            return;
++        }
++        let fills = (flags.0 & (SDL_WINDOW_MAXIMIZED.0 | SDL_WINDOW_FULLSCREEN.0)) != 0;
++        self.window.set_measured(crate::env::Measured {
++            pixels: (width, height),
++            scale: f64::from(scale),
++            fills,
++        });
++    }
++
+     /// Lays the image out again over the window's size and scale (the module doc), and tells the
+     /// render thread.
+     pub(crate) fn relayout(&mut self) {
+--- a/crates/reims-vgpu/src/graphics.rs
++++ b/crates/reims-vgpu/src/graphics.rs
+@@ -40,6 +40,7 @@
+ use std::os::fd::RawFd;
+ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+ use std::sync::{Arc, OnceLock, Weak};
++use std::time::Instant;
+ 
+ use parking_lot::lock_api::ArcRwLockReadGuard;
+ use parking_lot::{RawRwLock, RwLock};
+@@ -86,6 +87,7 @@
+ use reims_vgpu_vulkan::core::platform::{Handle, Platform};
+ use reims_vgpu_vulkan::core::raise::{OnFault, Raise, RaiseResult};
+ use reims_vgpu_vulkan::core::sync::Mutex;
++use reims_vgpu_window::env::{Pin, PinnedMode};
+ use reims_vgpu_window::{FrameSink, Window, WindowConfig, geometry};
+ use zerocopy::{FromBytes, IntoBytes};
+ 
+@@ -2390,6 +2392,12 @@
+     refresh_mhz: u32,
+     /// The guest's cursor, as last told.
+     cursor: Mutex<CursorState>,
++    /// vmlab: the one mode the display offers whatever the window's size, once pinned
++    /// (`REIMS_VGPU_WINDOW_MODE`, `reims_vgpu_window::env::PinnedMode`): a size given there, from
++    /// the start, or for `first` the pixels of the window while it fills its screen, taken again
++    /// on a screen of another scale (`reims_vgpu_window::env::Pin`). The window scales the image
++    /// to fit whenever it has another size.
++    pinned: Mutex<Pin>,
+ }
+ 
+ /// The guest's cursor, as the window shows it: over the image while the guest has an image and
+@@ -2617,6 +2625,10 @@
+                 visible: true,
+                 shown: None,
+             }),
++            pinned: Mutex::new(match reims_vgpu_window::env::pinned_mode() {
++                PinnedMode::Fixed(width, height) => Pin::fixed(u32::from(width), u32::from(height)),
++                PinnedMode::First | PinnedMode::Follows => Pin::default(),
++            }),
+         };
+         (WindowLink::new(window), screen)
+     }
+@@ -2696,7 +2708,41 @@
+     /// The window's size in pixels as last drawn into, else the mode it opened for, its width
+     /// rounded down to a multiple of 16 and its height to even ([`geometry::offered_mode`]), at
+     /// its host screen's rate.
++    ///
++    /// vmlab: the pinned mode instead, once there is one ([`WindowScreen::pinned`]).
+     fn mode(&self) -> Mode {
++        let pinned = {
++            let mut pin = self.pinned.lock();
++            if reims_vgpu_window::env::pinned_mode() == PinnedMode::First {
++                let rounded = |(width, height): (u32, u32)| {
++                    let (w, h) = geometry::offered_mode((u64::from(width), u64::from(height)));
++                    (
++                        u32::try_from(w).unwrap_or(width),
++                        u32::try_from(h).unwrap_or(height),
++                    )
++                };
++                let before = pin.size();
++                let after = pin.measured(self.window.measured(), Instant::now(), rounded);
++                if after != before {
++                    log::info!(
++                        target: "reims_vgpu::graphics",
++                        "the display's mode is the window's pixels while it fills its screen: \
++                         {after:?} (was {before:?}), window {:?}",
++                        self.window.measured()
++                    );
++                }
++                after
++            } else {
++                pin.size()
++            }
++        };
++        if let Some((width, height)) = pinned {
++            return Mode {
++                width,
++                height,
++                refresh_mhz: self.refresh_mhz,
++            };
++        }
+         let drawn = *self.shown.drawable.lock();
+         let (width, height) = geometry::offered_mode(drawn.unwrap_or_else(|| {
+             let (w, h) = self.window.offered().unwrap_or((1920, 1080));
+@@ -2714,6 +2760,10 @@
+     fn scanout(&self, scanout: Option<Scanout>) {
+         *self.shown.scanout.lock() = scanout;
+         if let Some(s) = scanout {
++            if reims_vgpu_window::env::pinned_mode() == PinnedMode::First {
++                // vmlab: the guest's first mode is its mode where the window pinned none
++                self.pinned.lock().guest_set(s.width, s.height);
++            }
+             let mode = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
+             self.window.guest_mode(mode(s.width), mode(s.height));
+         }
+--- a/crates/reims-vgpu/src/graphics/sink.rs
++++ b/crates/reims-vgpu/src/graphics/sink.rs
+@@ -608,7 +608,13 @@
+             self.presented.seen_format(from, to);
+             let drawn = if let Some((changes, color)) = &color {
+                 self.encode_colored(*changes, color, &surface, texture, region)
+-            } else if BGRA8_FORMATS.contains(&from) && BGRA8_FORMATS.contains(&to) {
++            } else if BGRA8_FORMATS.contains(&from)
++                && BGRA8_FORMATS.contains(&to)
++                // vmlab: a surface of one format with the drawable but not of the image's size
++                // (the mode is pinned and the window another size) is drawn scaled by the
++                // present shaders, which sample it, in place of a copy, which would clip it
++                && (from != to || (surface.width(), surface.height()) == (region.width, region.height))
++            {
+                 self.encode_surface(&surface, texture, region)
+             } else {
+                 self.encode_converted(&surface, texture, region)

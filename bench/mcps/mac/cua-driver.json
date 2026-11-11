@@ -1,0 +1,16 @@
+{
+  "about": "Cua Driver: LaunchAgent daemon (com.trycua.cua-driver) in the GUI session holds the TCC grants; `cua-driver mcp` over SSH proxies to it",
+  "server": {
+    "type": "stdio",
+    "command": "/home/inj-src/.local/bin/vm-mcp-stdio",
+    "args": [
+      "mac",
+      "/Users/dev/.local/bin/cua-driver mcp"
+    ]
+  },
+  "deny": [
+    "mcp__cu__install_extension",
+    "mcp__cu__install_ffmpeg",
+    "mcp__cu__check_for_update"
+  ]
+}

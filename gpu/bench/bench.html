@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>vmlab gpu bench</title>
+<style>body{margin:0;background:#111}canvas{display:block}</style>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+// Three WebGL2 workloads, each run uncapped for a fixed time. window.runBench() returns the results.
+//   fill:   one full-screen triangle with a heavy fragment shader (raw GPU shading speed)
+//   draws:  3000 draw calls a frame, each with its own uniforms (per-call overhead, where a
+//           virtual GPU pays for every command it forwards)
+//   upload: a new 1024x1024 texture every frame (the path pixels take from the app to the GPU)
+const gl = document.getElementById('c').getContext('webgl2', {antialias: false, powerPreference: 'high-performance'});
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const VS = `#version 300 es
+uniform vec4 rect;   // x, y, width, height in clip space
+out vec2 uv;
+void main(){ vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1); uv = p; gl_Position = vec4(rect.xy + p * rect.zw, 0, 1); }`;
+const fill = program(VS, `#version 300 es
+precision highp float; in vec2 uv; out vec4 o; uniform float t;
+void main(){ vec2 z = (uv - .5) * 3.; vec2 c = vec2(.285 + .01 * sin(t), .01); float n = 0.;
+  for (int i = 0; i < 96; i++) { z = clamp(vec2(z.x*z.x - z.y*z.y, 2.*z.x*z.y) + c, -4., 4.); n += exp(-dot(z, z)); }
+  o = vec4(.5 + .5 * cos(n * .2 + vec3(0, 2, 4)), 1); }`);
+const flat = program(VS, `#version 300 es
+precision highp float; in vec2 uv; out vec4 o; uniform vec4 color; void main(){ o = color; }`);
+const textured = program(VS, `#version 300 es
+precision highp float; in vec2 uv; out vec4 o; uniform sampler2D tex; void main(){ o = texture(tex, uv); }`);
+const u = (p, n) => gl.getUniformLocation(p, n);
+const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1024, 1024);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+const pixels = new Uint8Array(1024 * 1024 * 4).fill(180);
+const tests = {
+  fill(f) { gl.useProgram(fill); gl.uniform4f(u(fill, 'rect'), -1, -1, 2, 2); gl.uniform1f(u(fill, 't'), f * .05); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); },
+  draws(f) {
+    gl.useProgram(flat); const r = u(flat, 'rect'), col = u(flat, 'color');
+    for (let i = 0; i < 3000; i++) {
+      gl.uniform4f(r, -1 + (i % 60) / 30, -1 + Math.floor(i / 60) / 25, 1 / 32, 1 / 27);
+      gl.uniform4f(col, (i * 7 % 255) / 255, ((i + f) % 255) / 255, .6, 1);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+  },
+  upload(f) {
+    pixels.fill(f % 256, 0, 4096);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1024, 1024, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.useProgram(textured); gl.uniform4f(u(textured, 'rect'), -1, -1, 2, 2); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  },
+};
+function run(name, ms) {
+  return new Promise(done => {
+    let frames = 0; const t0 = performance.now();
+    (function tick() {
+      tests[name](frames++);
+      if (performance.now() - t0 < ms) return requestAnimationFrame(tick);
+      const px = new Uint8Array(4); gl.readPixels(640, 360, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);   // waits for the GPU
+      const fps = +(frames / ((performance.now() - t0) / 1000)).toFixed(1);
+      // Frame 0 again, so the pixels read back are the same on every machine that renders correctly
+      tests[name](0); gl.readPixels(400, 300, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      done({fps, pixel: [...px]});
+    })();
+  });
+}
+window.runBench = async (ms = 5000, names = Object.keys(tests)) => {
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const out = {renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)};
+  for (const name of names) { await run(name, 500); out[name] = await run(name, ms); }
+  return out;
+};
+</script>

@@ -1,0 +1,14 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 3c6d7a86..97201f82 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -130,3 +130,9 @@ debug-assertions = true
+ # suite's `checked` pass leaves them off, and release has none at all (D36).
+ [profile.checked.package.objc2]
+ debug-assertions = false
++
++# vmlab: SDL's source with one change (../reims/sdl3-src-3.4.18-vmlab, a copy of the crate): its
++# Wayland windows are not exported through xdg-foreign, which lets a client that goes without
++# cleaning up crash mutter 46.2 (../README.md).
++[patch.crates-io]
++sdl3-src = { path = "../reims/sdl3-src-3.4.18-vmlab" }

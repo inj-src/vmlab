@@ -1,0 +1,28 @@
+cua-driver     notepad  PASS   49.3s turns=21 $0.430  vmlab benchmark 42
+cua-driver     notepad  PASS   67.4s turns=28 $0.277  vmlab benchmark 42
+cua-driver     calc     PASS   15.8s turns=3 $0.041  display='Display is 7,006,652'
+cua-driver     calc     PASS   15.8s turns=3 $0.043  display='Display is 7,006,652'
+cua-driver     form     PASS   24.7s turns=15 $0.114  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     form     PASS   44.1s turns=26 $0.218  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     export   PASS   24.9s turns=11 $0.134  bench export ok
+cua-driver     export   PASS   31.1s turns=13 $0.166  bench export ok
+cua-driver     folder   PASS   25.3s turns=11 $0.096  True
+cua-driver     folder   PASS   23.5s turns=9 $0.082  True
+cua-driver     vscode   PASS   33.4s turns=13 $0.245  console.log('vmlab')
+cua-driver     vscode   PASS   24.4s turns=11 $0.109  console.log('vmlab')
+cua-driver     build    PASS   26.5s turns=9 $0.179  real=26300.9457
+cua-driver     build    PASS   21.0s turns=7 $0.072  real=26300.9457
+agent-desktop  notepad  PASS  112.3s turns=46 $0.212  vmlab benchmark 42
+agent-desktop  notepad  PASS   87.2s turns=24 $0.467  vmlab benchmark 42
+agent-desktop  calc     PASS   51.7s turns=8 $0.074  display='Display is 7,006,652'
+agent-desktop  calc     PASS   52.0s turns=8 $0.071  display='Display is 7,006,652'
+agent-desktop  form     PASS   27.3s turns=14 $0.079  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+agent-desktop  form     PASS   24.8s turns=13 $0.065  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+agent-desktop  export   PASS   77.2s turns=30 $0.245  bench export ok
+agent-desktop  export   PASS   68.1s turns=32 $0.284  bench export ok
+agent-desktop  folder   FAIL  114.6s turns=23 $0.126  False
+agent-desktop  folder   FAIL   45.9s turns=19 $0.099  False
+agent-desktop  vscode   PASS   45.6s turns=21 $0.184  console.log('vmlab')
+agent-desktop  vscode   PASS   43.5s turns=24 $0.168  console.log('vmlab')
+agent-desktop  build    FAIL  119.3s turns=18 $0.109  real=26300.9457
+agent-desktop  build    PASS   52.0s turns=11 $0.094  real=26300.9457

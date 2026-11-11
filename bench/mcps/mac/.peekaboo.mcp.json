@@ -1,0 +1,1 @@
+{"mcpServers": {"cu": {"type": "stdio", "command": "/home/inj-src/.local/bin/vm-mcp-stdio", "args": ["mac", "/Users/dev/.local/share/peekaboo/peekaboo mcp --allow-foreground --bridge-socket '/Users/dev/Library/Application Support/Peekaboo/bridge.sock'"]}}}

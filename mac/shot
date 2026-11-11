@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# shot [out.png] [maxw]: screenshot the macOS VM to a PNG (downscaled for viewing).
+out=${1:-/tmp/claude-1000/-home-inj-src--t3-scratch-2026-11-09-i-have-a-250gb-ssd-d3920bf7/f6d54077-b604-49d5-8a04-9679ccf993db/scratchpad/mac.png}
+virsh -c qemu:///system screenshot macos "$out.ppm" >/dev/null && /vmlab/tools/vmlab/mac/venv/bin/python -c "
+from PIL import Image; import sys; im=Image.open('$out.ppm'); print(im.size); im.thumbnail((${2:-1280},1000)); im.save('$out')" && rm -f "$out.ppm"

@@ -1,0 +1,16 @@
+<!doctype html><meta charset=utf-8><title>venc</title>
+<body style="font:22px monospace;background:#fff"><pre id=o></pre><script>
+// venc.html: ask Chrome for a hardware video encoder (which makes its GPU process load d3d12.dll), then keep trying WebGL
+const log = s => { o.textContent += new Date().toTimeString().slice(0,8) + ' ' + s + '\n'; };
+function gl(){ const c = document.createElement('canvas'); const g = c.getContext('webgl'); if (!g) return 'NO WEBGL';
+  const e = g.getExtension('WEBGL_debug_renderer_info'); return e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : 'webgl ok'; }
+(async () => {
+  log('webgl before: ' + gl());
+  try { const ad = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
+        log('webgpu: ' + (ad ? [ad.info.vendor, ad.info.architecture, ad.info.description].join(' / ') : 'no adapter')); } catch (e) { log('webgpu threw ' + e); }
+  try { const r = await VideoEncoder.isConfigSupported({codec:'avc1.42001f', width:1280, height:720, bitrate:2e6, framerate:30, hardwareAcceleration:'prefer-hardware'});
+        log('hardware H.264 encoder supported: ' + r.supported); } catch (e) { log('isConfigSupported threw ' + e); }
+  for (let i = 1; i <= 5; i++) { await new Promise(r => setTimeout(r, 4000)); log('webgl after ' + i*4 + ' s: ' + gl()); }
+  log('done');
+})();
+</script>

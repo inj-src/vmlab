@@ -1,0 +1,39 @@
+# What stays out of git, and how each comes back: README.md, "What is not in git".
+
+# Third-party checkouts (upstream at a pinned commit, the lab's changes as patch files)
+/gpu/reims-vgpu/
+/gpu/reims-vgpu-dev/
+/gpu/reims-util/
+/gpu/metal2vulkan/
+/gpu/win-research/
+/gpu/reims/sdl3-src-3.4.18-vmlab/
+/gpu/reims/libdecor-vmlab/libdecor-0.2.2/
+/gpu/reims/libdecor-vmlab/stock/
+
+# Downloads (their checksums are tracked) and what is unpacked from them
+/gpu/win3d/release-0.1.2-alpha/*.zst
+/gpu/win3d/release-0.1.2-alpha/*.zip
+/gpu/win3d/src/
+/gpu/win3d/guest/
+/gpu/win3d/opt/
+
+# Build output (each has a build script beside it)
+/gpu/win3d/win3d-guest.iso
+/gpu/win3d/guest-umd/x64/
+/gpu/win3d/guest-umd/x86/
+/gpu/win3d/guest-kmd/viogpu3d.sys
+/gpu/win3d/firmware/OVMF_CODE_4M.vmlab.fd
+/gpu/win3d/firmware/OVMF_CODE_4M.vmlab.fd.sha256
+/gpu/win3d/host-layer/*.so
+/gpu/win3d/host-layer/memtypes
+/gpu/reims/libdecor-cairo/*.so
+/mac/venv/
+/mac/venv-tools/
+target/
+build/
+__pycache__/
+
+# The test-signing key of the Windows kernel driver (gpu/win3d/signing/.gitignore keeps it out)
+
+# Old copies: git has the history now
+*.bak-*

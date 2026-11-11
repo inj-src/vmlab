@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=macOS 26 Tahoe
+Comment=The lab's macOS 26 VM with Metal on the RTX 4050, in a window
+Exec=/vmlab/tools/vmlab/gpu/reims/mac26.sh start --window
+Icon=/vmlab/tools/vmlab/gpu/icons/vmlab-macos26.svg
+StartupWMClass=vmlab-macos26
+Terminal=false
+Categories=System;Emulator;
+Actions=shutdown;poweroff;
+
+[Desktop Action shutdown]
+Name=Shut Down macOS
+Exec=/vmlab/tools/vmlab/gpu/reims/mac26.sh stop
+
+[Desktop Action poweroff]
+Name=Power Off Now
+Exec=/vmlab/tools/vmlab/gpu/reims/mac26.sh kill

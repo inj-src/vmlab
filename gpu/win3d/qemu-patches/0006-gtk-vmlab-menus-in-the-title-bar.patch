@@ -1,0 +1,92 @@
+gtk: vmlab: the menus in the title bar
+
+The VMLAB_WINDOW window gets a title bar of its own (a GtkHeaderBar of the desktop's usual
+height) with QEMU's menu bar, Machine and View, at its right, in place of a row of its own
+under the title bar: the menus stay in reach and take no rows from the guest's picture (the
+user's request). 0005's hiding of the menu bar goes. Full screen in that window keeps the
+picture's shape (QEMU stretches it to the screen otherwise): a 1920x1042 guest shows unscaled
+on a 1920x1080 screen, with 19 rows of black above and below.
+
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -141,6 +141,7 @@
+     gboolean full_screen;
+ 
+     GdkCursor *null_cursor;
++    GtkWidget *vmlab_header;      /* vmlab: the title bar that holds the menus */
+     GdkCursor *guest_cursor;      /* vmlab: the guest's pointer shape, for an absolute pointer */
+     bool guest_cursor_hidden;
+     Notifier mouse_mode_notifier;
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -1398,9 +1398,6 @@
+         dpy_window.gl = DISPLAY_GL_MODE_OFF;
+         dpy_window.u.gtk.has_zoom_to_fit = true;
+         dpy_window.u.gtk.zoom_to_fit = true;
+-        /* no menu bar (Ctrl+Alt+M shows it): its rows are the guest's; VMLAB_WINDOW_MENUBAR keeps it */
+-        dpy_window.u.gtk.has_show_menubar = true;
+-        dpy_window.u.gtk.show_menubar = g_getenv("VMLAB_WINDOW_MENUBAR") != NULL;
+         qemu_display_early_init(&dpy_window);
+     }
+ }
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -284,6 +284,9 @@
+ 
+     title = g_strdup_printf("%s%s%s", prefix, status, grab);
+     gtk_window_set_title(GTK_WINDOW(s->window), title);
++    if (s->vmlab_header) {
++        gtk_header_bar_set_title(GTK_HEADER_BAR(s->vmlab_header), title);
++    }
+     g_free(title);
+ 
+     for (i = 0; i < s->vcs->len; i++) {
+@@ -952,6 +955,10 @@
+     if (vc->s->full_screen) {
+         vc->gfx.scale_x = (double)ww / fbw;
+         vc->gfx.scale_y = (double)wh / fbh;
++        if (g_getenv("VMLAB_WINDOW")) {
++            /* vmlab: full screen keeps the picture's shape (1920x1042 on 1920x1080: unscaled) */
++            vc->gfx.scale_x = vc->gfx.scale_y = MIN(vc->gfx.scale_x, vc->gfx.scale_y);
++        }
+     } else if (vc->s->free_scale) {
+         double sx, sy;
+ 
+@@ -2997,9 +3004,36 @@
+     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(s->notebook), FALSE);
+     gtk_notebook_set_show_border(GTK_NOTEBOOK(s->notebook), FALSE);
+ 
++    /*
++     * vmlab: the menus sit in the title bar, at its right, where they take no rows from the
++     * guest's picture. The title bar is the window's own (GTK draws it), of the desktop's
++     * usual height ("default-decoration").
++     */
++    if (g_getenv("VMLAB_WINDOW")) {
++        GtkCssProvider *css = gtk_css_provider_new();
++
++        s->vmlab_header = gtk_header_bar_new();
++        gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(s->vmlab_header), TRUE);
++        gtk_header_bar_set_has_subtitle(GTK_HEADER_BAR(s->vmlab_header), FALSE);
++        gtk_style_context_add_class(gtk_widget_get_style_context(s->vmlab_header),
++                                    "default-decoration");
++        gtk_css_provider_load_from_data(css,
++            "menubar { background: none; box-shadow: none; border: none; padding: 0; }"
++            " menubar > menuitem { min-height: 16px; padding: 3px 8px; }", -1, NULL);
++        gtk_style_context_add_provider(gtk_widget_get_style_context(s->menu_bar),
++                                       GTK_STYLE_PROVIDER(css),
++                                       GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
++        g_object_unref(css);
++        gtk_widget_set_valign(s->menu_bar, GTK_ALIGN_CENTER);
++        gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header), s->menu_bar);
++        gtk_window_set_titlebar(GTK_WINDOW(s->window), s->vmlab_header);
++    }
++
+     gd_update_caption(s);
+ 
+-    gtk_box_pack_start(GTK_BOX(s->vbox), s->menu_bar, FALSE, TRUE, 0);
++    if (!s->vmlab_header) {
++        gtk_box_pack_start(GTK_BOX(s->vbox), s->menu_bar, FALSE, TRUE, 0);
++    }
+     gtk_box_pack_start(GTK_BOX(s->vbox), s->notebook, TRUE, TRUE, 0);
+ 
+     gtk_container_add(GTK_CONTAINER(s->window), s->vbox);

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Windows 11
+Comment=The lab's Windows 11 VM with 3D on the RTX 4050, in a window
+Exec=/vmlab/tools/vmlab/gpu/win3d/win-venus.sh start nvidia --window
+Icon=/vmlab/tools/vmlab/gpu/icons/vmlab-win11-light.svg
+StartupWMClass=vmlab-win11
+Terminal=false
+Categories=System;Emulator;

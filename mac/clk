@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# clk x y [settle_max]: click at x,y then wait for the screen to settle and screenshot.
+/vmlab/tools/vmlab/mac/venv/bin/vncdo -s 127.0.0.1::5900 move "$1" "$2" click 1
+/vmlab/tools/vmlab/mac/settle "${3:-40}" 2

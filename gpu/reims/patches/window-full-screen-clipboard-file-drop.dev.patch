@@ -1,0 +1,922 @@
+--- a/crates/reims-vgpu-window/src/env.rs
++++ b/crates/reims-vgpu-window/src/env.rs
+@@ -69,6 +69,8 @@
+     pub scale: f64,
+     /// Whether it is maximized or full screen: the size it was opened to have.
+     pub fills: bool,
++    /// Whether it is full screen, which is another size than maximized on the same screen.
++    pub full_screen: bool,
+ }
+ 
+ /// How long a window's measures stay the same before a mode is pinned from them: a move between
+@@ -78,14 +80,18 @@
+ /// The mode a display is pinned at (vmlab; [`PinnedMode`]). For [`PinnedMode::First`] it is the
+ /// pixels of the window while it fills its screen, taken once per screen scale: on a screen of
+ /// another scale the guest's pixels would be stretched, so the mode is taken again there, once
+-/// the window fills that screen and has kept its measures for [`PIN_SETTLE`]. A window that does
+-/// not fill its screen never changes the mode.
++/// the window fills that screen and has kept its measures for [`PIN_SETTLE`]. It is taken again
++/// too when the window goes full screen and when it comes back maximized, so that full screen
++/// is the screen's own pixels with no bands beside the image. A window that does not fill its
++/// screen never changes the mode.
+ #[derive(Debug, Default)]
+ pub struct Pin {
+     /// The pinned mode, once there is one.
+     size: Option<(u32, u32)>,
+     /// The scale `size` was measured at, as bits; `None` for a size that was not measured.
+     scale: Option<u64>,
++    /// Whether `size` was measured full screen.
++    full_screen: bool,
+     /// Measures that would change the mode, and when they were first seen.
+     steady: Option<(Measured, Instant)>,
+ }
+@@ -118,12 +124,15 @@
+         now: Instant,
+         rounded: impl FnOnce((u32, u32)) -> (u32, u32),
+     ) -> Option<(u32, u32)> {
+-        let wanted = measured.filter(|m| m.fills && self.scale != Some(m.scale.to_bits()));
++        let wanted = measured.filter(|m| {
++            m.fills && (self.scale != Some(m.scale.to_bits()) || self.full_screen != m.full_screen)
++        });
+         match (wanted, self.steady) {
+             (Some(m), Some((seen, since))) if seen == m => {
+                 if now.duration_since(since) >= PIN_SETTLE {
+                     self.size = Some(rounded(m.pixels));
+                     self.scale = Some(m.scale.to_bits());
++                    self.full_screen = m.full_screen;
+                     self.steady = None;
+                 }
+             }
+@@ -307,6 +316,7 @@
+                 pixels,
+                 scale,
+                 fills,
++                full_screen: false,
+             })
+         };
+         let start = Instant::now();
+@@ -359,6 +369,50 @@
+         );
+     }
+ 
++    /// Full screen is a size of its own: the mode follows the window into it and back out to
++    /// maximized, and stays where the window comes back restored
++    #[test]
++    fn full_screen_takes_the_screen_s_pixels_and_gives_them_back() {
++        let same = |pixels| pixels;
++        let at = |pixels, fills, full_screen| {
++            Some(Measured {
++                pixels,
++                scale: 1.0,
++                fills,
++                full_screen,
++            })
++        };
++        let start = Instant::now();
++        let later = |ms| start + Duration::from_millis(ms);
++        let mut pin = Pin::default();
++        pin.measured(at((1920, 1008), true, false), start, same);
++        assert_eq!(
++            pin.measured(at((1920, 1008), true, false), later(500), same),
++            Some((1920, 1008))
++        );
++        assert_eq!(
++            pin.measured(at((1920, 1080), true, true), later(1000), same),
++            Some((1920, 1008))
++        );
++        assert_eq!(
++            pin.measured(at((1920, 1080), true, true), later(1500), same),
++            Some((1920, 1080))
++        );
++        // back to maximized
++        pin.measured(at((1920, 1008), true, false), later(2000), same);
++        assert_eq!(
++            pin.measured(at((1920, 1008), true, false), later(2500), same),
++            Some((1920, 1008))
++        );
++        // full screen again, then out to a restored window: the full screen mode stays
++        pin.measured(at((1920, 1080), true, true), later(3000), same);
++        pin.measured(at((1920, 1080), true, true), later(3500), same);
++        assert_eq!(
++            pin.measured(at((1200, 800), false, false), later(4000), same),
++            Some((1920, 1080))
++        );
++    }
++
+     /// A fixed mode stays, and the guest's own first mode is pinned only where none was
+     #[test]
+     fn a_fixed_mode_and_the_guest_s_first() {
+--- a/crates/reims-vgpu-window/src/native/linux.rs
++++ b/crates/reims-vgpu-window/src/native/linux.rs
+@@ -7,6 +7,7 @@
+ //! the window's opening, changes and end, posted to the UI thread, and the host's screens as SDL
+ //! lists them.
+ 
++mod agent;
+ mod input;
+ mod keymap;
+ mod render;
+--- a/crates/reims-vgpu-window/src/native/linux/agent.rs
++++ b/crates/reims-vgpu-window/src/native/linux/agent.rs
+@@ -0,0 +1,694 @@
++//! vmlab: the host's clipboard (text and pictures) shared with the guest, and files dropped on
++//! the window sent to it, through a SPICE agent in the guest.
++//!
++//! QEMU gives the guest a virtio serial port named `com.redhat.spice.0` whose other end is a
++//! Unix socket QEMU listens on; `VMLAB_AGENT_SOCKET` names it. This module is the "client" a
++//! SPICE agent talks to (spice-protocol's `vd_agent.h`): chunks `{u32 port, u32 size}` of at
++//! most 2048 bytes, whose payloads joined are messages `{u32 protocol, u32 type, u64 opaque,
++//! u32 size}` and their data, all little-endian. Without the variable the module does nothing.
++//!
++//! **Threads.** A reader thread connects, reads messages and posts each to the UI thread; a
++//! writer thread writes what the UI thread queues, so a guest that reads nothing stalls only
++//! that thread. The clipboard is SDL's, which is the UI thread's, and Wayland gives the
++//! clipboard only to the program whose window has the keyboard: hence in this process.
++//!
++//! **Host to guest.** When the host's clipboard changes while the window has the keyboard
++//! (`SDL_EVENT_CLIPBOARD_UPDATE`), its text and PNG are read at once and offered (`GRAB`); the
++//! guest's requests are answered from that copy. Wayland tells of the clipboard again each time
++//! the window gains the keyboard, so a clipboard already shared (by its hash) is not offered
++//! twice, which is also what keeps the guest's own copy from coming back to it.
++//!
++//! **Guest to host.** On the guest's `GRAB` its text and PNG are requested, one at a time (a
++//! reply names no request), and given to SDL when all are in.
++//!
++//! **Files.** A file dropped on the window (`SDL_EVENT_DROP_FILE`) is announced
++//! (`FILE_XFER_START`), sent when the agent says it can take it, and the next one starts when
++//! the agent says how that one ended. The agent chooses where it lands (the desktop).
++
++use std::cell::RefCell;
++use std::collections::VecDeque;
++use std::ffi::{CStr, c_char, c_void};
++use std::hash::{Hash, Hasher};
++use std::io::{Read, Write};
++use std::os::unix::net::UnixStream;
++use std::path::PathBuf;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::mpsc::{self, Receiver, Sender};
++use std::time::{Duration, Instant};
++
++use sdl3_sys::everything::*;
++
++use super::ui;
++
++/// The chunk port of a client's messages (`VDP_CLIENT_PORT`).
++const CLIENT_PORT: u32 = 1;
++/// `VD_AGENT_PROTOCOL`.
++const PROTOCOL: u32 = 1;
++/// The most bytes a chunk carries (`VD_AGENT_MAX_DATA_SIZE`).
++const CHUNK: usize = 2048;
++/// The largest message taken or sent: a larger clipboard is not shared.
++const MAX_MESSAGE: usize = 64 << 20;
++/// How much of a file one message carries.
++const PIECE: usize = 64 * 1024;
++/// How long a clipboard request may go unanswered before a newer offer replaces it.
++const REPLY_WAIT: Duration = Duration::from_secs(10);
++/// How long before the socket is tried again.
++const RETRY: Duration = Duration::from_secs(2);
++
++const MSG_CLIPBOARD: u32 = 4;
++const MSG_ANNOUNCE: u32 = 6;
++const MSG_GRAB: u32 = 7;
++const MSG_REQUEST: u32 = 8;
++const MSG_RELEASE: u32 = 9;
++const MSG_XFER_START: u32 = 10;
++const MSG_XFER_STATUS: u32 = 11;
++const MSG_XFER_DATA: u32 = 12;
++const MSG_MAX_CLIPBOARD: u32 = 14;
++
++const TYPE_TEXT: u32 = 1;
++const TYPE_PNG: u32 = 2;
++
++/// What this side can do: clipboard by demand (5), a clipboard size limit (10), no release
++/// before a new offer (16).
++const CAPS: u32 = 1 << 5 | 1 << 10 | 1 << 16;
++
++const XFER_CAN_SEND: u32 = 0;
++const XFER_CANCELLED: u32 = 1;
++const XFER_SUCCESS: u32 = 3;
++
++const PNG_MIME: &CStr = c"image/png";
++/// The names text is offered under, the first being the one asked of others.
++const TEXT_MIMES: [&CStr; 5] = [
++    c"text/plain;charset=utf-8",
++    c"text/plain",
++    c"UTF8_STRING",
++    c"STRING",
++    c"TEXT",
++];
++
++/// What the writer thread writes.
++enum Out {
++    /// A message of this type with this data.
++    Message(u32, Vec<u8>),
++    /// The transfer's file, in pieces, until `cancel` is set.
++    File {
++        id: u32,
++        path: PathBuf,
++        cancel: Arc<AtomicBool>,
++    },
++}
++
++/// A clipboard's content in the two forms shared.
++#[derive(Default, Hash)]
++struct Clip {
++    text: Option<Vec<u8>>,
++    png: Option<Vec<u8>>,
++}
++
++impl Clip {
++    fn is_empty(&self) -> bool {
++        self.text.is_none() && self.png.is_none()
++    }
++
++    fn types(&self) -> Vec<u32> {
++        let mut types = Vec::new();
++        if self.text.is_some() {
++            types.push(TYPE_TEXT);
++        }
++        if self.png.is_some() {
++            types.push(TYPE_PNG);
++        }
++        types
++    }
++
++    fn get(&self, kind: u32) -> Option<&Vec<u8>> {
++        match kind {
++            TYPE_TEXT => self.text.as_ref(),
++            TYPE_PNG => self.png.as_ref(),
++            _ => None,
++        }
++    }
++
++    fn digest(&self) -> u64 {
++        let mut hasher = std::collections::hash_map::DefaultHasher::new();
++        self.hash(&mut hasher);
++        hasher.finish()
++    }
++}
++
++/// A file on its way to the guest.
++struct Xfer {
++    id: u32,
++    path: PathBuf,
++    size: u64,
++    cancel: Arc<AtomicBool>,
++}
++
++/// The UI thread's side of the link, while the socket is connected.
++struct Link {
++    out: Sender<Out>,
++    /// Whether the agent has spoken: nothing but the greeting is sent before.
++    agent: bool,
++    /// The host's clipboard as last read, which the guest's requests are answered from.
++    host: Clip,
++    /// The digest of the clipboard both sides last had.
++    shared: Option<u64>,
++    /// The guest's clipboard as given to SDL, which reads it when a program pastes.
++    guest: Clip,
++    /// The types of the guest's current offer still to request.
++    wanted: VecDeque<u32>,
++    /// The guest's current offer as fetched so far; none when no offer is being fetched.
++    fetched: Option<Clip>,
++    /// The request awaiting its reply: its type, whether the reply is for the current offer, and
++    /// when it was sent.
++    asked: Option<(u32, bool, Instant)>,
++    /// The files to send, the first being the one in progress.
++    xfers: VecDeque<Xfer>,
++    next_id: u32,
++}
++
++thread_local! {
++    /// The link, on the UI thread.
++    static LINK: RefCell<Option<Link>> = const { RefCell::new(None) };
++}
++
++/// Starts the link where `VMLAB_AGENT_SOCKET` names its socket. Called once, on the UI thread.
++pub(crate) fn start() {
++    let Some(path) = std::env::var_os("VMLAB_AGENT_SOCKET").filter(|path| !path.is_empty()) else {
++        return;
++    };
++    // SAFETY: SDL's video runs on this thread.
++    unsafe {
++        SDL_SetEventEnabled(SDL_EVENT_DROP_FILE.into(), true);
++        SDL_SetEventEnabled(SDL_EVENT_CLIPBOARD_UPDATE.into(), true);
++    }
++    let path = PathBuf::from(path);
++    let spawned = std::thread::Builder::new()
++        .name("vmlab.agent-read".into())
++        .spawn(move || {
++            loop {
++                if let Ok(stream) = UnixStream::connect(&path) {
++                    serve(stream);
++                    ui::post(|| LINK.with(|link| *link.borrow_mut() = None));
++                }
++                std::thread::sleep(RETRY);
++            }
++        });
++    if let Err(error) = spawned {
++        log::warn!(target: "reims_vgpu_window", "vmlab agent link: no thread: {error}");
++    }
++}
++
++/// An SDL event the link takes: whether it was one.
++pub(crate) fn event(event: &SDL_Event) -> bool {
++    // SAFETY: every event starts with its type, and each arm reads the variant its type names.
++    let kind = unsafe { event.r#type };
++    if kind == SDL_EVENT_CLIPBOARD_UPDATE.0 {
++        with_link(host_changed);
++        true
++    } else if kind == SDL_EVENT_DROP_FILE.0 {
++        // SAFETY: a drop event, whose data is a string SDL keeps while the event is handled.
++        let data = unsafe { event.drop.data };
++        if !data.is_null() {
++            // SAFETY: as above.
++            let path = unsafe { CStr::from_ptr(data) };
++            let path = PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path.to_bytes()));
++            with_link(|link| dropped(link, path));
++        }
++        true
++    } else {
++        (SDL_EVENT_DROP_FILE.0..=SDL_EVENT_DROP_POSITION.0).contains(&kind)
++    }
++}
++
++/// Runs `body` on the link, where there is one.
++fn with_link(body: impl FnOnce(&mut Link)) {
++    LINK.with(|link| {
++        if let Ok(mut link) = link.try_borrow_mut() {
++            if let Some(link) = link.as_mut() {
++                body(link);
++            }
++        }
++    });
++}
++
++/// The reader thread's work on one connection, until it ends.
++fn serve(mut stream: UnixStream) {
++    let Ok(writer) = stream.try_clone() else {
++        return;
++    };
++    let (out, queue) = mpsc::channel();
++    if std::thread::Builder::new()
++        .name("vmlab.agent-write".into())
++        .spawn(move || write_all(writer, &queue))
++        .is_err()
++    {
++        return;
++    }
++    ui::post(move || {
++        // The greeting asks the agent for its own: an agent already running answers it, and
++        // one that starts later sends its own first.
++        let _ = out.send(Out::Message(MSG_ANNOUNCE, words(&[1, CAPS])));
++        LINK.with(|link| {
++            *link.borrow_mut() = Some(Link {
++                out,
++                agent: false,
++                host: Clip::default(),
++                shared: None,
++                guest: Clip::default(),
++                wanted: VecDeque::new(),
++                fetched: None,
++                asked: None,
++                xfers: VecDeque::new(),
++                next_id: 1,
++            });
++        });
++    });
++    let mut pending = Vec::new();
++    // Bytes of a message too large to take, still to pass over.
++    let mut skip = 0usize;
++    loop {
++        let mut header = [0u8; 8];
++        if stream.read_exact(&mut header).is_err() {
++            return;
++        }
++        let size = u32_at(&header, 4) as usize;
++        if size > 64 * CHUNK {
++            log::warn!(target: "reims_vgpu_window", "vmlab agent link: a chunk of {size} bytes: reconnecting");
++            return;
++        }
++        let start = pending.len();
++        pending.resize(start + size, 0);
++        if stream.read_exact(&mut pending[start..]).is_err() {
++            return;
++        }
++        loop {
++            if skip > 0 {
++                let passed = skip.min(pending.len());
++                pending.drain(..passed);
++                skip -= passed;
++                if skip > 0 {
++                    break;
++                }
++            }
++            if pending.len() < 20 {
++                break;
++            }
++            let (kind, size) = (u32_at(&pending, 4), u32_at(&pending, 16) as usize);
++            if size > MAX_MESSAGE {
++                pending.drain(..20);
++                skip = size;
++                continue;
++            }
++            if pending.len() < 20 + size {
++                break;
++            }
++            let data = pending[20..20 + size].to_vec();
++            pending.drain(..20 + size);
++            ui::post(move || with_link(|link| message(link, kind, &data)));
++        }
++    }
++}
++
++/// The writer thread's work: what is queued, in order, until the socket or the queue ends.
++fn write_all(mut stream: UnixStream, queue: &Receiver<Out>) {
++    while let Ok(out) = queue.recv() {
++        let done = match out {
++            Out::Message(kind, data) => write_message(&mut stream, kind, &data),
++            Out::File { id, path, cancel } => write_file(&mut stream, id, &path, &cancel),
++        };
++        if done.is_err() {
++            let _ = stream.shutdown(std::net::Shutdown::Both);
++            return;
++        }
++    }
++}
++
++/// Writes one message as its chunks.
++fn write_message(stream: &mut UnixStream, kind: u32, data: &[u8]) -> std::io::Result<()> {
++    let mut message = Vec::with_capacity(20 + data.len());
++    message.extend_from_slice(&PROTOCOL.to_le_bytes());
++    message.extend_from_slice(&kind.to_le_bytes());
++    message.extend_from_slice(&0u64.to_le_bytes());
++    message.extend_from_slice(&(data.len() as u32).to_le_bytes());
++    message.extend_from_slice(data);
++    let mut wire = Vec::with_capacity(message.len() + 8 * message.len().div_ceil(CHUNK));
++    for chunk in message.chunks(CHUNK) {
++        wire.extend_from_slice(&CLIENT_PORT.to_le_bytes());
++        wire.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
++        wire.extend_from_slice(chunk);
++    }
++    stream.write_all(&wire)
++}
++
++/// Sends a file's bytes; one that cannot be read to its end is cancelled, which the agent
++/// answers by dropping what it has.
++fn write_file(
++    stream: &mut UnixStream,
++    id: u32,
++    path: &std::path::Path,
++    cancel: &AtomicBool,
++) -> std::io::Result<()> {
++    let mut piece = vec![0u8; PIECE];
++    let read = (|| -> std::io::Result<()> {
++        let mut file = std::fs::File::open(path)?;
++        loop {
++            if cancel.load(Ordering::Relaxed) {
++                return Ok(());
++            }
++            let count = file.read(&mut piece)?;
++            if count == 0 {
++                return Ok(());
++            }
++            let mut data = Vec::with_capacity(12 + count);
++            data.extend_from_slice(&id.to_le_bytes());
++            data.extend_from_slice(&(count as u64).to_le_bytes());
++            data.extend_from_slice(&piece[..count]);
++            if write_message(stream, MSG_XFER_DATA, &data).is_err() {
++                return Err(std::io::ErrorKind::BrokenPipe.into());
++            }
++        }
++    })();
++    match read {
++        Ok(()) => Ok(()),
++        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Err(error),
++        Err(error) => {
++            log::warn!(
++                target: "reims_vgpu_window",
++                "vmlab file drop: {} could not be read: {error}",
++                path.display()
++            );
++            write_message(stream, MSG_XFER_STATUS, &words(&[id, XFER_CANCELLED]))
++        }
++    }
++}
++
++/// A message from the agent, on the UI thread.
++fn message(link: &mut Link, kind: u32, data: &[u8]) {
++    match kind {
++        MSG_ANNOUNCE => {
++            // The agent (re)started: nothing asked of the one before will be answered.
++            link.agent = true;
++            link.wanted.clear();
++            link.fetched = None;
++            link.asked = None;
++            for xfer in link.xfers.drain(..) {
++                xfer.cancel.store(true, Ordering::Relaxed);
++            }
++            if data.len() >= 4 && u32_at(data, 0) != 0 {
++                send(link, MSG_ANNOUNCE, words(&[0, CAPS]));
++            }
++            send(link, MSG_MAX_CLIPBOARD, words(&[(MAX_MESSAGE - 64) as u32]));
++            link.shared = None;
++            host_changed(link);
++        }
++        MSG_GRAB => {
++            link.wanted = [TYPE_TEXT, TYPE_PNG]
++                .into_iter()
++                .filter(|kind| data.chunks_exact(4).any(|offered| u32_at(offered, 0) == *kind))
++                .collect();
++            link.fetched = Some(Clip::default());
++            match link.asked {
++                // Its reply, when it comes, is for an offer gone: the new one follows it.
++                Some((kind, _, since)) if since.elapsed() < REPLY_WAIT => {
++                    link.asked = Some((kind, false, since));
++                }
++                _ => {
++                    link.asked = None;
++                    request_next(link);
++                }
++            }
++        }
++        MSG_CLIPBOARD if data.len() >= 4 => {
++            let Some((asked, current, _)) = link.asked.take() else {
++                return;
++            };
++            if current && u32_at(data, 0) == asked && data.len() > 4 {
++                if let Some(clip) = link.fetched.as_mut() {
++                    let bytes = data[4..].to_vec();
++                    match asked {
++                        TYPE_TEXT => clip.text = Some(bytes),
++                        _ => clip.png = Some(bytes),
++                    }
++                }
++            }
++            request_next(link);
++        }
++        MSG_REQUEST if data.len() >= 4 => {
++            let kind = u32_at(data, 0);
++            let mut reply = kind.to_le_bytes().to_vec();
++            if let Some(bytes) = link.host.get(kind) {
++                reply.extend_from_slice(bytes);
++            }
++            send(link, MSG_CLIPBOARD, reply);
++        }
++        MSG_XFER_STATUS if data.len() >= 8 => xfer_status(link, u32_at(data, 0), u32_at(data, 4)),
++        _ => {}
++    }
++}
++
++/// Asks for the next type of the guest's offer, or, when all are in, gives them to SDL.
++fn request_next(link: &mut Link) {
++    if let Some(kind) = link.wanted.pop_front() {
++        link.asked = Some((kind, true, Instant::now()));
++        send(link, MSG_REQUEST, words(&[kind]));
++        return;
++    }
++    let Some(clip) = link.fetched.take().filter(|clip| !clip.is_empty()) else {
++        return;
++    };
++    link.shared = Some(clip.digest());
++    link.guest = clip;
++    let mut mimes: Vec<*const c_char> = Vec::new();
++    if link.guest.text.is_some() {
++        mimes.extend(TEXT_MIMES.iter().map(|mime| mime.as_ptr()));
++    }
++    if link.guest.png.is_some() {
++        mimes.push(PNG_MIME.as_ptr());
++    }
++    // SAFETY: SDL's video runs on this thread; SDL copies the names.
++    let set = unsafe {
++        SDL_SetClipboardData(
++            Some(guest_data),
++            None,
++            std::ptr::null_mut(),
++            mimes.as_ptr(),
++            mimes.len(),
++        )
++    };
++    if !set {
++        log::warn!(
++            target: "reims_vgpu_window",
++            "vmlab clipboard: the guest's was not taken: {}",
++            crate::sdl::sdl_error()
++        );
++    }
++}
++
++/// SDL asks for the guest's clipboard under `mime`: the bytes last fetched, which stay until the
++/// next fetch replaces them (on this thread, as this call is).
++unsafe extern "C" fn guest_data(
++    _userdata: *mut c_void,
++    mime: *const c_char,
++    size: *mut usize,
++) -> *const c_void {
++    let mut found: *const c_void = std::ptr::null();
++    let mut length = 0;
++    if !mime.is_null() {
++        // SAFETY: SDL's string.
++        let mime = unsafe { CStr::from_ptr(mime) };
++        LINK.with(|link| {
++            let Ok(link) = link.try_borrow() else {
++                return;
++            };
++            let Some(link) = link.as_ref() else {
++                return;
++            };
++            let bytes = if mime == PNG_MIME {
++                link.guest.png.as_ref()
++            } else {
++                link.guest.text.as_ref()
++            };
++            if let Some(bytes) = bytes {
++                found = bytes.as_ptr().cast();
++                length = bytes.len();
++            }
++        });
++    }
++    if !size.is_null() {
++        // SAFETY: SDL's place for the size.
++        unsafe { *size = length };
++    }
++    found
++}
++
++/// The host's clipboard may have changed: read it, and offer it where it is not the one shared.
++fn host_changed(link: &mut Link) {
++    if !link.agent {
++        return;
++    }
++    let clip = read_host();
++    let digest = clip.digest();
++    if link.shared == Some(digest) {
++        return;
++    }
++    link.shared = Some(digest);
++    // The guest's offer being fetched is older than this.
++    link.wanted.clear();
++    link.fetched = None;
++    if let Some((kind, _, since)) = link.asked {
++        link.asked = Some((kind, false, since));
++    }
++    let types = clip.types();
++    link.host = clip;
++    if types.is_empty() {
++        send(link, MSG_RELEASE, Vec::new());
++    } else {
++        send(link, MSG_GRAB, words(&types));
++    }
++}
++
++/// The host's clipboard, read from whoever holds it.
++fn read_host() -> Clip {
++    let mut clip = Clip::default();
++    // SAFETY: SDL's video runs on this thread; what SDL returns is freed with SDL_free.
++    unsafe {
++        if SDL_HasClipboardText() {
++            let text = SDL_GetClipboardText();
++            if !text.is_null() {
++                let bytes = CStr::from_ptr(text).to_bytes();
++                if !bytes.is_empty() && bytes.len() < MAX_MESSAGE - 64 {
++                    clip.text = Some(bytes.to_vec());
++                }
++                SDL_free(text.cast());
++            }
++        }
++        if SDL_HasClipboardData(PNG_MIME.as_ptr()) {
++            let mut size = 0usize;
++            let data = SDL_GetClipboardData(PNG_MIME.as_ptr(), &mut size);
++            if !data.is_null() {
++                if size > 0 && size < MAX_MESSAGE - 64 {
++                    clip.png = Some(std::slice::from_raw_parts(data.cast::<u8>(), size).to_vec());
++                }
++                SDL_free(data);
++            }
++        }
++    }
++    clip
++}
++
++/// A file was dropped on the window.
++fn dropped(link: &mut Link, path: PathBuf) {
++    if !link.agent {
++        log::warn!(
++            target: "reims_vgpu_window",
++            "vmlab file drop: {} not sent: the guest's agent is not running",
++            path.display()
++        );
++        return;
++    }
++    let size = match std::fs::metadata(&path) {
++        Ok(meta) if meta.is_file() => meta.len(),
++        _ => {
++            log::warn!(
++                target: "reims_vgpu_window",
++                "vmlab file drop: {} is not a file: not sent",
++                path.display()
++            );
++            return;
++        }
++    };
++    let id = link.next_id;
++    link.next_id = link.next_id.wrapping_add(1).max(1);
++    link.xfers.push_back(Xfer {
++        id,
++        path,
++        size,
++        cancel: Arc::new(AtomicBool::new(false)),
++    });
++    if link.xfers.len() == 1 {
++        xfer_start(link);
++    }
++}
++
++/// Announces the first file waiting.
++fn xfer_start(link: &mut Link) {
++    let Some(xfer) = link.xfers.front() else {
++        return;
++    };
++    let name = xfer
++        .path
++        .file_name()
++        .map(|name| name.to_string_lossy().into_owned())
++        .unwrap_or_default();
++    // A GLib key file: its value's escapes.
++    let mut escaped = String::new();
++    for (index, c) in name.chars().enumerate() {
++        match c {
++            '\\' => escaped.push_str("\\\\"),
++            '\n' => escaped.push_str("\\n"),
++            '\r' => escaped.push_str("\\r"),
++            '\t' => escaped.push_str("\\t"),
++            ' ' if index == 0 => escaped.push_str("\\s"),
++            c => escaped.push(c),
++        }
++    }
++    let mut data = xfer.id.to_le_bytes().to_vec();
++    data.extend_from_slice(
++        format!("[vdagent-file-xfer]\nname={escaped}\nsize={}\n\0", xfer.size).as_bytes(),
++    );
++    send(link, MSG_XFER_START, data);
++}
++
++/// The agent's word on the transfer `id`.
++fn xfer_status(link: &mut Link, id: u32, result: u32) {
++    let Some(xfer) = link.xfers.front().filter(|xfer| xfer.id == id) else {
++        return;
++    };
++    if result == XFER_CAN_SEND {
++        let out = Out::File {
++            id,
++            path: xfer.path.clone(),
++            cancel: xfer.cancel.clone(),
++        };
++        let _ = link.out.send(out);
++        return;
++    }
++    xfer.cancel.store(true, Ordering::Relaxed);
++    if result == XFER_SUCCESS {
++        log::info!(
++            target: "reims_vgpu_window",
++            "vmlab file drop: {} is on the guest's desktop",
++            xfer.path.display()
++        );
++    } else {
++        log::warn!(
++            target: "reims_vgpu_window",
++            "vmlab file drop: {} was not taken by the guest (status {result})",
++            xfer.path.display()
++        );
++    }
++    link.xfers.pop_front();
++    xfer_start(link);
++}
++
++/// Queues a message for the writer thread.
++fn send(link: &Link, kind: u32, data: Vec<u8>) {
++    let _ = link.out.send(Out::Message(kind, data));
++}
++
++/// `values` as little-endian bytes.
++fn words(values: &[u32]) -> Vec<u8> {
++    values.iter().flat_map(|value| value.to_le_bytes()).collect()
++}
++
++/// The little-endian u32 at `offset` of `bytes`, which has it.
++fn u32_at(bytes: &[u8], offset: usize) -> u32 {
++    u32::from_le_bytes([
++        bytes[offset],
++        bytes[offset + 1],
++        bytes[offset + 2],
++        bytes[offset + 3],
++    ])
++}
+--- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
++++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+@@ -101,9 +101,11 @@
+         self.0.pointer_confinement(image)
+     }
+ 
+-    /// What the title ends with in the current capture state.
++    /// What the title ends with: nothing (vmlab: the title is the window's name alone, whatever
++    /// the capture state).
+     pub(crate) fn title_suffix(&self) -> &'static str {
+-        self.0.title_suffix()
++        let _ = self.0.title_suffix();
++        ""
+     }
+ 
+     /// Sends what the input queued to `window`'s callbacks, while the window lives
+@@ -282,6 +284,9 @@
+         k if k == SDL_EVENT_KEY_DOWN.0 || k == SDL_EVENT_KEY_UP.0 => {
+             // SAFETY: a key event.
+             let key = unsafe { event.key };
++            if full_screen_key(shell, &key) {
++                return false;
++            }
+             keymap::usb_usage(key.scancode.0).is_some_and(|usage| {
+                 shell
+                     .input
+@@ -294,6 +299,50 @@
+     }
+ }
+ 
++/// vmlab: whether the F of a Ctrl+Alt+F is held, whose presses and release the guest never sees.
++static FULL_SCREEN_KEY_HELD: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
++/// vmlab: Ctrl+Alt+F puts the window on the whole screen and takes it back, as QEMU's own window
++/// does. Whether `key` was that chord's F (its press, a repeat of it or its release), which is
++/// then not the guest's: the guest sees Ctrl and Alt go down and up with nothing between.
++fn full_screen_key(shell: &Shell, key: &SDL_KeyboardEvent) -> bool {
++    use std::sync::atomic::Ordering::Relaxed;
++    if key.scancode != SDL_SCANCODE_F {
++        return false;
++    }
++    if !key.down {
++        return FULL_SCREEN_KEY_HELD.swap(false, Relaxed);
++    }
++    if key.repeat {
++        return FULL_SCREEN_KEY_HELD.load(Relaxed);
++    }
++    let chord = (key.r#mod & SDL_KMOD_CTRL).0 != 0
++        && (key.r#mod & SDL_KMOD_ALT).0 != 0
++        && (key.r#mod & (SDL_KMOD_SHIFT | SDL_KMOD_GUI)).0 == 0;
++    if chord {
++        FULL_SCREEN_KEY_HELD.store(true, Relaxed);
++        // SAFETY: the window is SDL's, on this thread.
++        unsafe {
++            let full = (SDL_GetWindowFlags(shell.sdl) & SDL_WINDOW_FULLSCREEN).0 != 0;
++            if !SDL_SetWindowFullscreen(shell.sdl, !full) {
++                refused_full_screen(shell);
++            }
++        }
++    }
++    chord
++}
++
++/// Logs that SDL refused to change the window's full screen state.
++fn refused_full_screen(shell: &Shell) {
++    log::warn!(
++        target: "reims_vgpu_window",
++        "window {:?}: full screen not changed: {}",
++        shell.window.title(),
++        crate::sdl::sdl_error()
++    );
++}
++
+ /// Grabs the keyboard while captured, and lets it go (the module doc), logging what that left.
+ pub(crate) fn grab_keyboard(shell: &Shell, captured: bool) {
+     // SAFETY: the window is SDL's, on this thread.
+--- a/crates/reims-vgpu-window/src/native/linux/ui.rs
++++ b/crates/reims-vgpu-window/src/native/linux/ui.rs
+@@ -218,6 +218,7 @@
+     }
+     snapshot_screens();
+     QUEUE.lock().phase = Phase::Running;
++    super::agent::start();
+     loop {
+         run_jobs();
+         // SAFETY: an all-zero event is a valid one for SDL to fill.
+@@ -257,6 +258,9 @@
+         crate::sdl::shell::screens_changed();
+         return;
+     }
++    if super::agent::event(event) {
++        return;
++    }
+     crate::sdl::shell::event(event);
+ }
+ 
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -467,6 +467,7 @@
+             pixels: (width, height),
+             scale: f64::from(scale),
+             fills,
++            full_screen: (flags.0 & SDL_WINDOW_FULLSCREEN.0) != 0,
+         });
+     }
+ 

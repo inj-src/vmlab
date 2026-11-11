@@ -1,0 +1,16 @@
+{
+  "about": "NOT INSTALLED: removed from the win base image on 2026-11-10 after losing the benchmark to cua-driver; reinstall it before re-running (launcher: /vmlab/tools/vmlab/win/mcp/). Was: CursorTouch/Windows-MCP, streamable-http server in the desktop session, reached via: vm tunnel win 8000",
+  "server": {
+    "type": "http",
+    "url": "http://127.0.0.1:8000/mcp",
+    "headers": {
+      "Authorization": "Bearer 47230941913d346aa8c94759b4c1f3c1d9a05f780d55b3cd"
+    }
+  },
+  "deny": [
+    "mcp__cu__PowerShell",
+    "mcp__cu__FileSystem",
+    "mcp__cu__Registry",
+    "mcp__cu__Process"
+  ]
+}

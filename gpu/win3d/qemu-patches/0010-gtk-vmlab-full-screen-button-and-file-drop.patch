@@ -1,0 +1,129 @@
+gtk: vmlab: one full screen button in the title bar, and files dropped on the window
+
+The VMLAB_WINDOW window's title bar holds a single round button at its right, left of the
+window's own buttons: full screen, which Ctrl+Alt+F leaves (and enters). It replaces the two
+menu buttons of 0006 and 0008: the menus are no longer shown at all, their keys work as
+before. (An open menu's popup also crashed mutter 46.2 when QEMU died under it.) The button
+takes no keyboard focus, so keys stay the guest's.
+
+Files dragged onto the window are sent to the guest (qemu_vdagent_send_file, 0009). (The
+user's request.)
+
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -141,7 +141,7 @@
+     gboolean full_screen;
+ 
+     GdkCursor *null_cursor;
+-    GtkWidget *vmlab_header;      /* vmlab: the title bar that holds the menus */
++    GtkWidget *vmlab_header;      /* vmlab: the window's title bar */
+     GdkCursor *guest_cursor;      /* vmlab: the guest's pointer shape, for an absolute pointer */
+     bool guest_cursor_hidden;
+     Notifier mouse_mode_notifier;
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -3037,24 +3037,48 @@
+ static gboolean gtkinit;
+ 
+ /*
+- * vmlab: a title bar button with that icon which opens the menu of that menu bar item. It
+- * takes no keyboard focus: the keys stay the guest's.
++ * vmlab: files dropped on the window go to the guest's desktop, through its agent
++ * (qemu_vdagent_send_file). Folders are not sent.
+  */
+-static GtkWidget *gd_vmlab_menu_button(GtkWidget *item, const char *icon, const char *name)
++static void gd_vmlab_drag_data_received(GtkWidget *widget, GdkDragContext *context,
++                                        gint x, gint y, GtkSelectionData *data,
++                                        guint info, guint time, void *opaque)
+ {
+-    GtkWidget *button = gtk_menu_button_new();
+-    GtkWidget *menu = gtk_menu_item_get_submenu(GTK_MENU_ITEM(item));
++    gchar **uris = gtk_selection_data_get_uris(data);
++    int i;
++
++    for (i = 0; uris && uris[i]; i++) {
++        g_autofree char *path = g_filename_from_uri(uris[i], NULL, NULL);
++
++#ifdef CONFIG_SPICE_PROTOCOL
++        if (path) {
++            qemu_vdagent_send_file(path);
++        }
++#endif
++    }
++    g_strfreev(uris);
++    /* GTK ends the drag itself (GTK_DEST_DEFAULT_DROP) */
++}
++
++static void gd_vmlab_full_screen_clicked(GtkButton *button, void *opaque)
++{
++    GtkDisplayState *s = opaque;
++
++    gtk_menu_item_activate(GTK_MENU_ITEM(s->full_screen_item));
++}
++
++/*
++ * vmlab: the title bar's full screen button. It takes no keyboard focus: the keys stay the
++ * guest's.
++ */
++static GtkWidget *gd_vmlab_full_screen_button(GtkDisplayState *s)
++{
++    GtkWidget *button = gtk_button_new_from_icon_name("view-fullscreen-symbolic",
++                                                      GTK_ICON_SIZE_MENU);
+     GtkCssProvider *css = gtk_css_provider_new();
+ 
+-    g_object_ref(menu);
+-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item), NULL);
+-    gtk_menu_button_set_popup(GTK_MENU_BUTTON(button), menu);
+-    g_object_unref(menu);
+-    gtk_widget_set_halign(menu, GTK_ALIGN_END);
+-    gtk_button_set_image(GTK_BUTTON(button),
+-                         gtk_image_new_from_icon_name(icon, GTK_ICON_SIZE_MENU));
+     gtk_button_set_relief(GTK_BUTTON(button), GTK_RELIEF_NONE);
+-    gtk_widget_set_tooltip_text(button, name);
++    gtk_widget_set_tooltip_text(button, _("Full screen (Ctrl+Alt+F to leave)"));
+     gtk_widget_set_can_focus(button, FALSE);
+     gtk_widget_set_focus_on_click(button, FALSE);
+     gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+@@ -3066,6 +3090,7 @@
+                                    GTK_STYLE_PROVIDER(css),
+                                    GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+     g_object_unref(css);
++    g_signal_connect(button, "clicked", G_CALLBACK(gd_vmlab_full_screen_clicked), s);
+     return button;
+ }
+ 
+@@ -3141,11 +3166,11 @@
+     gtk_notebook_set_show_border(GTK_NOTEBOOK(s->notebook), FALSE);
+ 
+     /*
+-     * vmlab: the menus sit in the title bar, at its right, where they take no rows from the
+-     * guest's picture: two icon buttons, the machine's menu (a power sign) and the view's
+-     * (a screen), which open QEMU's own menus. The title bar is the window's own (GTK draws
+-     * it), of the desktop's usual height ("default-decoration"). The menu bar itself is not
+-     * shown anywhere; the menus' keys (Ctrl+Alt+F...) work as before.
++     * vmlab: the window has a title bar of its own (GTK draws it), of the desktop's usual
++     * height ("default-decoration"), and no menu bar, which would take rows from the guest's
++     * picture. The one thing of QEMU's menus that is kept is full screen: a button in the
++     * title bar, at its right, and the menu's key, Ctrl+Alt+F, which is also the way back (a
++     * full screen window has no title bar). The menu bar itself is not shown anywhere.
+      */
+     if (g_getenv("VMLAB_WINDOW")) {
+         s->vmlab_header = gtk_header_bar_new();
+@@ -3155,11 +3180,13 @@
+                                     "default-decoration");
+         g_object_ref_sink(s->menu_bar);
+         gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header),
+-            gd_vmlab_menu_button(s->machine_menu_item, "system-shutdown-symbolic",
+-                                 _("Machine")));
+-        gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header),
+-            gd_vmlab_menu_button(s->view_menu_item, "video-display-symbolic", _("View")));
++                                gd_vmlab_full_screen_button(s));
+         gtk_window_set_titlebar(GTK_WINDOW(s->window), s->vmlab_header);
++
++        gtk_drag_dest_set(s->window, GTK_DEST_DEFAULT_ALL, NULL, 0, GDK_ACTION_COPY);
++        gtk_drag_dest_add_uri_targets(s->window);
++        g_signal_connect(s->window, "drag-data-received",
++                         G_CALLBACK(gd_vmlab_drag_data_received), s);
+     }
+ 
+     gd_update_caption(s);

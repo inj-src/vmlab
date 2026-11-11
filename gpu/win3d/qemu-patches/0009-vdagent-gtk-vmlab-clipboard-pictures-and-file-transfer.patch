@@ -1,0 +1,487 @@
+vdagent, gtk: vmlab: pictures on the shared clipboard, and files sent to the guest
+
+The qemu-vdagent channel and the GTK window's clipboard carried text alone. A second
+clipboard type, QEMU_CLIPBOARD_TYPE_IMAGE (PNG, the agent's VD_AGENT_CLIPBOARD_IMAGE_PNG),
+goes both ways: the GTK side offers and takes pictures as GdkPixbufs, encoded to and decoded
+from PNG. A message may now be 64 MiB (was 1 MiB, less than a screenshot), on the way in too.
+A paste that waits for the guest's data gives up after 5 s, where it waited for ever.
+
+qemu_vdagent_send_file() sends a file to the guest through the agent's file transfer
+(VD_AGENT_FILE_XFER_START, _STATUS, _DATA), one file after another, in 64 KiB pieces while
+less than 256 KiB is waiting to go out. The agent saves it on the desktop. (The user's request.)
+
+--- a/include/ui/clipboard.h
++++ b/include/ui/clipboard.h
+@@ -34,10 +34,12 @@
+  * enum QemuClipboardType
+  *
+  * @QEMU_CLIPBOARD_TYPE_TEXT: text/plain; charset=utf-8
++ * @QEMU_CLIPBOARD_TYPE_IMAGE: image/png (vmlab)
+  * @QEMU_CLIPBOARD_TYPE__COUNT: type count.
+  */
+ enum QemuClipboardType {
+     QEMU_CLIPBOARD_TYPE_TEXT,
++    QEMU_CLIPBOARD_TYPE_IMAGE,
+     QEMU_CLIPBOARD_TYPE__COUNT,
+ };
+ 
+@@ -291,4 +293,15 @@
+ 
+ G_DEFINE_AUTOPTR_CLEANUP_FUNC(QemuClipboardInfo, qemu_clipboard_info_unref)
+ 
++/**
++ * qemu_vdagent_send_file
++ *
++ * @path: a file of the host's.
++ *
++ * vmlab: send the file to the guest's agent (the qemu-vdagent chardev), which saves it on the
++ * guest's desktop. Files are sent one after the other. Returns false, with the reason
++ * reported, where there is no connected agent or the file cannot be read.
++ */
++bool qemu_vdagent_send_file(const char *path);
++
+ #endif /* QEMU_CLIPBOARD_H */
+--- a/ui/vdagent.c
++++ b/ui/vdagent.c
+@@ -20,7 +20,14 @@
+ 
+ #include "spice/vd_agent.h"
+ 
+-#define VDAGENT_BUFFER_LIMIT (1 * MiB)
++/*
++ * vmlab: 64 MiB, for a picture on the clipboard (a message is queued whole); it was 1 MiB.
++ * The same limit holds for a message of the guest's.
++ */
++#define VDAGENT_BUFFER_LIMIT (64 * MiB)
++/* vmlab: a file goes to the guest in pieces of this size, queued while less than that waits */
++#define VDAGENT_XFER_CHUNK (64 * KiB)
++#define VDAGENT_XFER_QUEUE (256 * KiB)
+ #define VDAGENT_MOUSE_DEFAULT true
+ #define VDAGENT_CLIPBOARD_DEFAULT false
+ 
+@@ -58,9 +65,29 @@
+     QemuClipboardPeer cbpeer;
+     uint32_t last_serial[QEMU_CLIPBOARD_SELECTION__COUNT];
+     uint32_t cbpending[QEMU_CLIPBOARD_SELECTION__COUNT];
++
++    /* vmlab: files to the guest, the first of them on its way */
++    GList *xfers;
++    uint32_t xfer_id;
+ };
+ typedef struct VDAgentChardev VDAgentChardev;
+ 
++/* vmlab: a file on its way to the guest (qemu_vdagent_send_file) */
++typedef struct VDAgentXfer {
++    uint32_t id;
++    char *name;
++    int fd;
++    uint64_t size;
++    uint64_t sent;
++    bool started;       /* the guest was told of it */
++    bool can_send;      /* and has asked for its data */
++    bool empty_sent;
++} VDAgentXfer;
++
++static VDAgentChardev *vdagent_xfer_chardev;
++static void vdagent_xfer_pump(VDAgentChardev *vd);
++static void vdagent_xfer_drop_all(VDAgentChardev *vd);
++
+ #define TYPE_CHARDEV_QEMU_VDAGENT "chardev-qemu-vdagent"
+ 
+ DECLARE_INSTANCE_CHECKER(VDAgentChardev, QEMU_VDAGENT_CHARDEV,
+@@ -315,11 +342,27 @@
+     switch (type) {
+     case QEMU_CLIPBOARD_TYPE_TEXT:
+         return VD_AGENT_CLIPBOARD_UTF8_TEXT;
++    case QEMU_CLIPBOARD_TYPE_IMAGE:
++        return VD_AGENT_CLIPBOARD_IMAGE_PNG;
+     default:
+         return VD_AGENT_CLIPBOARD_NONE;
+     }
+ }
+ 
++static bool type_vdagent_to_qemu(uint32_t vdtype, QemuClipboardType *type)
++{
++    switch (vdtype) {
++    case VD_AGENT_CLIPBOARD_UTF8_TEXT:
++        *type = QEMU_CLIPBOARD_TYPE_TEXT;
++        return true;
++    case VD_AGENT_CLIPBOARD_IMAGE_PNG:
++        *type = QEMU_CLIPBOARD_TYPE_IMAGE;
++        return true;
++    default:
++        return false;
++    }
++}
++
+ static void vdagent_send_clipboard_grab(VDAgentChardev *vd,
+                                         QemuClipboardInfo *info)
+ {
+@@ -539,13 +582,11 @@
+         return;
+     }
+     while (size >= sizeof(uint32_t)) {
++        QemuClipboardType type;
++
+         trace_vdagent_cb_grab_type(GET_NAME(type_name, *(uint32_t *)data));
+-        switch (*(uint32_t *)data) {
+-        case VD_AGENT_CLIPBOARD_UTF8_TEXT:
+-            info->types[QEMU_CLIPBOARD_TYPE_TEXT].available = true;
+-            break;
+-        default:
+-            break;
++        if (type_vdagent_to_qemu(*(uint32_t *)data, &type)) {
++            info->types[type].available = true;
+         }
+         data += sizeof(uint32_t);
+         size -= sizeof(uint32_t);
+@@ -561,11 +602,7 @@
+     if (size < sizeof(uint32_t)) {
+         return;
+     }
+-    switch (*(uint32_t *)data) {
+-    case VD_AGENT_CLIPBOARD_UTF8_TEXT:
+-        type = QEMU_CLIPBOARD_TYPE_TEXT;
+-        break;
+-    default:
++    if (!type_vdagent_to_qemu(*(uint32_t *)data, &type)) {
+         return;
+     }
+ 
+@@ -589,11 +626,7 @@
+     if (size < sizeof(uint32_t)) {
+         return;
+     }
+-    switch (*(uint32_t *)data) {
+-    case VD_AGENT_CLIPBOARD_UTF8_TEXT:
+-        type = QEMU_CLIPBOARD_TYPE_TEXT;
+-        break;
+-    default:
++    if (!type_vdagent_to_qemu(*(uint32_t *)data, &type)) {
+         return;
+     }
+     data += 4;
+@@ -643,6 +676,148 @@
+ }
+ 
+ /* ------------------------------------------------------------------ */
++/* vmlab: files to the guest                                          */
++
++static void vdagent_xfer_free(VDAgentXfer *x)
++{
++    close(x->fd);
++    g_free(x->name);
++    g_free(x);
++}
++
++static void vdagent_xfer_drop_all(VDAgentChardev *vd)
++{
++    g_list_free_full(g_steal_pointer(&vd->xfers), (GDestroyNotify)vdagent_xfer_free);
++}
++
++/* Tells the guest of the first file, once: it answers with a status (can send data). */
++static void vdagent_xfer_start(VDAgentChardev *vd)
++{
++    VDAgentXfer *x = vd->xfers ? vd->xfers->data : NULL;
++    g_autoptr(GKeyFile) keys = NULL;
++    g_autofree char *meta = NULL;
++    g_autofree VDAgentMessage *msg = NULL;
++    VDAgentFileXferStartMessage *start;
++    gsize len;
++
++    if (!x || x->started) {
++        return;
++    }
++    keys = g_key_file_new();
++    g_key_file_set_string(keys, "vdagent-file-xfer", "name", x->name);
++    g_key_file_set_uint64(keys, "vdagent-file-xfer", "size", x->size);
++    meta = g_key_file_to_data(keys, &len, NULL);
++    len += 1; /* with its NUL */
++    msg = g_malloc0(sizeof(VDAgentMessage) + sizeof(*start) + len);
++    start = (void *)msg->data;
++    start->id = x->id;
++    memcpy(start->data, meta, len);
++    msg->type = VD_AGENT_FILE_XFER_START;
++    msg->size = sizeof(*start) + len;
++    x->started = true;
++    vdagent_send_msg(vd, msg);
++}
++
++static void vdagent_xfer_finish(VDAgentChardev *vd, VDAgentXfer *x)
++{
++    vd->xfers = g_list_remove(vd->xfers, x);
++    vdagent_xfer_free(x);
++    vdagent_xfer_start(vd);
++}
++
++/* Queues the next pieces of the first file while little waits for the guest to read. */
++static void vdagent_xfer_pump(VDAgentChardev *vd)
++{
++    VDAgentXfer *x = vd->xfers ? vd->xfers->data : NULL;
++
++    while (x && x->can_send && vd->outbuf->len < VDAGENT_XFER_QUEUE &&
++           (x->sent < x->size || !x->empty_sent)) {
++        uint64_t want = MIN(x->size - x->sent, VDAGENT_XFER_CHUNK);
++        g_autofree VDAgentMessage *msg =
++            g_malloc0(sizeof(VDAgentMessage) + sizeof(VDAgentFileXferDataMessage) + want);
++        VDAgentFileXferDataMessage *data = (void *)msg->data;
++        ssize_t got = want ? read(x->fd, data->data, want) : 0;
++
++        if (got < 0 || (want && got == 0)) {
++            /* it cannot be read to its end: the guest drops what it has */
++            g_autofree VDAgentMessage *end =
++                g_malloc0(sizeof(VDAgentMessage) + sizeof(VDAgentFileXferStatusMessage));
++            VDAgentFileXferStatusMessage *status = (void *)end->data;
++
++            warn_report("vmlab: file drop: reading %s failed, cancelled", x->name);
++            status->id = x->id;
++            status->result = VD_AGENT_FILE_XFER_STATUS_CANCELLED;
++            end->type = VD_AGENT_FILE_XFER_STATUS;
++            end->size = sizeof(*status);
++            vdagent_send_msg(vd, end);
++            vdagent_xfer_finish(vd, x);
++            return;
++        }
++        data->id = x->id;
++        data->size = got;
++        msg->type = VD_AGENT_FILE_XFER_DATA;
++        msg->size = sizeof(*data) + got;
++        x->sent += got;
++        x->empty_sent = true; /* an empty file is one piece of no bytes */
++        vdagent_send_msg(vd, msg);
++    }
++}
++
++static void vdagent_chr_recv_xfer_status(VDAgentChardev *vd, VDAgentMessage *msg)
++{
++    VDAgentFileXferStatusMessage *status = (void *)msg->data;
++    VDAgentXfer *x = vd->xfers ? vd->xfers->data : NULL;
++
++    if (msg->size < sizeof(*status) || !x || !x->started || x->id != status->id) {
++        return;
++    }
++    switch (status->result) {
++    case VD_AGENT_FILE_XFER_STATUS_CAN_SEND_DATA:
++        x->can_send = true;
++        vdagent_xfer_pump(vd);
++        break;
++    case VD_AGENT_FILE_XFER_STATUS_SUCCESS:
++        info_report("vmlab: file drop: %s is on the guest's desktop", x->name);
++        vdagent_xfer_finish(vd, x);
++        break;
++    default:
++        warn_report("vmlab: file drop: the guest did not take %s (status %u)",
++                    x->name, status->result);
++        vdagent_xfer_finish(vd, x);
++        break;
++    }
++}
++
++bool qemu_vdagent_send_file(const char *path)
++{
++    VDAgentChardev *vd = vdagent_xfer_chardev;
++    VDAgentXfer *x;
++    struct stat st;
++    int fd;
++
++    if (!vd || !vd->connected || !vd->caps) {
++        warn_report("vmlab: file drop: the guest's agent is not connected (%s)", path);
++        return false;
++    }
++    fd = open(path, O_RDONLY | O_CLOEXEC);
++    if (fd < 0 || fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
++        warn_report("vmlab: file drop: %s is not a file that can be read", path);
++        if (fd >= 0) {
++            close(fd);
++        }
++        return false;
++    }
++    x = g_new0(VDAgentXfer, 1);
++    x->id = ++vd->xfer_id;
++    x->name = g_path_get_basename(path);
++    x->fd = fd;
++    x->size = st.st_size;
++    vd->xfers = g_list_append(vd->xfers, x);
++    vdagent_xfer_start(vd);
++    return true;
++}
++
++/* ------------------------------------------------------------------ */
+ /* chardev backend                                                    */
+ 
+ static bool vdagent_chr_open(Chardev *chr, ChardevBackend *backend,
+@@ -745,6 +920,9 @@
+             vdagent_chr_recv_clipboard(vd, msg);
+         }
+         break;
++    case VD_AGENT_FILE_XFER_STATUS:
++        vdagent_chr_recv_xfer_status(vd, msg);
++        break;
+     default:
+         break;
+     }
+@@ -774,6 +952,10 @@
+     }
+ 
+     if (!vd->xsize) {
++        if (msg->size > VDAGENT_BUFFER_LIMIT) {
++            error_report("%s: message too large: %u", __func__, msg->size);
++            return;
++        }
+         vd->xsize = msg->size + sizeof(*msg);
+         vd->xbuf = g_malloc0(vd->xsize);
+     }
+@@ -852,6 +1034,7 @@
+     VDAgentChardev *vd = QEMU_VDAGENT_CHARDEV(chr);
+ 
+     vdagent_send_buf(vd);
++    vdagent_xfer_pump(vd);
+ }
+ 
+ static void vdagent_disconnect(VDAgentChardev *vd)
+@@ -861,6 +1044,7 @@
+     vd->connected = false;
+     g_byte_array_set_size(vd->outbuf, 0);
+     vdagent_reset_bufs(vd);
++    vdagent_xfer_drop_all(vd);
+     vd->caps = 0;
+     if (vd->mouse_hs) {
+         qemu_input_handler_deactivate(vd->mouse_hs);
+@@ -1077,6 +1261,7 @@
+ 
+     vd->outbuf = g_byte_array_new();
+     vmstate_register_any(NULL, &vmstate_vdagent, vd);
++    vdagent_xfer_chardev = vd;
+ }
+ 
+ static void vdagent_post_init(Object *obj)
+@@ -1100,6 +1285,9 @@
+         migrate_del_blocker(&vd->migration_blocker);
+     }
+     vdagent_disconnect(vd);
++    if (vdagent_xfer_chardev == vd) {
++        vdagent_xfer_chardev = NULL;
++    }
+     if (vd->mouse_hs) {
+         qemu_input_handler_unregister(vd->mouse_hs);
+     }
+--- a/ui/gtk-clipboard.c
++++ b/ui/gtk-clipboard.c
+@@ -24,6 +24,15 @@
+ 
+ #include "ui/gtk.h"
+ 
++/* vmlab: the "info" of the clipboard's targets: which of QEMU's types one is */
++enum {
++    GD_CLIPBOARD_INFO_TEXT,
++    GD_CLIPBOARD_INFO_IMAGE,
++};
++
++/* vmlab: how long a paste on the host waits for the guest's data, in microseconds */
++#define GD_CLIPBOARD_WAIT_US (5 * G_USEC_PER_SEC)
++
+ static QemuClipboardSelection gd_find_selection(GtkDisplayState *gd,
+                                                 GtkClipboard *clipboard)
+ {
+@@ -44,19 +53,37 @@
+ {
+     GtkDisplayState *gd = data;
+     QemuClipboardSelection s = gd_find_selection(gd, clipboard);
+-    QemuClipboardType type = QEMU_CLIPBOARD_TYPE_TEXT;
++    QemuClipboardType type = selection_info == GD_CLIPBOARD_INFO_IMAGE ?
++        QEMU_CLIPBOARD_TYPE_IMAGE : QEMU_CLIPBOARD_TYPE_TEXT;
+     g_autoptr(QemuClipboardInfo) info = NULL;
++    gint64 deadline = g_get_monotonic_time() + GD_CLIPBOARD_WAIT_US;
+ 
+     info = qemu_clipboard_info_ref(qemu_clipboard_info(s));
+ 
++    /* vmlab: not for ever: a guest that answers with nothing would stop the whole VM here */
+     qemu_clipboard_request(info, type);
+     while (info == qemu_clipboard_info(s) &&
+            info->types[type].available &&
+-           info->types[type].data == NULL) {
++           info->types[type].data == NULL &&
++           g_get_monotonic_time() < deadline) {
+         main_loop_wait(false);
+     }
+ 
+-    if (info == qemu_clipboard_info(s) && gd->cbowner[s]) {
++    if (info != qemu_clipboard_info(s) || !gd->cbowner[s] || !info->types[type].data) {
++        /* clipboard owner changed while waiting for the data, or no data came */
++    } else if (type == QEMU_CLIPBOARD_TYPE_IMAGE) {
++        /* vmlab: the guest's picture is a PNG; GTK gives the asker the format it wants */
++        GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
++        gboolean ok = gdk_pixbuf_loader_write(loader, info->types[type].data,
++                                              info->types[type].size, NULL);
++
++        if (gdk_pixbuf_loader_close(loader, NULL) && ok &&
++            gdk_pixbuf_loader_get_pixbuf(loader)) {
++            gtk_selection_data_set_pixbuf(selection_data,
++                                          gdk_pixbuf_loader_get_pixbuf(loader));
++        }
++        g_object_unref(loader);
++    } else if (info == qemu_clipboard_info(s) && gd->cbowner[s]) {
+         gtk_selection_data_set_text(selection_data,
+                                     info->types[type].data,
+                                     info->types[type].size);
+@@ -89,7 +116,10 @@
+ 
+             list = gtk_target_list_new(NULL, 0);
+             if (info->types[QEMU_CLIPBOARD_TYPE_TEXT].available) {
+-                gtk_target_list_add_text_targets(list, 0);
++                gtk_target_list_add_text_targets(list, GD_CLIPBOARD_INFO_TEXT);
++            }
++            if (info->types[QEMU_CLIPBOARD_TYPE_IMAGE].available) {
++                gtk_target_list_add_image_targets(list, GD_CLIPBOARD_INFO_IMAGE, TRUE);
+             }
+             targets = gtk_target_table_new_from_list(list, &n_targets);
+ 
+@@ -150,6 +180,25 @@
+     qemu_clipboard_info_unref(info);
+ }
+ 
++/* vmlab: the host's picture, in whatever format it was, goes to the guest as a PNG */
++static void
++gd_clipboard_request_image_received_callback(GtkClipboard *clipboard,
++                                             GdkPixbuf *pixbuf,
++                                             gpointer data)
++{
++    QemuClipboardInfo *info = (QemuClipboardInfo *)data;
++    gchar *png = NULL;
++    gsize size = 0;
++
++    if (pixbuf && gdk_pixbuf_save_to_buffer(pixbuf, &png, &size, "png", NULL,
++                                            "compression", "3", NULL)) {
++        qemu_clipboard_set_data(info->owner, info, QEMU_CLIPBOARD_TYPE_IMAGE,
++                                size, png, true);
++        g_free(png);
++    }
++    qemu_clipboard_info_unref(info);
++}
++
+ static void gd_clipboard_request(QemuClipboardInfo *info,
+                                  QemuClipboardType type)
+ {
+@@ -162,6 +211,12 @@
+                                    gd_clipboard_request_text_received_callback,
+                                    info);
+         break;
++    case QEMU_CLIPBOARD_TYPE_IMAGE:
++        qemu_clipboard_info_ref(info);
++        gtk_clipboard_request_image(gd->gtkcb[info->selection],
++                                    gd_clipboard_request_image_received_callback,
++                                    info);
++        break;
+     default:
+         break;
+     }
+@@ -179,6 +234,9 @@
+         if (gtk_targets_include_text(targets, n_targets)) {
+             info->types[QEMU_CLIPBOARD_TYPE_TEXT].available = true;
+         }
++        if (gtk_targets_include_image(targets, n_targets, FALSE)) {
++            info->types[QEMU_CLIPBOARD_TYPE_IMAGE].available = true;
++        }
+     }
+ 
+     qemu_clipboard_update(info);

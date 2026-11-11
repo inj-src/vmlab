@@ -1,0 +1,16 @@
+{
+  "about": "NOT INSTALLED: removed from the mac base image on 2026-11-10 after losing the benchmark to macos-mcp; reinstall it before re-running. Was: steipete/Peekaboo 4.9.8: Peekaboo.app (login LaunchAgent) holds the TCC grants as Bridge host; `peekaboo mcp` over SSH attaches to its bridge.sock",
+  "server": {
+    "type": "stdio",
+    "command": "/home/inj-src/.local/bin/vm-mcp-stdio",
+    "args": [
+      "mac",
+      "/Users/dev/.local/share/peekaboo/peekaboo mcp --allow-foreground --bridge-socket '/Users/dev/Library/Application Support/Peekaboo/bridge.sock'"
+    ]
+  },
+  "deny": [
+    "mcp__cu__agent",
+    "mcp__cu__analyze"
+  ],
+  "ready": "for i in $(seq 12); do ~/.local/share/peekaboo/peekaboo permissions status --bridge-socket \"$HOME/Library/Application Support/Peekaboo/bridge.sock\" 2>/dev/null | grep -q 'Source: Peekaboo Bridge' && exit 0; sleep 3; done; exit 1"
+}

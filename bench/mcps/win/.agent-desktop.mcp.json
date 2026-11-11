@@ -1,0 +1,1 @@
+{"mcpServers": {"cu": {"type": "stdio", "command": "/home/inj-src/.local/bin/vm-mcp-tcp", "args": ["win", "8010"]}}}

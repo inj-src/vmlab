@@ -1,0 +1,14 @@
+cua-driver     notepad  PASS   53.6s turns=23 $0.479  vmlab benchmark 42
+cua-driver     notepad  PASS   42.1s turns=20 $0.209  vmlab benchmark 42
+cua-driver     calc     PASS   13.4s turns=3 $0.040  display='Display is 7,006,652'
+cua-driver     calc     PASS   13.3s turns=3 $0.031  display='Display is 7,006,652'
+cua-driver     form     PASS   31.1s turns=20 $0.160  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     form     PASS   50.8s turns=26 $0.261  {"name": "Ada Lovelace", "color": "Blue", "agree": true}
+cua-driver     export   PASS   21.7s turns=11 $0.134  bench export ok
+cua-driver     export   PASS   17.8s turns=8 $0.084  bench export ok
+cua-driver     folder   PASS   27.4s turns=13 $0.130  True
+cua-driver     folder   PASS   20.1s turns=10 $0.089  True
+cua-driver     vscode   PASS   22.3s turns=12 $0.191  console.log('vmlab')
+cua-driver     vscode   PASS   20.3s turns=11 $0.094  console.log('vmlab')
+cua-driver     build    PASS   18.7s turns=7 $0.082  real=26300.9457
+cua-driver     build    PASS   23.2s turns=12 $0.113  real=26300.9457

@@ -1,0 +1,85 @@
+diff --git a/crates/reims-vgpu-window/src/env.rs b/crates/reims-vgpu-window/src/env.rs
+index dc87e639..817f80e1 100644
+--- a/crates/reims-vgpu-window/src/env.rs
++++ b/crates/reims-vgpu-window/src/env.rs
+@@ -23,6 +23,8 @@ pub const SCREENS_VAR: &str = "REIMS_VGPU_WINDOW_SCREENS";
+ pub const REFRESH_VAR: &str = "REIMS_VGPU_WINDOW_REFRESH";
+ /// The window implementation's variable (macOS).
+ pub const IMPL_VAR: &str = "REIMS_VGPU_WINDOW_IMPL";
++/// The maximized switch's variable (vmlab).
++pub const MAXIMIZED_VAR: &str = "REIMS_VGPU_WINDOW_MAXIMIZED";
+ 
+ /// The highest refresh rate the variable accepts, in Hz.
+ const MAX_REFRESH_HZ: f64 = 1000.0;
+@@ -91,6 +93,14 @@ fn parse_refresh(value: &str) -> Option<f64> {
+     (hz.is_finite() && hz > 0.0 && hz <= MAX_REFRESH_HZ).then_some(hz)
+ }
+ 
++/// Whether a titled window opens maximized (vmlab; Linux): `REIMS_VGPU_WINDOW_MAXIMIZED` set to
++/// `1`, `true`, `yes` or `on`. The guest's mode stays what it is, and the window scales it. Read
++/// once per process.
++pub fn maximized() -> bool {
++    static MAXIMIZED: OnceLock<bool> = OnceLock::new();
++    *MAXIMIZED.get_or_init(|| std::env::var(MAXIMIZED_VAR).is_ok_and(|value| parse_switch(&value)))
++}
++
+ /// The process's settings, read from its environment the first time they are asked for. A
+ /// value that is not UTF-8 counts as unset.
+ pub fn settings() -> &'static Settings {
+diff --git a/crates/reims-vgpu-window/src/handle.rs b/crates/reims-vgpu-window/src/handle.rs
+index 23a62a2a..87a3ebfc 100644
+--- a/crates/reims-vgpu-window/src/handle.rs
++++ b/crates/reims-vgpu-window/src/handle.rs
+@@ -64,11 +64,17 @@ pub const TITLE: &str = "Reims vGPU";
+ 
+ /// The title of the window of the display on `port`: [`TITLE`], then " (port N)" for a port N
+ /// other than 0. The display's name is not in it.
++///
++/// vmlab: `REIMS_VGPU_WINDOW_TITLE`, where set and not blank, takes [`TITLE`]'s place.
+ pub fn title(port: u64) -> String {
++    let name = std::env::var("REIMS_VGPU_WINDOW_TITLE")
++        .ok()
++        .filter(|name| !name.trim().is_empty())
++        .unwrap_or_else(|| TITLE.to_owned());
+     if port == 0 {
+-        TITLE.to_owned()
++        name
+     } else {
+-        format!("{TITLE} (port {port})")
++        format!("{name} (port {port})")
+     }
+ }
+ 
+diff --git a/crates/reims-vgpu-window/src/native/linux/sdl.rs b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+index 4f8fc2ec..0e4bcc15 100644
+--- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
++++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+@@ -156,10 +156,14 @@ pub(crate) fn open(window: &Arc<Window>, borderless: bool, _taken: &[Frame]) ->
+     let size = windowed_size(display, mode, window.guest_scale(mode));
+     let min = units_of(display).min_content();
+     let title = c_string(window.title());
+-    let flags = SDL_WINDOW_VULKAN
++    let mut flags = SDL_WINDOW_VULKAN
+         | SDL_WINDOW_HIGH_PIXEL_DENSITY
+         | SDL_WINDOW_RESIZABLE
+         | SDL_WINDOW_HIDDEN;
++    // vmlab: `REIMS_VGPU_WINDOW_MAXIMIZED` opens a titled window maximized (`crate::env::maximized`)
++    if !borderless && crate::env::maximized() {
++        flags = flags | SDL_WINDOW_MAXIMIZED;
++    }
+     // SAFETY: SDL's video runs on this thread; the title is copied.
+     let sdl = unsafe { SDL_CreateWindow(title.as_ptr(), size.0, size.1, flags) };
+     if sdl.is_null() {
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index 0b274753..d21d6ec3 100644
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -155,7 +155,7 @@ pub(crate) fn open(window: &Arc<Window>) {
+             window: Arc::clone(window),
+             sdl: opened.sdl,
+             sdl_id,
+-            follows_guest: !borderless,
++            follows_guest: !borderless && !crate::env::maximized(),
+             asked: opened.asked,
+             layout: Layout::default(),
+             density: 1.0,

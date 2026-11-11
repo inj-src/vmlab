@@ -1,0 +1,38 @@
+diff --git a/system/vl.c b/system/vl.c
+index 468a9fc..3a08eb3 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -187,6 +187,8 @@ static bool nographic = false;
+ static int mem_prealloc; /* force preallocation of physical target memory */
+ static const char *vga_model = NULL;
+ static DisplayOptions dpy;
++/* vmlab: a GTK window beside egl-headless (VMLAB_WINDOW set), showing the frames it reads back */
++static DisplayOptions dpy_window;
+ static int num_serial_hds;
+ static Chardev **serial_hds;
+ static const char *log_mask;
+@@ -1390,6 +1392,14 @@ static void qemu_setup_display(void)
+     }
+ 
+     qemu_display_early_init(&dpy);
++    if (dpy.type == DISPLAY_TYPE_EGL_HEADLESS && g_getenv("VMLAB_WINDOW")) {
++        dpy_window.type = DISPLAY_TYPE_GTK;
++        dpy_window.has_gl = true;
++        dpy_window.gl = DISPLAY_GL_MODE_OFF;
++        dpy_window.u.gtk.has_zoom_to_fit = true;
++        dpy_window.u.gtk.zoom_to_fit = true;
++        qemu_display_early_init(&dpy_window);
++    }
+ }
+ 
+ static void qemu_create_default_devices(void)
+@@ -2715,6 +2725,9 @@ static void qemu_init_displays(void)
+     /* init local displays */
+     ds = init_displaystate();
+     qemu_display_init(ds, &dpy);
++    if (dpy_window.type == DISPLAY_TYPE_GTK) {
++        qemu_display_init(ds, &dpy_window);
++    }
+ 
+     /* must be after terminal init, SDL library changes signal handlers */
+     os_setup_signal_handling();

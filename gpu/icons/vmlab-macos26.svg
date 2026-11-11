@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- macOS Tahoe: the "26" of its version badge, glass-white on the lake's blues -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7fd4f7"/><stop offset=".45" stop-color="#2a8fe6"/><stop offset="1" stop-color="#1746b8"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d3ecff"/>
+    </linearGradient>
+    <radialGradient id="shine" cx=".3" cy=".15" r=".8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".45"/><stop offset=".6" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#bg)"/>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#shine)"/>
+  <g fill="none" stroke="url(#glass)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M52 104 A35 35 0 1 1 112 130 L52 186 H122"/>
+    <path d="M196 72 Q148 100 144 152"/>
+    <circle cx="178" cy="152" r="34"/>
+  </g>
+</svg>
