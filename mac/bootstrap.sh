@@ -39,6 +39,10 @@ sudo -u $U defaults write com.apple.loginwindow LoginwindowLaunchesRelaunchApps 
 sudo -u $U defaults write -g NSQuitAlwaysKeepsWindows -bool false
 # No "See what's new" Tips notifications popping over the desktop
 sudo -u $U launchctl disable gui/$(id -u $U)/com.apple.tipsd
+# The wheel scrolls as on the host's desktop (macOS's "natural scrolling" off; the user's wish,
+# 2026-11-12). In a running session, apply it without a logout:
+# /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u
+sudo -u $U defaults write -g com.apple.swipescrolldirection -bool false
 # Stable Dock: no "recent apps" section that shifts with whatever ran last
 sudo -u $U defaults write com.apple.dock show-recents -bool false
 # The first-boot "See what's new in macOS" notification survives the tipsd disable: click it once
