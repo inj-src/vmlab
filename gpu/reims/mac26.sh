@@ -39,6 +39,11 @@
 #                                        faster on small reads
 #   MAC26_FIRMWARE=stock                 reims' firmware as it is (TianoCore's logo at the
 #                                        start); otherwise a quiet copy of it, a black screen
+#   MAC26_SHARE=DIR|off                  the host folder macOS sees as smb://10.0.2.4/qemu
+#                                        (in the guest: ~/share). Default /vmlab/share, the
+#                                        same folder as the Windows VM's. QEMU starts a
+#                                        private smbd for it (-netdev user,smb=); the host's
+#                                        own Samba services are masked.
 #   MAC26_HUGE_PAGES=on, MAC26_CPU_EXTRA=+flag,...
 #   MAC26_LOG, MAC26_STATS, MAC26_TRACE  for diagnosis (../README.md)
 set -euo pipefail
@@ -99,6 +104,12 @@ start(){
     else
       echo "mac26: no quiet firmware ($V/logs/firmware.log): TianoCore's logo will show" >&2
     fi
+  fi
+  local share=${MAC26_SHARE:-/vmlab/share}
+  if [[ $share != off && -x /usr/sbin/smbd ]]; then
+    mkdir -p "$share"
+    sed -i "s|^\(  -netdev 'user,id=net0,[^']*\)'|\1,smb=$share'|" "$V/run.sh"
+    grep -q ",smb=$share'" "$V/run.sh" || die "could not give run.sh the shared folder"
   fi
   # MAC26_CPU_EXTRA: more flags for the guest CPU, e.g. +sha-ni
   [[ -n ${MAC26_CPU_EXTRA:-} ]] && sed -i "s|^\(  -cpu '[^']*\),check'|\1,$MAC26_CPU_EXTRA,check'|" "$V/run.sh"

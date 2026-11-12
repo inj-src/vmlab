@@ -62,6 +62,10 @@ KEY=$HOME/.ssh/vmlab_ed25519
 ISO=$HERE/win3d-guest.iso          # the guest driver package, as a CD (D:\Install.cmd)
 SSH_PORT=2222 VNC_DISPLAY=11      # VNC on 127.0.0.1:5911
 VCPUS=0-7                         # host CPUs for the guest's CPUs: the fast cores (../pin.py)
+# The host folder both VMs see as \\10.0.2.4\qemu (in the guest: C:\share). The NAT helper's
+# QEMU starts a private smbd for it at each connection (-netdev user,smb=); the host's own
+# Samba services are masked, so nothing serves it outside the VM. WIN_VENUS_SHARE=off: none.
+SHARE=${WIN_VENUS_SHARE:-/vmlab/share}
 
 die(){ echo "win-venus: $*" >&2; exit 1; }
 alive(){ [[ -f $S/$1.pid ]] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
@@ -137,9 +141,11 @@ start(){
   rm -f "$S"/{net,qmp,ga}.sock "$S"/{net,qemu}.pid "$S/size"; : > "$S/qemu.log"; : > "$S/net.log"
   # Both run as transient user units, so they outlive the terminal or app that started them,
   # and QEMU's stderr (the render server's messages too) lands in qemu.log.
+  local smb=
+  if [[ $SHARE != off && -x /usr/sbin/smbd ]]; then mkdir -p "$SHARE"; smb=,smb=$SHARE; fi
   unit vmlab-win-venus-net "$S/net.log" \
     /usr/bin/qemu-system-x86_64 -name win-venus-net -machine none -nodefaults -display none \
-    -netdev "user,id=u,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:$SSH_PORT-10.0.2.15:22" \
+    -netdev "user,id=u,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:$SSH_PORT-10.0.2.15:22$smb" \
     -netdev "stream,id=s,server=on,addr.type=unix,addr.path=$S/net.sock" \
     -netdev hubport,id=h0,hubid=0,netdev=u -netdev hubport,id=h1,hubid=0,netdev=s \
     -pidfile "$S/net.pid"
