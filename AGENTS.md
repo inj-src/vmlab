@@ -56,7 +56,7 @@ vm reset <name>              back to the clean state
   - 25 GB per VM at most. `vm cache` shows the size; `vm cache clear <name>` empties one (VM stopped). When a build runs out of room, remove old checkouts' `target` folders in it or clear it.
   - It belongs to every agent and project: another project's checkout there is not yours to delete. What a test must not inherit from an earlier run (an installed app, settings, a database) belongs on the system disk, which reset does clean.
 - **Large or loose files: the shared folder.** `/vmlab/share` on this machine is `C:\share` on `win` and `~/share` on `mac`, both ways, while the VM runs. On `mac` it appears about 30 s after SSH answers.
-  - Measured with 1 GB: `win` reads 400 MB/s and writes 165 MB/s; `mac` reads 170 MB/s and writes 23 MB/s. For a large file out of `mac`, `scp` is faster (140 MB/s): `scp -P 2227 -i ~/.ssh/vmlab_ed25519 dev@127.0.0.1:<file> <dir>`.
+  - Measured with 1 GB: `win` reads 500 MB/s and writes 260 MB/s; `mac` reads 155 MB/s and writes 22 MB/s. For a large file out of `mac`, `scp` is faster (140 MB/s): `scp -P 2227 -i ~/.ssh/vmlab_ed25519 dev@127.0.0.1:<file> <dir>`.
   - Build on the guest's own disk (`vm push`), not in the shared folder: there every file is a network round trip. Builds in it were not measured.
   - It is one folder for both VMs and outlives `vm reset`: remove what you put there.
 
@@ -76,7 +76,7 @@ vm reset <name>              back to the clean state
 
 ## Seeing and driving the screen (`vm gui`)
 
-`vm gui <name> shot <file.png>` is the VM's screen as it is, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.** It needs no setup.
+`vm gui <name> shot <file.png>` is the VM's screen as it is, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.** It needs no setup. To find an element by its name and act on it, use vmlab-mcp (next section); `vm gui` is for the picture and for input that has to be real.
 
 - `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
 - **Bring a window to the front first:** `run-interactive.ps1 -Command "C:\vmlab\focus.ps1 notepad"` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
@@ -115,7 +115,7 @@ Using it:
 
 `~/.config/vmlab/README.md`, by section:
 
-- **Gotchas:** something fails or behaves oddly in a VM. Read it before debugging: Windows PowerShell 5.1, `Path` over SSH and Windows features; Electron's postinstall; macOS packages and privacy permissions; killing processes by command line; GPU limits; browsers; the VM window; clock drift.
+- **Gotchas:** something fails or behaves oddly in a VM. Read it before debugging: Windows PowerShell 5.1, `Path` over SSH and Windows features; Electron's postinstall and its output through a pipe; Node versions with fnm; macOS packages and privacy permissions; killing processes by command line; GPU limits; browsers; the VM window; clock drift.
 - **When a VM lacks something you need:** a capability is missing (Direct3D 12 on `win` is the known case). You may work around it yourself; the section has the terms, the sources and what to tell the user.
 - **Smoke-test app:** a ready Electron app in both VMs for checking the lab itself.
 - **Where things live** and **Freeing disk space on /vmlab:** the disk images, the caches, what is safe to delete.
