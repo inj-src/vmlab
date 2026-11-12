@@ -32,7 +32,7 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 
 | What | Where | How it comes back |
 |---|---|---|
-| The VM disks, 92 GB | `/vmlab/images/win11-*`, `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` | Not rebuildable by a script from start to end. Windows: `win/create-win.sh` installs `win11-base`, `gpu/win3d/win-venus.sh setup` builds the clean state on it (not activated; the activated one exists only as `win11-ready.qcow2` and its backup). macOS: `reims create`, then the steps in `gpu/README.md`. Back these files up if they matter. |
+| The VM disks, 100 GB | `/vmlab/images/win11-*`, `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` | Not rebuildable by a script from start to end. Windows: `win/create-win.sh` installs `win11-base`, `gpu/win3d/win-venus.sh setup` builds the clean state on it (not activated; the activated one exists only as `win11-ready.qcow2` and its backup), then `win/setup-share.ps1` and `win/install-rust.ps1` over SSH. macOS also takes `mac/setup-share.sh` and `mac/install-rust.sh`. macOS: `reims create`, then the steps in `gpu/README.md`. Back these files up if they matter. |
 | The VMs' SSH key | `~/.ssh/vmlab_ed25519` | The guests trust its public half (`host/vmlab_ed25519.pub`, `win/config/authorized_keys`). Lost, a new key has to be put into both guests through their windows. |
 | The Windows kernel driver's test-signing key | `gpu/win3d/signing/` | Its own `.gitignore` keeps it out. Lost, `build-guest-kmd.sh` needs a new certificate, which the clean state then has to trust. |
 | vmlab-win3d release 0.1.2-alpha (QEMU, virglrenderer, guest driver package) | `gpu/win3d/release-0.1.2-alpha/`, unpacked into `src/`, `opt/qemu`, `opt/virgl`, `guest/` | Download from the VMLabDev/vmlab releases; `SHA256SUMS` here checks it. |
@@ -58,5 +58,9 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 - Packages for the builds: the list in `home/.config/vmlab/root-once.sh`, which ran once as
   root. The scripts also call `podman`, `qemu-img`, `virsh`, `passt`, `zenity`, `osslsigncode`
   and the system's OVMF (`/usr/share/OVMF`).
+- Samba, for the folder the VMs share with this machine (`/vmlab/share`): `host/install-samba.sh`
+  ran once as root. It masks `smbd`, `nmbd` and `samba-ad-dc` before installing, so this machine
+  serves nothing by itself; QEMU starts `/usr/sbin/smbd` privately for each VM run. Without the
+  package the launchers start the VMs without the shared folder.
 - The user is in the groups `kvm` and `libvirt`.
 - Root steps go through one zenity password prompt (`SUDO_ASKPASS=~/.local/bin/zenity-askpass sudo -A …`).

@@ -8,8 +8,8 @@ The VMs run on this Linux laptop (Ubuntu 24.04, 23 GB RAM) as QEMU user units, o
 
 | Name | Guest | Inside it |
 |---|---|---|
-| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, Python 3.12, uv, 7-Zip, VS Code, Chrome (default browser), Cua Driver |
-| `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3. | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, VS Code, Chrome (default browser), Cua Driver. No Homebrew. |
+| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
+| `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3. | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc; not Xcode itself), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, Rust 1.99 (clippy, rustfmt), VS Code, Chrome (default browser), Cua Driver. No Homebrew. |
 
 Login on both VMs: user `dev`, password `vmlab`. It is an admin account and logs in automatically. Each VM has 6 CPUs and 8 GB, and a 1920×1080 screen when it runs without a window. `mac` runs only x64 builds. For arm64 or Apple Silicon checks, use a GitHub Actions `macos-15` runner.
 
@@ -32,6 +32,7 @@ vm start <win|mac>           boot without a window and wait until SSH answers
 vm start <name> --window     the same, in a window on the user's desktop
 vm ssh <name> "<command>"    run a command inside the VM
 vm ip <name>, vm port <name> where its SSH is: 127.0.0.1, port 2222 (win) or 2227 (mac)
+vm push <name> <dir> [dest]  mirror the git work tree at <dir> into the VM
 vm tunnel <name> <port> [lp] forward the VM's 127.0.0.1:<port> to localhost:<lp>
 vm untunnel <lp>             close that forward
 vm view <name>               boot it in its window for the user (mouse and keyboard)
@@ -42,11 +43,23 @@ vm reset <name>              back to the clean state
 ## How to drive the VMs
 
 - **Builds, installs, test suites:** `vm ssh win "cd C:\src\app; npm ci; npx playwright test"`. On `mac`, use the same command with POSIX paths. Run Playwright `_electron` tests inside the VM.
+- **Code written on this machine:** `vm push <name> <dir>` (see [Getting code and files into a VM](#getting-code-and-files-into-a-vm)), then build inside the VM: `vm ssh win "cd C:\src\app; cargo build"`.
 - **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): use the vmlab MCP server. See [Driving a VM's GUI](#driving-a-vms-gui-vmlab-mcp).
 - **Electron app internals:** start the app inside the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222`, then connect Playwright or playwright-mcp to `http://localhost:9222`.
 - **Smoke-test app:** Electron 38 "Bench Form".
   - `win`: `C:\vmlab\bench-app`. Start it with `C:\vmlab\run-interactive.ps1 -Command "& C:\vmlab\bench-app\start.ps1"`.
   - `mac`: `~/vmlab/bench-app`. Start it with `open -n ~/vmlab/bench-app/node_modules/electron/dist/Electron.app --env BENCH_DIR=$HOME/bench --args ~/vmlab/bench-app`.
+
+## Getting code and files into a VM
+
+- **A repository: `vm push <name> <dir> [dest]`.** It mirrors the git work tree at `<dir>` to `C:\src\<repo>` on `win` or `~/src/<repo>` on `mac`: committed, uncommitted and untracked files, without ignored ones. The first push sends everything, later ones only the changes, and the guest's ignored build output (`target/`, `node_modules/`) stays, so builds after a push are incremental.
+  - The host repository's index and branches are untouched; the push adds the ref `refs/vmlab/push/<name>` there.
+  - Limits: git repositories only; submodules and Git LFS content are not sent. The guest copy is a mirror: files changed or added there (other than ignored ones) are overwritten or removed by the next push.
+  - `vm reset` removes the guest copy; the next push sends everything again.
+- **Large or loose files: the shared folder.** `/vmlab/share` on this machine is `C:\share` on `win` and `~/share` on `mac`, both ways, while the VM runs. On `mac` it appears about 30 s after SSH answers.
+  - Measured with 1 GB: `win` reads 400 MB/s and writes 165 MB/s; `mac` reads 170 MB/s and writes 23 MB/s. For a large file out of `mac`, `scp` is faster (140 MB/s): `scp -P 2227 -i ~/.ssh/vmlab_ed25519 dev@127.0.0.1:<file> <dir>`.
+  - Build on the guest's own disk (`vm push`), not in the shared folder: there every file is a network round trip. Builds in it were not measured.
+  - It is one folder for both VMs and outlives `vm reset`: remove what you put there.
 
 ## Driving a VM's GUI (vmlab-mcp)
 
@@ -79,6 +92,8 @@ Using it:
 - **Start agent work without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
 - **Windows Session 0:** anything started over SSH runs in an invisible session: its screenshots come out black and Vulkan finds no GPU there. To start something on the visible desktop, run `C:\vmlab\run-interactive.ps1 -Command "<ps>" [-NoWait]`. It shows no console window of its own. Use the same wrapper for winget, which only works in the desktop session.
 - **Windows PowerShell 5.1 from SSH** needs a clean module path: `Remove-Item Env:PSModulePath; powershell …`. Otherwise core cmdlets such as `Get-FileHash` are missing, and `run-interactive.ps1` fails that way.
+- **Windows Direct3D 12:** a native program finds no Direct3D 12 device; Direct3D 11, Vulkan and OpenGL work. `win-venus.sh d3d12 bridge` adds Direct3D 12 through Vulkan and costs Chrome and Electron their WebGL; `d3d12 native` undoes it (`/vmlab/tools/vmlab/gpu/README.md`).
+- **Windows `Path` over SSH:** an SSH session gets the machine's `Path`, not the user's. A tool installed per user (as cargo is) is found over SSH only once its folder is on the machine `Path` and Windows has restarted.
 - **Windows features:** Windows Update is disabled, so `Add-WindowsCapability` and the Store fail. Use winget, or GitHub MSIs.
 - **Node 26 and Electron's postinstall:** the electron package's zip extraction can exit early, leaving `node_modules/electron/dist` with only `locales/`. Fix it by extracting the cached zip from `%LOCALAPPDATA%\electron\Cache` with `tar -xf` into `dist`, then writing `electron.exe` to `path.txt`.
 - **Killing processes by command line:** `pkill -f <pattern>` (and the PowerShell equivalent, filtering on `CommandLine -match`) also matches the shell that runs it, so the command kills itself. Anchor the pattern (`^ssh .*`) or filter by process name.
@@ -89,7 +104,7 @@ Using it:
 - **macOS privacy permissions:** a tool started over SSH gets no Accessibility or Screen Recording access. That is why Cua Driver's daemon runs as LaunchAgent `com.trycua.cua-driver` in the desktop session and holds the grants (`/Applications/CuaDriver.app`); `cua-driver mcp` over SSH only proxies to its socket.
   - Reinstalling or updating Cua Driver can drop the grants. Check with `cua-driver permissions status`.
   - A new GUI tool needs a one-time approval in System Settings. Do that through `mac26.sh gui` (screenshots, clicks and typing from the host) or the VM window; the admin password is `vmlab`.
-  - SSH cannot read `~/Desktop`, `~/Documents` or `~/Downloads` ("Operation not permitted"). Keep test files elsewhere, such as `~/bench`.
+  - SSH sessions have full disk access (System Settings > General > Sharing > Remote Login > "Allow full disk access for remote users", set by hand: no command can). Without it SSH cannot read `~/Desktop`, `~/Documents`, `~/Downloads` or `~/share` ("Operation not permitted").
   - To serve another stdio GUI tool from the desktop session, use a socket-activated LaunchAgent (`inetdCompatibility` + `Sockets` on `127.0.0.1:<port>`) and connect with `vm-mcp-tcp mac <port>`. On `win`, the equivalent is a logon task running `win/stdio-tcp-bridge.ps1` from the build scripts.
 - **Electron on mac:** the same Node 26 postinstall bug applies. Extract `~/Library/Caches/electron/*/electron-v*-darwin-x64.zip` with `ditto -xk` (it keeps the framework symlinks) into `node_modules/electron/dist`, then write `Electron.app/Contents/MacOS/Electron` to `path.txt`.
 - **GPU:** apps that keep the normal 60 Hz frame limit run fine on both. Uncapped rendering on `win` (`--disable-gpu-vsync --disable-frame-rate-limit`) fills the card's 6 GB in about 10 s and Chrome loses its WebGL context: keep such runs to a few seconds. `win` shows a "Test Mode" watermark because its GPU driver is test-signed. Details: `/vmlab/tools/vmlab/gpu/README.md`.
@@ -107,14 +122,15 @@ Using it:
 
 - `win`: three disk layers in `/vmlab/images`. `win11-base.qcow2` is Windows as installed and is never written. `win11-ready.qcow2` on it is the clean state (GPU driver and the lab's fixes); `vm reset` returns to it and `vm commit` writes to it. `win11-venus.qcow2` holds the current run's changes. `win-venus.sh setup` builds the clean state again from `win11-base` (about 4 minutes).
 - `mac`: one disk, `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/disk.qcow2`. Its snapshot `clean` is the clean state.
+- `/vmlab/share` is the folder both VMs share with this machine. QEMU's own network serves it to the guest alone (a private `smbd` per VM run, at `\\10.0.2.4\qemu`); this machine's Samba services are masked and nothing listens on its network. Guest side: `win/setup-share.ps1`, `mac/setup-share.sh`. Rust: `win/install-rust.ps1`, `mac/install-rust.sh`.
 - `/vmlab/tools/vmlab/` is the lab's git repository (branch `main`, no remote): the GPU VMs' launchers and patches (`gpu/`), the build scripts (`win/`, `mac/`), the `vmlab-mcp` source (`vmlab-mcp/`) and the computer-use benchmark (`bench/`; run `python3 bench.py report`). Its `README.md` has the layout and what stays out of git.
 - This file, `~/.local/bin/vm`, its helpers and the two app-grid launchers are links into that repository's `home/`; `./install.sh` there makes the links. Edit them in place.
 
 ## Freeing disk space on /vmlab
 
-The VM SSD is 239 GB. On 2026-11-12 it had 69 GB free. The VMs' fixed cost is about 92 GB (Windows 38 GB, Mac 54 GB) and cannot shrink. Deleting any of this needs the user's go; nothing below is removed yet.
+The VM SSD is 239 GB. On 2026-11-12 it had 63 GB free. The VMs' fixed cost is about 100 GB (Windows 45 GB, Mac 55 GB) and cannot shrink; Rust and the Visual Studio Build Tools are 6.4 GB of the Windows figure and 0.6 GB of the Mac's. Deleting any of this needs the user's go; nothing below is removed yet.
 
-Check first what is temporary: `vm reset win` drops the current Windows run (`win11-venus.qcow2`), which is usually the quickest gain. The Mac disk only grows (54 GB of a possible 96 GB); `vm reset mac` returns to its `clean` snapshot but the file keeps its size.
+Check first what is temporary: `vm reset win` drops the current Windows run (`win11-venus.qcow2`), which is usually the quickest gain: a Rust project's build output there is 2 to 6 GB. `/vmlab/share` holds whatever agents left in it. The Mac disk only grows (55 GB of a possible 96 GB); `vm reset mac` returns to its `clean` snapshot but the file keeps its size.
 
 Removable without losing anything in use, about 33 GB:
 
@@ -132,7 +148,7 @@ Removable at a cost:
 |---|---|---|
 | `/vmlab/iso/win11.iso` | 8.5 GB | Needed only to reinstall Windows from zero (`win11-base.qcow2` exists); download again from the address in `win11.url`. |
 | `/vmlab/tools/vmlab/gpu/reims-vgpu-dev/target/` | 12 GB | Build cache. Without it the next Mac window change is a full build, not about 10 minutes. |
-| `/vmlab/images/win11-venus.backup-2026-11-12.*` | 4.3 GB | The only other copy of the activated Windows clean state. |
+| `/vmlab/images/win11-venus.backup-2026-11-12.*` | 4.3 GB | The activated Windows clean state as it was before Rust and the shared folder were added; the only other copy of an activated one. |
 | `/vmlab/tmp/win3d-cache`, `win3d-src`, `podman`, `m2v-target`, `win-qemu` | 6 GB | Build trees of the Windows drivers, the shader translator and QEMU; their build scripts make them again (`win-qemu` holds the patched QEMU source, which `qemu-patches/` reproduces). |
 
 Never delete: `/vmlab/images/win11-base.qcow2` and `win11-ready.*` (Windows), `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` (the Mac), `/vmlab/reims/rustup` and `/vmlab/reims/cargo` (the Rust toolchain `build-dev.sh` uses), `/vmlab/iso/virtio-win.iso` and `win-config.iso`.
