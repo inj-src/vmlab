@@ -460,7 +460,17 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   pins that size instead, scaled into the window (softer; the boot logo, drawn before
   WindowServer presents surfaces, is clipped, not scaled); `=follow` is reims' own behaviour.
   Without a window it is 1920×1080. The stable lane scaled a fixed 1920×1080 when its window
-  switch was written (not checked again since). Closing the window powers the VM off. Maximized and the title "macOS
+  switch was written (not checked again since). **Closing the window hides it at the click and shuts macOS down** (since 2026-11-12; `mac26.sh closed`,
+  run by the window code through our switch `REIMS_VGPU_WINDOW_CLOSE_COMMAND`: `sudo shutdown -h
+  now` over SSH, as `stop`). Where macOS cannot be reached (still starting, hung) or is still up
+  after 30 s, the VM is powered off. `start` waits for a shutdown that is under way.
+  `MAC26_CLOSE=poweroff` is reims' own behaviour, a power cut, with the window hidden at once
+  too. Before this the window stayed on its last frame until QEMU's shutdown reached the
+  display, about 5 s on the user's desktop, which read as a hang, and macOS came back with
+  "You shut down your computer because of a problem". Measured in the rig: the window gone
+  within 0.3 s of the click, the VM gone 8 to 10 s after it, 19 s from the click to SSH on a
+  start given at once; a close 3 s into boot powers off after 6 s (SSH's 5 s timeout). Not
+  checked: a close while macOS is up but refuses to shut down (the 30 s path). Maximized and the title "macOS
   26 Tahoe" come from two local switches in reims' window code, `REIMS_VGPU_WINDOW_MAXIMIZED=1`
   and `REIMS_VGPU_WINDOW_TITLE=…` (uncommitted in `reims-vgpu/` and `reims-vgpu-dev/`:
   `crates/reims-vgpu-window/src/{env.rs,handle.rs,native/linux/sdl.rs,sdl/shell.rs}`; a `reims
@@ -566,9 +576,11 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   and, on top of it in the dev lane, `window-pinned-mode.dev.patch`,
   `sdl-no-xdg-foreign-export.dev.patch` (`Cargo.toml`; `Cargo.lock` follows at the build),
   `window-full-screen-clipboard-file-drop.dev.patch`,
-  `window-keys-to-the-guest-pointer-free.dev.patch` and
-  `window-title-bar-gives-the-desktop-its-shortcuts.dev.patch`, are the uncommitted diff in each checkout
-  (checked 2026-11-12: applied in that order to a7761508 they give the built sources). Apply them again after an update, then rebuild. A new SDL
+  `window-keys-to-the-guest-pointer-free.dev.patch`,
+  `window-title-bar-gives-the-desktop-its-shortcuts.dev.patch` and
+  `window-close-hides-and-shuts-down.dev.patch`, are the uncommitted diff in each checkout
+  (checked 2026-11-12 for all but the last: applied in that order to a7761508 they give the
+  built sources; the last was made as the difference from that state). Apply them again after an update, then rebuild. A new SDL
   version needs a new copy of its crate with `sdl3-src-3.4.18-no-xdg-foreign-export.patch` and
   `sdl3-src-3.4.18-title-bar-press.patch`;
   the installed QEMU has the change if `strings` finds `VMLAB_SDL_XDG_EXPORT` in it. Tests:

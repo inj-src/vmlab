@@ -4,7 +4,9 @@
 #
 #   mac26.sh start [--window]             boot and wait for SSH
 #                                           --window: on the user's screen, maximized (closing
-#                                             it powers off). macOS takes the maximized
+#                                             it hides it at once and shuts macOS down, as
+#                                             stop does; MAC26_CLOSE=poweroff: it powers
+#                                             off). macOS takes the maximized
 #                                             window's pixels (1920x1048 on the 1920x1080
 #                                             monitor) and keeps them: a resize scales the
 #                                             picture. Maximized on a screen of another scale
@@ -77,7 +79,13 @@ start(){
     --window) window=1 ;;
     *) die "usage: mac26.sh start [--window]" ;;
   esac; done
+  # The window was closed a moment ago and macOS is still shutting down (closed, below): the
+  # start waits for it, 40 s at most.
+  if alive && [[ -e $V/closing ]]; then
+    for _ in $(seq 80); do alive || break; sleep 0.5; done
+  fi
   alive && die "already running"
+  rm -f "$V/closing"
   [[ $(virsh -c qemu:///system list --name | grep -c .) == 0 ]] || die "a libvirt VM is running: one VM at a time"
   systemctl --user is-active --quiet vmlab-win-venus && die "the Windows GPU VM is running: one VM at a time"
 
@@ -150,6 +158,11 @@ start(){
     # The guest keeps the resolution it starts with (our switch too, ../README.md): reims' own
     # window makes every resize a new macOS resolution.
     env+=(--setenv="REIMS_VGPU_WINDOW_MODE=${MAC26_WINDOW_SIZE:-first}")
+    # The window's close button shuts macOS down (closed, below; our switch in reims' window
+    # code, which hides the window at the click either way). Without the switch reims powers
+    # the VM off, a power cut to whatever is open in macOS: MAC26_CLOSE=poweroff keeps that.
+    [[ ${MAC26_CLOSE:-shutdown} == poweroff ]] ||
+      env+=(--setenv="REIMS_VGPU_WINDOW_CLOSE_COMMAND=$(readlink -f "$0") closed")
     # The window is Wayland's own (SDL alone would pick XWayland here, mutter 46 having no
     # fifo-v1): on a scaled screen (the laptop's panel, 125%) mutter 46 stretches an XWayland
     # window, and only a Wayland one gets the screen's own pixels. Three things make it safe
@@ -210,9 +223,23 @@ stop(){
   echo "macOS did not shut down in 90 s, powering off"; systemctl --user stop "$UNIT"; echo stopped
 }
 
+# The window's close button: run by reims' window code inside QEMU's unit
+# (REIMS_VGPU_WINDOW_CLOSE_COMMAND), after it has hidden the window. macOS shuts down as for
+# stop. A failure here has the window code power the VM off: no SSH (macOS still starting, or
+# hung), or macOS still up after 30 s. Its lines go to qemu.log.
+closed(){
+  : > "$V/closing"
+  guest true 2>/dev/null || { echo "mac26 $(date +%T): window closed, no SSH to macOS: powering off"; exit 1; }
+  echo "mac26 $(date +%T): window closed, macOS shuts down"
+  guest 'sudo shutdown -h now' > /dev/null 2>&1 || true
+  for _ in $(seq 60); do alive || exit 0; sleep 0.5; done
+  echo "mac26 $(date +%T): macOS still up after 30 s: powering off"; exit 1
+}
+
 case ${1:-} in
   start) shift; start "$@" ;;
   stop) stop ;;
+  closed) closed ;;
   kill) systemctl --user stop "$UNIT" 2>/dev/null || true; echo killed ;;
   status) alive && echo running || { echo "not running"
     # QEMU ends itself where reims cannot do what the guest asked; say so (../README.md)
@@ -224,5 +251,5 @@ case ${1:-} in
   commit) stopped
     qemu-img snapshot -l "$V/disk.qcow2" | grep -qw clean && qemu-img snapshot -d clean "$V/disk.qcow2"
     qemu-img snapshot -c clean "$V/disk.qcow2"; echo "the disk as it is now is the clean snapshot" ;;
-  *) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -1,0 +1,389 @@
+window: vmlab: a close hides the window at once and can shut the guest down
+
+Closing the window told the host, which powers the VM off, and left the window open until
+QEMU's shutdown reached the display: for about 5 s it showed its last frame and took no
+input, which the user took for a hang (2026-11-12), and every close was a power cut to macOS
+("You shut down your computer because of a problem" at the next login, Chrome's "didn't shut
+down correctly").
+
+Now, on Linux:
+
+- the close hides SDL's window at the click and stops drawing into it (`Closing::hide`,
+  `Shell::leaving`); SDL's window still goes at the display's release. A second close of a
+  hidden window asks for nothing.
+- `REIMS_VGPU_WINDOW_CLOSE_COMMAND` (a line for `/bin/sh -c`; `env::close_command`): the close
+  runs it in place of telling the host. A thread waits for it; where it cannot start or ends in
+  a failure the host is told as before (`native::linux::sdl::shut_down_by`). mac26.sh sets it
+  to `mac26.sh closed`, which shuts macOS down over SSH and fails where it cannot or macOS is
+  still up after 30 s.
+
+Tests: sdl::shell::a_close_sends_the_key_ups_and_ends_capture_before_the_host_hears_of_it,
+native::linux::sdl::a_close_command_that_fails_powers_the_vm_off,
+env::the_close_command_is_the_variables_text_or_none. In the rig (gpu/README.md, "A person at
+the screen"): the window gone within 0.3 s, the VM 8 to 10 s later; the failure path with a
+close 3 s into boot.
+
+--- a/crates/reims-vgpu-window/features.md
++++ b/crates/reims-vgpu-window/features.md
+@@ -428,8 +428,17 @@
+   over the image the pointer is in as it is.
+   `test: sdl::shell::a_window_the_pointer_is_not_in_leaves_the_cursor`,
+   `manual` (a VM with two displays)
+-- Leaving: closing a window asks the host to end the VM; the window closes
+-  at the display's release, once its swapchain is gone. `manual`
++- Leaving: closing a window hides it at once (vmlab; upstream leaves it
++  open, on its last frame, until the display's release) and asks the host to
++  end the VM; SDL's window goes at the display's release, once its swapchain
++  is gone. With `REIMS_VGPU_WINDOW_CLOSE_COMMAND` (vmlab; a line for
++  `/bin/sh -c`) the close runs that command instead, which shuts the guest
++  down, and the host is asked only where the command cannot start or ends
++  in a failure. A second close of a hidden window asks for nothing.
++  `test: sdl::shell::a_close_sends_the_key_ups_and_ends_capture_before_the_host_hears_of_it`,
++  `test: native::linux::sdl::a_close_command_that_fails_powers_the_vm_off`,
++  `test: env::the_close_command_is_the_variables_text_or_none`,
++  `manual`
+ 
+ Not on Linux: a menu bar, Dock icon or ⌘Tab entry (the compositor's task
+ bar shows the window, as `reims-vgpu`), the camera-housing fit, and trackpad
+--- a/crates/reims-vgpu-window/src/env.rs
++++ b/crates/reims-vgpu-window/src/env.rs
+@@ -24,6 +24,8 @@
+ pub const MAXIMIZED_VAR: &str = "REIMS_VGPU_WINDOW_MAXIMIZED";
+ /// The pinned mode's variable (vmlab).
+ pub const MODE_VAR: &str = "REIMS_VGPU_WINDOW_MODE";
++/// The close command's variable (vmlab).
++pub const CLOSE_COMMAND_VAR: &str = "REIMS_VGPU_WINDOW_CLOSE_COMMAND";
+ 
+ /// Which mode a window that keeps its size offers the guest (vmlab; `REIMS_VGPU_WINDOW_MODE`).
+ /// Pinned, a resize of the window changes nothing for the guest: the window fits the guest's
+@@ -212,6 +214,27 @@
+     *MAXIMIZED.get_or_init(|| std::env::var(MAXIMIZED_VAR).is_ok_and(|value| parse_switch(&value)))
+ }
+ 
++/// The command that shuts the guest down when the person closes a window (vmlab; Linux):
++/// `REIMS_VGPU_WINDOW_CLOSE_COMMAND`, a line for `/bin/sh -c`. The window hides and the command
++/// runs, in place of telling the host, which powers the VM off; the host is told only where the
++/// command cannot start or fails (`native::linux::sdl::shut_down_by`). Unset or blank: the host
++/// is told. Read once per process.
++pub fn close_command() -> Option<&'static str> {
++    static COMMAND: OnceLock<Option<String>> = OnceLock::new();
++    COMMAND
++        .get_or_init(|| parse_close_command(std::env::var(CLOSE_COMMAND_VAR).ok().as_deref()))
++        .as_deref()
++}
++
++/// The close command `value` names: its text without the blanks around it, and none where
++/// nothing is left.
++pub fn parse_close_command(value: Option<&str>) -> Option<String> {
++    value
++        .map(str::trim)
++        .filter(|command| !command.is_empty())
++        .map(str::to_owned)
++}
++
+ /// The process's settings, read from its environment the first time they are asked for. A
+ /// value that is not UTF-8 counts as unset.
+ pub fn settings() -> &'static Settings {
+@@ -230,6 +253,19 @@
+ mod tests {
+     use super::*;
+ 
++    /// The close command is the variable's text without the blanks around it; unset or blank,
++    /// there is none, and a close tells the host
++    #[test]
++    fn the_close_command_is_the_variables_text_or_none() {
++        assert_eq!(parse_close_command(None), None);
++        assert_eq!(parse_close_command(Some("")), None);
++        assert_eq!(parse_close_command(Some("  \t")), None);
++        assert_eq!(
++            parse_close_command(Some(" /lab/mac26.sh closed ")),
++            Some("/lab/mac26.sh closed".to_owned())
++        );
++    }
++
+     /// Unset or unparsable values are the defaults
+     #[test]
+     fn unset_or_unparsable_values_are_the_defaults() {
+--- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
++++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+@@ -417,6 +417,69 @@
+     false
+ }
+ 
++/// vmlab: the person closed the window: it leaves the screen at the click. Upstream keeps it
++/// open until QEMU's shutdown reaches the display, seconds later, and until then it shows its
++/// last frame and takes no input, which reads as a window that hung. SDL's window stays, for the
++/// render thread's surface under it, until the display's end ([`close`]).
++pub(crate) fn hide(shell: &mut Shell) {
++    // SAFETY: the window is SDL's, on this thread.
++    unsafe { SDL_HideWindow(shell.sdl) };
++}
++
++/// vmlab: starts the close command `command` (`crate::env::close_command`) for window `id`,
++/// which shuts the guest down: whether it started. Where it did not, the caller tells the host.
++/// Where it ends in anything but success, the host is told on the UI thread
++/// ([`shell::power_off`]), which powers the VM off: the command fails where the guest did not
++/// shut down (no way in to it, or still up when the command's time ran out).
++pub(crate) fn shut_down_by(command: &str, id: u64) -> bool {
++    let line = command.to_owned();
++    let started = run_close_command(command, move |why| {
++        log::warn!(
++            target: "reims_vgpu_window",
++            "close command {line:?} failed ({why}): powering the VM off"
++        );
++        super::ui::post(move || shell::power_off(id));
++    });
++    match started {
++        Ok(()) => {
++            log::info!(
++                target: "reims_vgpu_window",
++                "close command {command:?} shuts the guest down"
++            );
++            true
++        }
++        Err(error) => {
++            log::warn!(
++                target: "reims_vgpu_window",
++                "close command {command:?} did not start ({error}): powering the VM off"
++            );
++            false
++        }
++    }
++}
++
++/// Starts `command`, a line for `/bin/sh -c` with nothing to read and the process's own output
++/// (QEMU's log), and a thread that waits for it and calls `failed` with the reason where it ends
++/// in anything but success. An error where the command or the thread did not start.
++fn run_close_command(
++    command: &str,
++    failed: impl FnOnce(String) + Send + 'static,
++) -> std::io::Result<()> {
++    let mut child = std::process::Command::new("/bin/sh")
++        .arg("-c")
++        .arg(command)
++        .stdin(std::process::Stdio::null())
++        .spawn()?;
++    std::thread::Builder::new()
++        .name("reims-vgpu.close".into())
++        .spawn(move || match child.wait() {
++            Ok(status) if status.success() => {}
++            Ok(status) => failed(status.to_string()),
++            Err(error) => failed(error.to_string()),
++        })
++        .map(drop)
++}
++
+ /// The window goes: nothing of Linux's stays.
+ pub(crate) fn destroy(_shell: Shell) {}
+ 
+@@ -427,6 +490,31 @@
+     use crate::geometry::Rect;
+     use crate::keys::KeyEvent;
+ 
++    /// A close command that ends in success leaves the VM to it; one that fails, or that cannot
++    /// run, has the host told, with the reason
++    #[test]
++    fn a_close_command_that_fails_powers_the_vm_off() {
++        use std::sync::mpsc;
++        use std::time::Duration;
++        let wait = Duration::from_secs(20);
++        let (said, hears) = mpsc::channel();
++        run_close_command("exit 0", move |why| said.send(why).unwrap()).unwrap();
++        // the thread ended without a word: the sender is dropped
++        assert_eq!(
++            hears.recv_timeout(wait),
++            Err(mpsc::RecvTimeoutError::Disconnected)
++        );
++        let (said, hears) = mpsc::channel();
++        run_close_command("exit 3", move |why| said.send(why).unwrap()).unwrap();
++        assert!(hears.recv_timeout(wait).unwrap().contains('3'));
++        let (said, hears) = mpsc::channel();
++        run_close_command("/nonexistent/vmlab-close", move |why| {
++            said.send(why).unwrap();
++        })
++        .unwrap();
++        assert!(hears.recv_timeout(wait).unwrap().contains("127"));
++    }
++
+     /// The person's close lets the input go before the shell tells the host
+     /// (`shell::Shell::close_requested`): a held key and button go up, queued for the host, and
+     /// capture ends
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -22,8 +22,11 @@
+ //! draws a changed one: the drawable is the window's size in pixels, one pixel per screen pixel at
+ //! any scale.
+ //!
+-//! **Events.** Closing the window (its close button) tells the host, which ends the VM, and leaves
+-//! the window open: it closes when the display is released ([`close`]). Losing the keyboard
++//! **Events.** Closing the window (its close button) hides it at once (vmlab; upstream leaves it
++//! open, showing its last frame, until the display is released) and tells the host, which ends
++//! the VM; with a close command (vmlab; [`crate::env::close_command`]) the command shuts the guest
++//! down instead, and the host is told only where it fails. SDL's window goes when the display is
++//! released ([`close`]). Losing the keyboard
+ //! releases the input. The window shown, exposed, hidden, minimized, restored or covered tells the
+ //! render thread whether to draw ([`shows`]): nothing is presented into a window the person cannot
+ //! see. On Wayland a covered window is one the compositor suspends, whose FIFO present would wait
+@@ -91,6 +94,9 @@
+     shown: Option<bool>,
+     /// Its render thread has let its surface go.
+     released: bool,
++    /// vmlab: the person closed it. It is hidden and stays so, nothing is drawn into it, and a
++    /// second close asks for nothing.
++    leaving: bool,
+ }
+ 
+ /// What an OS made of a window that opened.
+@@ -165,6 +171,7 @@
+             closed: false,
+             shown: None,
+             released: false,
++            leaving: false,
+         });
+     });
+     with_shell(window.id(), |shell| {
+@@ -273,6 +280,7 @@
+         for shell in open.borrow_mut().iter_mut() {
+             if let Some(shown) = shell.shown.take()
+                 && !shell.closed
++                && !shell.leaving
+             {
+                 shell.window.surface().set_visible(shown);
+             }
+@@ -382,10 +390,14 @@
+         }
+     }
+ 
+-    /// The person closed the window: the input lets go ([`os::Input::close_requested`]), and the
+-    /// host is told, which ends the VM ([`close_asked`]). The window stays until the display's
+-    /// release closes it.
++    /// The person closed the window: the input lets go ([`os::Input::close_requested`]), the
++    /// window hides, and the guest is shut down or the host told, which ends the VM
++    /// ([`close_asked`]). SDL's window stays, hidden, until the display's release closes it. A
++    /// close of a window already leaving asks for nothing.
+     pub(crate) fn close_requested(&mut self) {
++        if self.leaving {
++            return;
++        }
+         log::info!(
+             target: "reims_vgpu_window",
+             "window {:?}: closed by the person",
+@@ -394,6 +406,13 @@
+         close_asked(self);
+     }
+ 
++    /// Tells the host of the close, which powers the VM off, while the window has its callbacks.
++    pub(crate) fn power_off(&self) {
++        if let Some(close) = self.window.callbacks().and_then(|c| c.close) {
++            close();
++        }
++    }
++
+     /// Sends what the input queued to the host's callbacks, while the window has them.
+     pub(crate) fn flush(&mut self) {
+         self.input.flush(&self.window);
+@@ -450,6 +469,9 @@
+     /// vmlab: tells the window its pixels, its screen's scale and whether it fills its screen
+     /// (`crate::env::Measured`), which a mode pinned from the window is taken from.
+     fn measure(&self) {
++        if self.leaving {
++            return;
++        }
+         let (mut width, mut height) = (0, 0);
+         // SAFETY: the window is SDL's, on this thread.
+         let (scale, flags) = unsafe {
+@@ -630,7 +652,9 @@
+     fn capture_changed(&mut self);
+     /// The grab, the pointer's hold and the size's hold follow capture.
+     fn holds_follow_capture(&mut self);
+-    /// The host is told of the close.
++    /// vmlab: the window leaves the screen, and nothing more is drawn into it.
++    fn hide(&mut self);
++    /// The guest is shut down by the close command, else the host is told of the close.
+     fn tell_host(&mut self);
+ }
+ 
+@@ -659,17 +683,32 @@
+         Shell::holds_follow_capture(self);
+     }
+ 
++    fn hide(&mut self) {
++        self.leaving = true;
++        self.window.surface().set_visible(false);
++        os::hide(self);
++    }
++
+     fn tell_host(&mut self) {
+-        if let Some(close) = self.window.callbacks().and_then(|c| c.close) {
+-            close();
++        if let Some(command) = crate::env::close_command()
++            && os::shut_down_by(command, self.window.id())
++        {
++            return;
+         }
++        self.power_off();
+     }
+ }
+ 
++/// vmlab: window `id`'s close command failed: the host is told of the close, which powers the VM
++/// off, as without a command.
++pub(crate) fn power_off(id: u64) {
++    with_shell(id, |shell| shell.power_off());
++}
++
+ /// A close the person asks for, in order: the input lets go, what it queued (the key-ups and the
+ /// pointer's buttons up) goes to the host, the grab, the title and the cursor follow where
+-/// capture ended, and only then is the host told, which takes its callbacks back, so the guest
+-/// gets the key-ups first.
++/// capture ended, the window hides (vmlab), and only then is the guest shut down or the host
++/// told, which takes its callbacks back, so the guest gets the key-ups first.
+ fn close_asked(c: &mut impl Closing) {
+     let captured = c.is_captured();
+     c.let_go();
+@@ -677,6 +716,7 @@
+     if c.is_captured() != captured {
+         c.capture_changed();
+     }
++    c.hide();
+     c.tell_host();
+ }
+ 
+@@ -776,14 +816,18 @@
+             self.steps.push("holds follow");
+         }
+ 
++        fn hide(&mut self) {
++            self.steps.push("hide");
++        }
++
+         fn tell_host(&mut self) {
+             self.steps.push("tell host");
+         }
+     }
+ 
+     /// The person's close lets the input go and sends what it queued, then has the grab, title
+-    /// and cursor follow the capture it ended, and tells the host last; with no capture to end,
+-    /// nothing follows it
++    /// and cursor follow the capture it ended, hides the window, and tells the host last; with no
++    /// capture to end, nothing follows it
+     #[test]
+     fn a_close_sends_the_key_ups_and_ends_capture_before_the_host_hears_of_it() {
+         let mut captured = Recorded {
+@@ -794,7 +838,7 @@
+         close_asked(&mut captured);
+         assert_eq!(
+             captured.steps,
+-            ["let go", "flush", "capture changed", "tell host"]
++            ["let go", "flush", "capture changed", "hide", "tell host"]
+         );
+         assert!(!captured.captured);
+         let mut free = Recorded {
+@@ -803,7 +847,7 @@
+             steps: Vec::new(),
+         };
+         close_asked(&mut free);
+-        assert_eq!(free.steps, ["let go", "flush", "tell host"]);
++        assert_eq!(free.steps, ["let go", "flush", "hide", "tell host"]);
+     }
+ 
+     /// The display's end lets the input go and sends what it queued, then lets go of the
