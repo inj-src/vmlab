@@ -124,6 +124,7 @@ Removable without losing anything in use, about 33 GB:
 | `/vmlab/tools/vmlab/gpu/reims-vgpu/` | 8.9 GB | The stable lane's checkout (8.3 GB of it is `target/`). The lane was dropped; `mac26.sh` uses only `/vmlab/reims-dev`. |
 | `/vmlab/iso/BaseSystem.img`, `/vmlab/iso/macos/` | 3.4 GB | Install media of the old plain Mac VM, which is deleted. |
 | `/vmlab/reims/data/reims-ctl/qemu/` | 1.9 GB | The stable lane's QEMU builds. |
+| `/vmlab/reims-dev/data/reims-ctl/qemu/<date>-…/`, every folder but the one `current` links to | 0.6 GB each | Earlier builds of the Mac's QEMU: each `gpu/reims/build-dev.sh` run adds a folder and moves `current`. With the Mac VM off. |
 
 Removable at a cost:
 
