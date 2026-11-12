@@ -73,7 +73,7 @@ The user's word on this (2026-11-12): when the work needs something the VMs don'
 
 ## Freeing disk space on /vmlab
 
-The VM SSD is 239 GB. On 2026-11-12 it had 92 GB free, after the first clean-up below. The VMs' fixed cost is about 100 GB (Windows 45 GB, Mac 55 GB) and cannot shrink; Rust and the Visual Studio Build Tools are 6.4 GB of the Windows figure and 0.6 GB of the Mac's. Deleting any of what is left needs the user's go.
+The VM SSD is 239 GB. On 2026-11-12 it had 119 GB free, after the clean-up below. The VMs' fixed cost is about 100 GB (Windows 45 GB, Mac 55 GB) and cannot shrink; Rust and the Visual Studio Build Tools are 6.4 GB of the Windows figure and 0.6 GB of the Mac's. Deleting any of what is left needs the user's go.
 
 Check first what is temporary: `vm reset win` drops the current Windows run (`win11-venus.qcow2`), which is usually the quickest gain. `/vmlab/share` holds whatever agents left in it. Build output is not on `/vmlab`: it is in the build caches on the system disk (`vm cache`, `vm cache clear <name>`). The Mac disk only grows (55 GB of a possible 96 GB); `vm reset mac` returns to its `clean` snapshot but the file keeps its size.
 
@@ -85,14 +85,17 @@ Removable again as it comes back, without losing anything in use:
 |---|---|---|
 | `/vmlab/reims-dev/data/reims-ctl/qemu/<date>-…/`, every folder but the one `current` links to | 0.6 GB each | Earlier builds of the Mac's QEMU: each `gpu/reims/build-dev.sh` run adds a folder and moves `current`. With the Mac VM off. |
 
+Also removed that day, each at a cost the user accepted (25 GB more):
+
+- `gpu/reims-vgpu-dev/target/` (12 GB), the Mac window program's build cache: the next `gpu/reims/build-dev.sh` is a full build. It grows back to that size.
+- `/vmlab/iso/win11.iso` (8.5 GB): needed only to reinstall Windows from zero (`win/create-win.sh`); download it again from the address in `/vmlab/iso/win11.url` and check it against `win11.iso.sha256`.
+- `/vmlab/tmp/win3d-cache`, `win3d-src`, `podman`, `m2v-target`, `win-qemu` (6 GB): build trees of the Windows drivers, the shader translator and QEMU. `gpu/win3d/build-guest-umd.sh`, `build-guest-kmd.sh` and `build-qemu.sh` make them again (downloads and a container image included); the signing key is not among them (`gpu/win3d/signing/`). They grow back when those scripts run.
+
 Removable at a cost:
 
 | Path | Size | Cost |
 |---|---|---|
-| `/vmlab/iso/win11.iso` | 8.5 GB | Needed only to reinstall Windows from zero (`win11-base.qcow2` exists); download again from the address in `win11.url`. |
-| `/vmlab/tools/vmlab/gpu/reims-vgpu-dev/target/` | 12 GB | Build cache. Without it the next Mac window change is a full build, not about 10 minutes. |
 | `/vmlab/images/win11-venus.backup-2026-11-12.*` | 4.3 GB | The activated Windows clean state as it was before Rust and the shared folder were added; the only other copy of an activated one. |
-| `/vmlab/tmp/win3d-cache`, `win3d-src`, `podman`, `m2v-target`, `win-qemu` | 6 GB | Build trees of the Windows drivers, the shader translator and QEMU; their build scripts make them again (`win-qemu` holds the patched QEMU source, which `qemu-patches/` reproduces). |
 
 Never delete: `/vmlab/images/win11-base.qcow2` and `win11-ready.*` (Windows), `/vmlab/images/*-cache-empty.qcow2` (the empty build cache disks), `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` (the Mac), `/vmlab/reims/rustup` and `/vmlab/reims/cargo` (the Rust toolchain `build-dev.sh` uses), `/vmlab/iso/virtio-win.iso` and `win-config.iso`.
 
