@@ -25,8 +25,12 @@
 #   mac26.sh ssh [command...]             dev@127.0.0.1 (password vmlab, passwordless sudo)
 #   mac26.sh scp SRC... DEST              copy files; the guest is dev@127.0.0.1:PATH
 #   mac26.sh gui shot FILE.png | click X Y | type 'text' | key cmd+q ...   (qdrive.py)
-#   mac26.sh reset                        back to the clean snapshot
+#   mac26.sh reset [--discard]            back to the clean snapshot
 #   mac26.sh commit                       make the disk as it is the clean snapshot
+#   mac26.sh state save NAME | load NAME [--discard] | rm NAME | list
+#                                         named states (`vm save`, `vm states`; ../states.sh):
+#                                         snapshots in the disk file beside `clean`. A commit
+#                                         leaves them as they are
 #
 # The VM is mac26d, port 2227, on reims' `development` branch with the lab's patches
 # (/vmlab/reims-dev, ../README.md). reims' `master` does not run macOS 26.7.1 here.
@@ -72,6 +76,14 @@ die(){ echo "mac26: $*" >&2; exit 1; }
 alive(){ systemctl --user is-active --quiet "$UNIT"; }
 guest(){ ssh "${SSH_OPTS[@]}" -p "$PORT" dev@127.0.0.1 "$@"; }
 stopped(){ alive && die "stop it first (mac26.sh stop)"; return 0; }
+STATES=/vmlab/images/states/mac ST_VM=mac     # the marks and notes of the named states; the states are in the disk file
+. /vmlab/tools/vmlab/gpu/states.sh
+# NAME, "-" (a snapshot's own size is not recorded anywhere), time saved
+snapshots(){ qemu-img info -U --output=json "$V/disk.qcow2" | python3 -I -c '
+import json, sys
+for s in json.load(sys.stdin).get("snapshots", []):
+    if s["name"] != "clean": print(s["name"], "-", s["date-sec"], sep="\t")'; }
+has_snapshot(){ snapshots | cut -f1 | grep -qx -- "$1"; }
 
 start(){
   local window=0 a
@@ -208,6 +220,7 @@ start(){
   [[ ${MAC26_HUGE_PAGES:-off} == on ]] && thp=()
   : > "$V/logs/qemu.log"
   systemctl --user reset-failed "$UNIT" 2>/dev/null || true
+  st_ran
   systemd-run --user --quiet --collect --unit="$UNIT" "${env[@]}" \
     -p StandardOutput="append:$V/logs/qemu.log" -p StandardError="append:$V/logs/qemu.log" "${thp[@]}" "$V/run.sh"
   for _ in $(seq 20); do python3 -I "${0%/*}/../pin.py" "$V/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
@@ -250,9 +263,22 @@ case ${1:-} in
   ssh) shift; guest "$@" ;;
   scp) shift; scp -q "${SSH_OPTS[@]}" -P "$PORT" "$@" ;;
   gui) shift; exec python3 -I /vmlab/tools/vmlab/gpu/reims/qdrive.py "$V/qmp.sock" "$@" ;;
-  reset) stopped; qemu-img snapshot -a clean "$V/disk.qcow2"; echo "reset to the clean snapshot" ;;
+  reset) stopped; st_guard "${2:-}"
+    qemu-img snapshot -a clean "$V/disk.qcow2"; st_mark clean; echo "reset to the clean snapshot" ;;
   commit) stopped
     qemu-img snapshot -l "$V/disk.qcow2" | grep -qw clean && qemu-img snapshot -d clean "$V/disk.qcow2"
-    qemu-img snapshot -c clean "$V/disk.qcow2"; echo "the disk as it is now is the clean snapshot" ;;
+    qemu-img snapshot -c clean "$V/disk.qcow2"; st_mark clean; echo "the disk as it is now is the clean snapshot" ;;
+  state) [[ ${2:-} == list ]] || stopped
+    case ${2:-} in
+      save) st_valid "${3:-}"
+        if has_snapshot "$3"; then qemu-img snapshot -d "$3" "$V/disk.qcow2"; fi
+        qemu-img snapshot -c "$3" "$V/disk.qcow2"; st_mark "$3"; echo "saved: $3" ;;
+      load) st_valid "${3:-}"; has_snapshot "$3" || die "no state '$3'"
+        st_guard "${4:-}"; qemu-img snapshot -a "$3" "$V/disk.qcow2"; st_mark "$3"; echo "loaded: $3" ;;
+      rm) st_valid "${3:-}"; has_snapshot "$3" || die "no state '$3'"
+        qemu-img snapshot -d "$3" "$V/disk.qcow2"; st_forget "$3"; echo "deleted: $3" ;;
+      list) snapshots ;;
+      *) die "usage: mac26.sh state save NAME | load NAME [--discard] | rm NAME | list" ;;
+    esac ;;
   *) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

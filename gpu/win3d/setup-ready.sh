@@ -35,6 +35,11 @@ say(){ echo "$(date +%T) $*"; }
 [[ -f $HERE/guest-umd/x64/viogpu_d3d10.dll && -f $HERE/guest-umd/x86/viogpu_d3d10.dll ]] || die "build the Direct3D driver first (build-guest-umd.sh)"
 [[ -f $HERE/guest-kmd/viogpu3d.sys ]] || die "build the kernel driver first (build-guest-kmd.sh)"
 "$W" status | grep -q '^not running' || die "the Windows VM is running: stop it first"
+# Named states (vm states) are changes to the ready state that goes: they would be a broken disk
+STATES=/vmlab/images/states/win
+if [[ -z ${WIN_VENUS_READY:-} ]] && compgen -G "$STATES/*.qcow2" > /dev/null; then
+  die "Windows has named states, which a new ready state makes unusable: vm clear win --all first"
+fi
 for u in vmlab-mac26d vmlab-mac26; do
   systemctl --user is-active -q "$u" && die "another VM is running ($u): one at a time"
 done
@@ -120,4 +125,5 @@ if [[ -f $RUN_DISK && $(qemu-img info --output=json "$RUN_DISK" | python3 -c 'im
 fi
 mv "$NEW" "$READY"
 mv "${NEW%.qcow2}.vars.fd" "$READY_VARS"
+[[ $READY != /vmlab/images/win11-ready.qcow2 ]] || { mkdir -p "$STATES"; echo clean > "$STATES/.current"; rm -f "$STATES/.changed"; }
 say "done: $READY ($(du -h "$READY" | cut -f1)) is the ready state"

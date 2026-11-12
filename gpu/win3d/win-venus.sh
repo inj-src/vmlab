@@ -40,8 +40,11 @@
 #                                       driver package's, for a native Direct3D 12 program; with it
 #                                       Chrome's GPU process crashes (guest-scripts/d3d12-mode.ps1).
 #                                       Restart Windows after a change
-#   win-venus.sh reset                  drop this run's changes: the next start is the ready state
-#   win-venus.sh commit                 make the stopped VM's disk the ready state (reset's target)
+#   win-venus.sh reset [--discard]      drop this run's changes: the next start is the ready state
+#   win-venus.sh commit [--drop-states] make the stopped VM's disk the ready state (reset's target)
+#   win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list
+#                                       named states (`vm save`, `vm states`; ../states.sh): the
+#                                       stopped VM's disk kept under a name, and put back
 #   win-venus.sh setup                  build the ready state again from win11-base (setup-ready.sh)
 #
 # QEMU is vmlab-win3d's (patched for NVIDIA), built here with a window (build-qemu.sh). Their
@@ -58,6 +61,13 @@ READY=${WIN_VENUS_READY:-/vmlab/images/win11-ready.qcow2}   # on BASE; its firmw
 READY_VARS=${READY%.qcow2}.vars.fd
 DISK=${WIN_VENUS_DISK:-/vmlab/images/win11-venus.qcow2}     # on READY
 S=/vmlab/run/win-venus            # sockets, pid files, logs, firmware variables
+# Named states: NAME.qcow2 is a run's disk kept as it was (the changes since READY, so each is
+# as large as what its run wrote) and NAME.vars.fd its firmware variables. Loading one copies
+# it to DISK: on this XFS disk a copy shares its blocks (reflink), so it takes no time or room.
+# They are written on READY: whatever changes READY (commit, setup) makes them unusable.
+STATES=/vmlab/images/states/win ST_VM=win
+# A trial on other files (setup-ready.sh) has nothing to do with them, or with their marks
+[[ -z ${WIN_VENUS_READY:-}${WIN_VENUS_DISK:-} ]] || STATES=$S/trial-states
 KEY=$HOME/.ssh/vmlab_ed25519
 ISO=$HERE/win3d-guest.iso          # the guest driver package, as a CD (D:\Install.cmd)
 SSH_PORT=2222 VNC_DISPLAY=11      # VNC on 127.0.0.1:5911
@@ -75,6 +85,7 @@ CACHE=${VMLAB_CACHE:-$HOME/.local/share/vmlab/cache}
 CACHE_EMPTY=/vmlab/images/win-cache-empty.qcow2
 
 die(){ echo "win-venus: $*" >&2; exit 1; }
+. "$HERE/../states.sh"
 alive(){ [[ -f $S/$1.pid ]] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
 qmp(){ # qmp '<json command>': one command over the QMP socket
   python3 -I - "$S/qmp.sock" "$1" <<'EOF'
@@ -135,6 +146,7 @@ start(){
   mkdir -p "$S"
   [[ -f $READY ]] || die "no ready state ($READY): win-venus.sh setup"
   [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"
+  st_ran
   # Secure Boot has to be off for the test-signed driver: plain OVMF with its own variables,
   # the ready state's where it has saved them
   [[ -f $S/OVMF_VARS.fd ]] || cp "$([[ -f $READY_VARS ]] && echo "$READY_VARS" || echo /usr/share/OVMF/OVMF_VARS_4M.fd)" "$S/OVMF_VARS.fd"
@@ -247,6 +259,8 @@ guest_scale(){
 guest_mode(){
   ssh_guest "Remove-Item Env:PSModulePath; powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\run-interactive.ps1 -TimeoutSec 30 -Command 'C:\\vmlab\\set-mode.ps1 $1'; exit \$LASTEXITCODE"; }
 
+state_names(){ local f n=(); for f in "$STATES"/*.qcow2; do [[ -f $f ]] && n+=("$(basename "$f" .qcow2)"); done; echo "${n[*]:-none}"; }
+
 case ${1:-} in
   start) start "${2:-}" "${3:-}" ;;
   # Internal, a unit of its own beside a windowed VM: QEMU keeps $S/scale at the scale, in
@@ -290,12 +304,41 @@ case ${1:-} in
   d3d12) [[ ${2:-status} =~ ^(native|bridge|status)$ ]] || die "usage: win-venus.sh d3d12 [native|bridge|status]"
     "$0" scp "$HERE/guest-scripts/d3d12-mode.ps1" dev@127.0.0.1:C:/vmlab/
     ssh_guest "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\d3d12-mode.ps1 ${2:-status}" ;;
-  reset) alive qemu && die "stop it first"; rm -f "$DISK" "$S/OVMF_VARS.fd"; echo "this run's changes dropped: the next start is the ready state" ;;
+  reset) alive qemu && die "stop it first"; st_guard "${2:-}"
+    rm -f "$DISK" "$S/OVMF_VARS.fd"; st_mark clean
+    echo "this run's changes dropped: the next start is the ready state" ;;
   commit) alive qemu && die "stop it first"
     [[ -f $DISK && -f $READY ]] || die "nothing to commit"
+    # The named states are changes to READY as it is now: on another READY they are a broken disk
+    if compgen -G "$STATES/*.qcow2" > /dev/null; then
+      [[ ${2:-} == --drop-states ]] ||
+        die "the ready state has named states on it, which a commit makes unusable: $(state_names). Save again what is needed afterwards and commit with --drop-states"
+      rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note
+    fi
     qemu-img commit -q "$DISK"; rm -f "$DISK"
     [[ -f $S/OVMF_VARS.fd ]] && cp "$S/OVMF_VARS.fd" "$READY_VARS"
+    st_mark clean
     echo "committed: $READY is the ready state" ;;
+  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm ]] && die "stop it first"
+    case ${2:-} in
+      save) st_valid "${3:-}"; mkdir -p "$STATES" "$S"
+        [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
+        cp --reflink=auto "$DISK" "$STATES/$3.qcow2.new"; mv "$STATES/$3.qcow2.new" "$STATES/$3.qcow2"
+        cp "$([[ -f $S/OVMF_VARS.fd ]] && echo "$S/OVMF_VARS.fd" || echo "$READY_VARS")" "$STATES/$3.vars.fd"
+        st_mark "$3"; echo "saved: $3" ;;
+      load) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
+        st_guard "${4:-}"; mkdir -p "$S"
+        cp --reflink=auto "$STATES/$3.qcow2" "$DISK.new"; mv "$DISK.new" "$DISK"
+        cp "$STATES/$3.vars.fd" "$S/OVMF_VARS.fd"
+        st_mark "$3"; echo "loaded: $3" ;;
+      rm) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
+        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd"; st_forget "$3"; echo "deleted: $3" ;;
+      list) for f in "$STATES"/*.qcow2; do   # NAME, bytes on disk, time saved
+          [[ -f $f ]] || continue
+          printf '%s\t%s\t%s\n' "$(basename "$f" .qcow2)" "$(( $(stat -c %b "$f") * 512 ))" "$(stat -c %Y "$f")"
+        done ;;
+      *) die "usage: win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list" ;;
+    esac ;;
   setup) shift; exec "$HERE/setup-ready.sh" "$@" ;;
   *) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
