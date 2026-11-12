@@ -85,13 +85,13 @@ Removable again as it comes back, without losing anything in use:
 |---|---|---|
 | `/vmlab/reims-dev/data/reims-ctl/qemu/<date>-…/`, every folder but the one `current` links to | 0.6 GB each | Earlier builds of the Mac's QEMU: each `gpu/reims/build-dev.sh` run adds a folder and moves `current`. With the Mac VM off. |
 
-Also removed that day, each at a cost the user accepted (29 GB more):
+Also removed that day, each at a cost the user accepted (26 GB more by `df`):
 
 - `gpu/reims-vgpu-dev/target/` (12 GB), the Mac window program's build cache: the next `gpu/reims/build-dev.sh` is a full build. It grows back to that size.
 - `/vmlab/iso/win11.iso` (8.5 GB): needed only to reinstall Windows from zero (`win/create-win.sh`); download it again from the address in `/vmlab/iso/win11.url` and check it against `win11.iso.sha256`.
 - `/vmlab/tmp/win3d-cache`, `win3d-src`, `podman`, `m2v-target`, `win-qemu` (6 GB): build trees of the Windows drivers, the shader translator and QEMU. `gpu/win3d/build-guest-umd.sh`, `build-guest-kmd.sh` and `build-qemu.sh` make them again (downloads and a container image included); the signing key is not among them (`gpu/win3d/signing/`). They grow back when those scripts run.
 
-- `/vmlab/images/win11-venus.backup-2026-11-12.*` (4.3 GB), the older activated Windows clean state: `win11-ready.qcow2` is now the only activated Windows (`gpu/README.md`, "Activation").
+- `/vmlab/images/win11-venus.backup-2026-11-12.*` (4.3 GB by `du`, about 1 GB freed by `df`: it shared most of its blocks with `win11-ready.qcow2`), the older activated Windows clean state: `win11-ready.qcow2` is now the only activated Windows (`gpu/README.md`, "Activation").
 
 Never delete: `/vmlab/images/win11-base.qcow2` and `win11-ready.*` (Windows), `/vmlab/images/*-cache-empty.qcow2` (the empty build cache disks), `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` (the Mac), `/vmlab/reims/rustup` and `/vmlab/reims/cargo` (the Rust toolchain `build-dev.sh` uses), `/vmlab/iso/virtio-win.iso` and `win-config.iso`.
 
