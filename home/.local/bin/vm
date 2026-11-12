@@ -130,6 +130,56 @@ cmd_tunnel(){
 # Anchored to ^ssh so it never matches the shell that runs it.
 cmd_untunnel(){ pkill -f "^ssh .*-L 127\.0\.0\.1:$1:" && echo "closed localhost:$1" || echo "no tunnel on localhost:$1"; }
 
+# vm push <name> <dir> [dest]: the git work tree <dir> is in, as it is now (uncommitted changes
+# and untracked files too, ignored files not), mirrored to a checkout in the guest. It goes as
+# a git bundle over SSH, after the first time only what changed. In the guest, files that left
+# the tree are removed and ignored ones (build output) are kept, so builds stay incremental.
+# The snapshot is a commit of its own that no branch holds: the repository's index, branch and
+# work tree are not touched; refs/vmlab/push/<name> keeps the last one, so the next push can
+# send the difference.
+cmd_push(){
+  local n=$1 src=$2 dest=${3:-} top; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"
+  top=$(git -C "$src" rev-parse --show-toplevel 2>/dev/null) || die "$src is not in a git work tree"
+  local home; case $n in win) home=C:/Users/${GUSER[$n]} ;; mac) home=/Users/${GUSER[$n]} ;; esac
+  [[ -n $dest ]] || case $n in win) dest=C:/src/$(basename "$top") ;; mac) dest=$home/src/$(basename "$top") ;; esac
+  dest=${dest//\\//}
+  [[ $dest =~ ^[A-Za-z0-9_./:\ -]+$ ]] || die "the destination may hold letters, digits, spaces and . _ - / : only: $dest"
+
+  local tmp; tmp=$(mktemp -d "$LAB/tmp/vm-push.XXXXXX")
+  # The work tree as a tree object, through an index of its own (a copy, so unchanged files
+  # are not read again)
+  cp "$(git -C "$top" rev-parse --absolute-git-dir)/index" "$tmp/index" 2>/dev/null || true
+  local tree commit prev ref=refs/vmlab/push/$n
+  GIT_INDEX_FILE=$tmp/index git -C "$top" add -A
+  tree=$(GIT_INDEX_FILE=$tmp/index git -C "$top" write-tree)
+  # The same tree gives the same commit: no parent, fixed name and date
+  commit=$(GIT_AUTHOR_NAME=vmlab GIT_AUTHOR_EMAIL=vmlab@localhost GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' \
+    GIT_COMMITTER_NAME=vmlab GIT_COMMITTER_EMAIL=vmlab@localhost GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+    git -C "$top" commit-tree "$tree" -m "vm push") || { rm -rf "$tmp"; die "could not record the work tree"; }
+  git -C "$top" update-ref "$ref" "$commit"
+
+  # What the guest's checkout is at; a bundle of the difference where this repository still
+  # has that commit, of everything otherwise (first push, or the VM was reset)
+  prev=$(guest "$n" "git -C \"$dest\" rev-parse -q --verify refs/vmlab/pushed" 2>/dev/null | tr -d '\r\n' || true)
+  local sent="nothing to send"
+  if [[ $prev != "$commit" ]]; then
+    local -a range=("$ref")
+    [[ $prev =~ ^[0-9a-f]{40,64}$ ]] && git -C "$top" cat-file -e "$prev^{commit}" 2>/dev/null && range+=("^$prev")
+    git -C "$top" bundle create -q "$tmp/push.bundle" "${range[@]}" || { rm -rf "$tmp"; die "could not pack the work tree"; }
+    sent="$(du -h "$tmp/push.bundle" | cut -f1) sent"
+    local -a o; read -r -a o <<< "$(ssh_opts "$n")"
+    scp -q "${o[@]/#-p/-P}" "$tmp/push.bundle" "${GUSER[$n]}@127.0.0.1:$home/vm-push.bundle" || { rm -rf "$tmp"; die "could not copy the bundle to $n"; }
+    # One line that PowerShell 7 and zsh both run. autocrlf off: the guest gets the bytes the
+    # host has
+    guest "$n" "git init -q \"$dest\" && git -C \"$dest\" config core.autocrlf false && git -C \"$dest\" config core.longpaths true && git -C \"$dest\" fetch -q \"$home/vm-push.bundle\" $ref && git -C \"$dest\" checkout -q -f --detach FETCH_HEAD && git -C \"$dest\" clean -q -fd && git -C \"$dest\" update-ref refs/vmlab/pushed FETCH_HEAD && git -C \"$dest\" rev-parse -q --verify refs/vmlab/pushed" \
+      | tr -d '\r\n' | grep -qx "$commit" || { rm -rf "$tmp"; die "$n did not take the bundle (left in the guest: $home/vm-push.bundle)"; }
+    guest "$n" "rm \"$home/vm-push.bundle\"; git -C \"$dest\" gc -q --auto" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp"
+  echo "$n: $dest is the work tree of $top ($sent)"
+}
+
 cmd_help(){ cat <<'EOF'
 vm status                      which VM is running, where its SSH is, who started it
 vm start <win|mac> [--window]  boot (refuses if the other VM is running) and wait for SSH.
@@ -137,11 +187,16 @@ vm start <win|mac> [--window]  boot (refuses if the other VM is running) and wai
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
                                it land on the guest's desktop). Without: no window
 vm ssh <name> [command...]     shell or one command in the VM (win: PowerShell, mac: zsh)
+vm push <name> <dir> [dest]    mirror the git work tree at <dir>, uncommitted and untracked
+                               files too (not ignored ones), to the guest: C:\src\<repo> on
+                               win, ~/src/<repo> on mac, or <dest>. Later pushes send only
+                               the changes and keep the guest's build output
 vm tunnel <name> <port> [lp]   forward VM's 127.0.0.1:<port> to localhost:<lp>
 vm untunnel <localport>        close a tunnel opened by vm tunnel
 vm view <name>                 start it in its window; if it already runs without one, win
                                opens a plain viewer and mac has to be stopped first
 vm ip <name>, vm port <name>   where the VM's SSH is: 127.0.0.1 and a port (win 2222, mac 2227)
+Shared folder: /vmlab/share on this machine is C:\share on win and ~/share on mac.
 vm stop <name>                 graceful shutdown (forced after 2 min)
 vm reset <name>                discard all changes since the clean state (VM must be stopped)
 vm commit <name>               make the current state the new clean state (VM must be stopped)
@@ -155,6 +210,7 @@ case $sub in
   stop|reset|commit|ip|port|view) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;
   untunnel) [[ $# -ge 1 ]] || die "usage: vm untunnel <localport>"; cmd_untunnel "$1" ;;
+  push) [[ $# -ge 2 && $# -le 3 ]] || die "usage: vm push <name> <dir> [dest]"; cmd_push "$@" ;;
   tunnel) [[ $# -ge 2 ]] || die "usage: vm tunnel <name> <port> [localport]"; cmd_tunnel "$@" ;;
   *) die "unknown command '$sub' (vm help)" ;;
 esac
