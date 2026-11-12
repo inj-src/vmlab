@@ -49,7 +49,7 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 | reims-util | `gpu/reims-util/` | github.com/steelbrain/reims-util at `ed7398997f83f9d004477e6eab8eaf46a462a47a`, unchanged. |
 | The Mac window's title bar plugin | `gpu/reims/libdecor-cairo/libdecor-cairo.so` | `gpu/reims/libdecor-vmlab/build.sh install` (the tarball and the patch are tracked). |
 | The Rust toolchain | `/vmlab/reims/rustup`, `/vmlab/reims/cargo` | rustup, with `RUSTUP_HOME` and `CARGO_HOME` set to those. |
-| Stable lane leftovers | `gpu/reims-vgpu/`, `gpu/metal2vulkan/`, `gpu/win-research/` | Not used by the VMs (`home/.config/vmlab/README.md`, "Freeing disk space"). |
+| Stable lane leftovers | `gpu/metal2vulkan/`, `gpu/win-research/` | Not used by the VMs (`home/.config/vmlab/README.md`, "Freeing disk space"). The lane's checkout `gpu/reims-vgpu/` was removed on 2026-11-12. |
 
 ## The host
 

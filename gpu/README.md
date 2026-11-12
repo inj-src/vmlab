@@ -417,7 +417,7 @@ There were two lanes, each a VM with its own disk and `clean` snapshot, chosen w
 The dev lane is the default since 2026-11-11 and the one that feels smooth: five boots in a row
 came up, each with 0 or 1 late frame, 60 frames a second in all three benchmark tests and the
 Electron 38 app running; VS Code and the WebGL Aquarium run too. It has had one afternoon of use,
-so fall back to `MAC26_LANE=stable` if it misbehaves. What the stable lane's lag was: it copies about 68 MB
+and the stable lane is gone since 2026-11-12: its VM, its checkout `reims-vgpu/`, its QEMU builds and the macOS installer were deleted for the space (its local commit and uncommitted changes are two patches in `/vmlab/tmp/old-git/`), so the column and the notes on it below are history. What the stable lane's lag was: it copies about 68 MB
 of guest memory into video memory every frame, whether or not it changed (measured with the
 `wcs` counters, an uncommitted diff in `reims-vgpu/…/gpu/timing.rs`). Only one lane's VM can run.
 

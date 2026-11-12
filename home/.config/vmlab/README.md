@@ -73,18 +73,16 @@ The user's word on this (2026-11-12): when the work needs something the VMs don'
 
 ## Freeing disk space on /vmlab
 
-The VM SSD is 239 GB. On 2026-11-12 it had 63 GB free. The VMs' fixed cost is about 100 GB (Windows 45 GB, Mac 55 GB) and cannot shrink; Rust and the Visual Studio Build Tools are 6.4 GB of the Windows figure and 0.6 GB of the Mac's. Deleting any of this needs the user's go; nothing below is removed yet.
+The VM SSD is 239 GB. On 2026-11-12 it had 92 GB free, after the first clean-up below. The VMs' fixed cost is about 100 GB (Windows 45 GB, Mac 55 GB) and cannot shrink; Rust and the Visual Studio Build Tools are 6.4 GB of the Windows figure and 0.6 GB of the Mac's. Deleting any of what is left needs the user's go.
 
 Check first what is temporary: `vm reset win` drops the current Windows run (`win11-venus.qcow2`), which is usually the quickest gain. `/vmlab/share` holds whatever agents left in it. Build output is not on `/vmlab`: it is in the build caches on the system disk (`vm cache`, `vm cache clear <name>`). The Mac disk only grows (55 GB of a possible 96 GB); `vm reset mac` returns to its `clean` snapshot but the file keeps its size.
 
-Removable without losing anything in use, about 33 GB:
+Removed on 2026-11-12 with the user's go (31 GB freed, measured with `df`): the macOS offline installer (`/vmlab/reims/data/reims-ctl/installers/`, 19 GB; `reims` downloads it again when a Mac VM is built from zero), the dropped stable lane's checkout and QEMU builds (`gpu/reims-vgpu/`, `/vmlab/reims/data/reims-ctl/qemu/`; its one local commit and its uncommitted changes are kept as two patches in `/vmlab/tmp/old-git/`), the old plain Mac VM's install media (`/vmlab/iso/BaseSystem.img`, `/vmlab/iso/macos/`; `mac/create-mac.sh` wants them back before it can run) and one earlier build of the Mac's QEMU.
+
+Removable again as it comes back, without losing anything in use:
 
 | Path | Size | What is lost |
 |---|---|---|
-| `/vmlab/reims/data/reims-ctl/installers/` | 19 GB | The macOS 26.7.1 offline installer. Only needed to build a Mac VM from zero; `reims` downloads it again. |
-| `/vmlab/tools/vmlab/gpu/reims-vgpu/` | 8.9 GB | The stable lane's checkout (8.3 GB of it is `target/`). The lane was dropped; `mac26.sh` uses only `/vmlab/reims-dev`. |
-| `/vmlab/iso/BaseSystem.img`, `/vmlab/iso/macos/` | 3.4 GB | Install media of the old plain Mac VM, which is deleted. |
-| `/vmlab/reims/data/reims-ctl/qemu/` | 1.9 GB | The stable lane's QEMU builds. |
 | `/vmlab/reims-dev/data/reims-ctl/qemu/<date>-…/`, every folder but the one `current` links to | 0.6 GB each | Earlier builds of the Mac's QEMU: each `gpu/reims/build-dev.sh` run adds a folder and moves `current`. With the Mac VM off. |
 
 Removable at a cost:
