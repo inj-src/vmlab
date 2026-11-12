@@ -66,6 +66,13 @@ VCPUS=0-7                         # host CPUs for the guest's CPUs: the fast cor
 # QEMU starts a private smbd for it at each connection (-netdev user,smb=); the host's own
 # Samba services are masked, so nothing serves it outside the VM. WIN_VENUS_SHARE=off: none.
 SHARE=${WIN_VENUS_SHARE:-/vmlab/share}
+# The build cache: a second disk, C:\cache in the guest, that `reset` and `commit` leave alone
+# (checkouts, their build output, cargo's downloads). It is on the system disk, at the user's
+# wish (2026-11-12), not on /vmlab: at most 25 GB, as large as what is in it. Missing, it is
+# made from the empty formatted one in CACHE_EMPTY (so deleting the file empties the cache), or
+# blank where that is missing too (win/setup-cache.ps1 formats it). VMLAB_CACHE=off: no such disk.
+CACHE=${VMLAB_CACHE:-$HOME/.local/share/vmlab/cache}
+CACHE_EMPTY=/vmlab/images/win-cache-empty.qcow2
 
 die(){ echo "win-venus: $*" >&2; exit 1; }
 alive(){ [[ -f $S/$1.pid ]] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
@@ -151,6 +158,16 @@ start(){
     -pidfile "$S/net.pid"
   up net || die "the NAT helper did not start: $(cat "$S/net.log")"
 
+  local cache=()
+  if [[ $CACHE != off ]]; then
+    mkdir -p "$CACHE"
+    if [[ ! -f $CACHE/win.qcow2 ]]; then
+      if [[ -f $CACHE_EMPTY ]]; then cp "$CACHE_EMPTY" "$CACHE/win.qcow2"; else qemu-img create -q -f qcow2 "$CACHE/win.qcow2" 25G; fi
+    fi
+    cache=(-blockdev "driver=qcow2,node-name=cache0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename=$CACHE/win.qcow2"
+      -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=io0)
+  fi
+
   echo "$gpu" > "$S/gpu"
   # The clipboard channel (qemu-vdagent) has mouse=off: left on, QEMU sends every pointer move
   # through the agent program inside Windows, not the USB tablet, and the pointer lags
@@ -165,7 +182,7 @@ start(){
     -drive if=pflash,format=raw,file="$S/OVMF_VARS.fd" \
     -object iothread,id=io0 \
     -blockdev driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename="$DISK" \
-    -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0 \
+    -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0 "${cache[@]}" \
     -drive if=none,id=cd0,media=cdrom,readonly=on,format=raw,file="$ISO" -device ide-cd,drive=cd0 \
     -netdev "stream,id=n,server=off,addr.type=unix,addr.path=$S/net.sock" \
     -device virtio-net-pci,netdev=n,mac=52:54:00:58:55:6c \

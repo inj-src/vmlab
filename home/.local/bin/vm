@@ -142,7 +142,8 @@ cmd_push(){
   [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"
   top=$(git -C "$src" rev-parse --show-toplevel 2>/dev/null) || die "$src is not in a git work tree"
   local home; case $n in win) home=C:/Users/${GUSER[$n]} ;; mac) home=/Users/${GUSER[$n]} ;; esac
-  [[ -n $dest ]] || case $n in win) dest=C:/src/$(basename "$top") ;; mac) dest=$home/src/$(basename "$top") ;; esac
+  # On the build cache disk: the checkout and its build output outlive `vm reset`
+  [[ -n $dest ]] || case $n in win) dest=C:/cache/src/$(basename "$top") ;; mac) dest=$home/cache/src/$(basename "$top") ;; esac
   dest=${dest//\\//}
   [[ $dest =~ ^[A-Za-z0-9_./:\ -]+$ ]] || die "the destination may hold letters, digits, spaces and . _ - / : only: $dest"
 
@@ -180,6 +181,25 @@ cmd_push(){
   echo "$n: $dest is the work tree of $top ($sent)"
 }
 
+# The build caches: each VM's second disk (C:\cache, ~/cache), which reset and commit leave
+# alone. The launchers attach them and make a missing one again, empty, from
+# /vmlab/images/<name>-cache-empty.qcow2: emptying one is deleting its file.
+CACHE=${VMLAB_CACHE:-$HOME/.local/share/vmlab/cache}
+cmd_cache(){
+  local n
+  if [[ ${1:-} == clear ]]; then
+    n=${2:-}; need "$n"
+    [[ $(state_of "$n") == running ]] && die "$n is running (vm stop $n)"
+    [[ -f $LAB/images/$n-cache-empty.qcow2 ]] || die "no empty cache disk to start again from ($LAB/images/$n-cache-empty.qcow2)"
+    rm -f "$CACHE/$n.qcow2"; echo "$n: the build cache is empty"
+  elif [[ $# == 0 ]]; then
+    for n in win mac; do
+      if [[ -f $CACHE/$n.qcow2 ]]; then echo "$n  $(du -h "$CACHE/$n.qcow2" | cut -f1) of 25G at most  $CACHE/$n.qcow2"
+      else echo "$n  none yet"; fi
+    done
+  else die "usage: vm cache | vm cache clear <name>"; fi
+}
+
 cmd_help(){ cat <<'EOF'
 vm status                      which VM is running, where its SSH is, who started it
 vm start <win|mac> [--window]  boot (refuses if the other VM is running) and wait for SSH.
@@ -188,9 +208,13 @@ vm start <win|mac> [--window]  boot (refuses if the other VM is running) and wai
                                it land on the guest's desktop). Without: no window
 vm ssh <name> [command...]     shell or one command in the VM (win: PowerShell, mac: zsh)
 vm push <name> <dir> [dest]    mirror the git work tree at <dir>, uncommitted and untracked
-                               files too (not ignored ones), to the guest: C:\src\<repo> on
-                               win, ~/src/<repo> on mac, or <dest>. Later pushes send only
-                               the changes and keep the guest's build output
+                               files too (not ignored ones), to the guest's build cache:
+                               C:\cache\src\<repo> on win, ~/cache/src/<repo> on mac, or to
+                               <dest>. Later pushes send only the changes and keep the
+                               guest's build output
+vm cache                       how large each VM's build cache is. C:\cache and ~/cache are a
+                               disk of their own that reset and commit leave alone
+vm cache clear <name>          empty that VM's build cache (VM must be stopped)
 vm tunnel <name> <port> [lp]   forward VM's 127.0.0.1:<port> to localhost:<lp>
 vm untunnel <localport>        close a tunnel opened by vm tunnel
 vm view <name>                 start it in its window; if it already runs without one, win
@@ -210,6 +234,7 @@ case $sub in
   stop|reset|commit|ip|port|view) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;
   untunnel) [[ $# -ge 1 ]] || die "usage: vm untunnel <localport>"; cmd_untunnel "$1" ;;
+  cache) cmd_cache "$@" ;;
   push) [[ $# -ge 2 && $# -le 3 ]] || die "usage: vm push <name> <dir> [dest]"; cmd_push "$@" ;;
   tunnel) [[ $# -ge 2 ]] || die "usage: vm tunnel <name> <port> [localport]"; cmd_tunnel "$@" ;;
   *) die "unknown command '$sub' (vm help)" ;;

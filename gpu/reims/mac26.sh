@@ -44,6 +44,16 @@
 #                                        same folder as the Windows VM's. QEMU starts a
 #                                        private smbd for it (-netdev user,smb=); the host's
 #                                        own Samba services are masked.
+#   VMLAB_CACHE=DIR|off                  where the build cache is: a second disk, ~/cache in
+#                                        the guest, that reset and commit leave alone
+#                                        (checkouts, their build output, cargo's downloads).
+#                                        Default ~/.local/share/vmlab/cache on the system
+#                                        disk, at the user's wish (2026-11-12), not on /vmlab:
+#                                        at most 25 GB, as large as what is in it. Missing, it
+#                                        is made from the empty formatted one,
+#                                        /vmlab/images/mac-cache-empty.qcow2 (so deleting the
+#                                        file empties the cache), or blank where that is
+#                                        missing too (mac/setup-cache.sh formats it)
 #   MAC26_HUGE_PAGES=on, MAC26_CPU_EXTRA=+flag,...
 #   MAC26_LOG, MAC26_STATS, MAC26_TRACE  for diagnosis (../README.md)
 set -euo pipefail
@@ -110,6 +120,15 @@ start(){
     mkdir -p "$share"
     sed -i "s|^\(  -netdev 'user,id=net0,[^']*\)'|\1,smb=$share'|" "$V/run.sh"
     grep -q ",smb=$share'" "$V/run.sh" || die "could not give run.sh the shared folder"
+  fi
+  local cache=${VMLAB_CACHE:-$HOME/.local/share/vmlab/cache} empty=/vmlab/images/mac-cache-empty.qcow2
+  if [[ $cache != off ]]; then
+    mkdir -p "$cache"
+    if [[ ! -f $cache/mac.qcow2 ]]; then
+      if [[ -f $empty ]]; then cp "$empty" "$cache/mac.qcow2"; else qemu-img create -q -f qcow2 "$cache/mac.qcow2" 25G; fi
+    fi
+    sed -i "s|^  -netdev 'user,id=net0,|  -drive 'id=cache,if=none,format=qcow2,discard=unmap,file=$cache/mac.qcow2' \\\\\n  -device 'virtio-blk-pci,drive=cache,serial=vmlabcache,addr=0xa' \\\\\n&|" "$V/run.sh"
+    grep -q "virtio-blk-pci,drive=cache" "$V/run.sh" || die "could not give run.sh the build cache disk"
   fi
   # MAC26_CPU_EXTRA: more flags for the guest CPU, e.g. +sha-ni
   [[ -n ${MAC26_CPU_EXTRA:-} ]] && sed -i "s|^\(  -cpu '[^']*\),check'|\1,$MAC26_CPU_EXTRA,check'|" "$V/run.sh"
