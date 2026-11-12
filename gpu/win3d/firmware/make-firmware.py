@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """make-firmware.py [IN [OUT]]: the Windows VM's firmware, made from the system's OVMF
-(/usr/share/OVMF/OVMF_CODE_4M.fd -> OVMF_CODE_4M.vmlab.fd beside this file), with a quiet start:
+(/usr/share/OVMF/OVMF_CODE_4M.fd -> OVMF_CODE_4M.vmlab.fd beside this file), with a quiet start.
+The Mac VM's is made the same way from reims' OVMF_CODE.fd (../../reims/mac26.sh):
 
   1. no TianoCore logo. The driver that hands the firmware its logo (LogoDxe) is never started
      (its dependency expression is made FALSE), so the firmware draws none and gives Windows
@@ -10,7 +11,8 @@
 
 Nothing is rebuilt from source: the image's one compressed file is unpacked, those bytes are
 changed, and it is packed again (fv.py). OUT.sha256 records the IN this OUT was made from;
-win-venus.sh makes OUT again when the system's file changes (a package update).
+win-venus.sh makes OUT again when the system's file changes (a package update), and mac26.sh
+when reims' does.
 """
 import hashlib, lzma, os, struct, sys, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

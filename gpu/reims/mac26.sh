@@ -37,6 +37,8 @@
 #                                        resize it, and it is soft on a scaled screen (../README.md)
 #   MAC26_DISK=virtio|sata               the system disk; virtio is the default and six times
 #                                        faster on small reads
+#   MAC26_FIRMWARE=stock                 reims' firmware as it is (TianoCore's logo at the
+#                                        start); otherwise a quiet copy of it, a black screen
 #   MAC26_HUGE_PAGES=on, MAC26_CPU_EXTRA=+flag,...
 #   MAC26_LOG, MAC26_STATS, MAC26_TRACE  for diagnosis (../README.md)
 set -euo pipefail
@@ -81,6 +83,23 @@ start(){
   rm -f "$V/agent.sock"
   sed -i "s|^  -display none \\\\\$|  -device 'virtio-serial-pci,id=vser,addr=0x9' \\\\\n  -chardev 'socket,id=agent,path=$V/agent.sock,server=on,wait=off' \\\\\n  -device 'virtserialport,chardev=agent,name=com.redhat.spice.0' \\\\\n&|" "$V/run.sh"
   grep -q "virtserialport,chardev=agent" "$V/run.sh" || die "could not add the agent's channel to run.sh"
+  # The firmware with a quiet start, as the Windows VM's (../win3d/firmware/make-firmware.py):
+  # no TianoCore logo and no "BdsDxe: loading Boot..." lines, so the screen stays black until
+  # macOS draws. reims' own OVMF_CODE.fd stays as it is; the quiet one is made from it, and
+  # again when it changes. MAC26_FIRMWARE=stock keeps reims' line.
+  if [[ ${MAC26_FIRMWARE:-} != stock ]]; then
+    local fw=$V/OVMF_CODE.fd quiet=$V/OVMF_CODE.vmlab.fd
+    if [[ ! -f $quiet || $(cat "$quiet.sha256" 2>/dev/null) != $(sha256sum "$fw" | cut -d' ' -f1) ]]; then
+      python3 "$(dirname "$(readlink -f "$0")")/../win3d/firmware/make-firmware.py" "$fw" "$quiet" \
+        > "$V/logs/firmware.log" 2>&1 || rm -f "$quiet"
+    fi
+    if [[ -f $quiet ]]; then
+      sed -i "s|file=$fw'|file=$quiet'|" "$V/run.sh"
+      grep -q "file=$quiet'" "$V/run.sh" || die "could not give run.sh the quiet firmware"
+    else
+      echo "mac26: no quiet firmware ($V/logs/firmware.log): TianoCore's logo will show" >&2
+    fi
+  fi
   # MAC26_CPU_EXTRA: more flags for the guest CPU, e.g. +sha-ni
   [[ -n ${MAC26_CPU_EXTRA:-} ]] && sed -i "s|^\(  -cpu '[^']*\),check'|\1,$MAC26_CPU_EXTRA,check'|" "$V/run.sh"
   # For diagnosis: MAC26_LOG replaces reims' log filter (its timing lines:

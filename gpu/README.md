@@ -395,6 +395,11 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     to it and releases at Ctrl+Alt+Super; `patches/window-keys-to-the-guest-pointer-free.dev.patch`
     changes `native/linux/input.rs` (capture from focus gained to focus lost, no confinement,
     no chord; the click that focuses the window is sent).
+  - **Boot screen**: black until macOS draws. `mac26.sh` boots a quiet copy of reims' firmware
+    (`OVMF_CODE.vmlab.fd` in the VM's folder, made from its `OVMF_CODE.fd` by
+    `../win3d/firmware/make-firmware.py`, as the Windows VM's, and again when reims' file
+    changes): no TianoCore logo, no "BdsDxe: loading Boot000x" line. reims' own file is not
+    touched; the launcher points `run.sh` at the copy. `MAC26_FIRMWARE=stock` boots reims' file.
   - **Known limit**: windowed and moved between the 100% and the 125% screen, the window
     offers the new size (the log's "the display's mode is the window's pixels" line) and the
     guest senses the display again, but WindowServer sets its old mode (its log:
