@@ -4,7 +4,7 @@
 
 ## What the lab provides
 
-The VMs run on this Linux laptop (Ubuntu 24.04, 23 GB RAM) as QEMU user units, outside libvirt, and render on the laptop's RTX 4050 through a virtual GPU. Their disk images are on the spare SSD, mounted at `/vmlab`. The user's 500 GB system disk is never used for VM data.
+The VMs run on this Linux laptop (Ubuntu 24.04, 23 GB RAM) as QEMU user units, outside libvirt, and render on the laptop's RTX 4050 through a virtual GPU. Their disk images are on the spare SSD, mounted at `/vmlab`. The user's 500 GB system disk holds one thing of the VMs, by the user's choice: the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most). Put nothing else of the VMs there.
 
 | Name | Guest | Inside it |
 |---|---|---|
@@ -18,7 +18,7 @@ Each VM is run by its own launcher, which `vm` calls: `/vmlab/tools/vmlab/gpu/wi
 ## Rules
 
 - **One VM at a time.** If `vm status` shows another VM running, leave it alone and ask the user. Another agent, or the user at the VM window, may be in the middle of something.
-- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state.
+- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`).
 - `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
 
@@ -33,6 +33,7 @@ vm start <name> --window     the same, in a window on the user's desktop
 vm ssh <name> "<command>"    run a command inside the VM
 vm ip <name>, vm port <name> where its SSH is: 127.0.0.1, port 2222 (win) or 2227 (mac)
 vm push <name> <dir> [dest]  mirror the git work tree at <dir> into the VM
+vm cache [clear <name>]      size of each VM's build cache; empty one
 vm tunnel <name> <port> [lp] forward the VM's 127.0.0.1:<port> to localhost:<lp>
 vm untunnel <lp>             close that forward
 vm view <name>               boot it in its window for the user (mouse and keyboard)
@@ -43,7 +44,7 @@ vm reset <name>              back to the clean state
 ## How to drive the VMs
 
 - **Builds, installs, test suites:** `vm ssh win "cd C:\src\app; npm ci; npx playwright test"`. On `mac`, use the same command with POSIX paths. Run Playwright `_electron` tests inside the VM.
-- **Code written on this machine:** `vm push <name> <dir>` (see [Getting code and files into a VM](#getting-code-and-files-into-a-vm)), then build inside the VM: `vm ssh win "cd C:\src\app; cargo build"`.
+- **Code written on this machine:** `vm push <name> <dir>` (see [Getting code and files into a VM](#getting-code-and-files-into-a-vm)), then build inside the VM: `vm ssh win "cd C:\cache\src\app; cargo build"`.
 - **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): use the vmlab MCP server. See [Driving a VM's GUI](#driving-a-vms-gui-vmlab-mcp).
 - **Electron app internals:** start the app inside the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222`, then connect Playwright or playwright-mcp to `http://localhost:9222`.
 - **Smoke-test app:** Electron 38 "Bench Form".
@@ -52,14 +53,31 @@ vm reset <name>              back to the clean state
 
 ## Getting code and files into a VM
 
-- **A repository: `vm push <name> <dir> [dest]`.** It mirrors the git work tree at `<dir>` to `C:\src\<repo>` on `win` or `~/src/<repo>` on `mac`: committed, uncommitted and untracked files, without ignored ones. The first push sends everything, later ones only the changes, and the guest's ignored build output (`target/`, `node_modules/`) stays, so builds after a push are incremental.
+- **A repository: `vm push <name> <dir> [dest]`.** It mirrors the git work tree at `<dir>` to `C:\cache\src\<repo>` on `win` or `~/cache/src/<repo>` on `mac`: committed, uncommitted and untracked files, without ignored ones. The first push sends everything, later ones only the changes, and the guest's ignored build output (`target/`, `node_modules/`) stays, so builds after a push are incremental.
   - The host repository's index and branches are untouched; the push adds the ref `refs/vmlab/push/<name>` there.
   - Limits: git repositories only; submodules and Git LFS content are not sent. The guest copy is a mirror: files changed or added there (other than ignored ones) are overwritten or removed by the next push.
-  - `vm reset` removes the guest copy; the next push sends everything again.
+- **The build cache: `C:\cache` on `win`, `~/cache` on `mac`.** A disk of its own per VM that `vm reset` and `vm commit` leave alone, so a pushed checkout, its build output and cargo's downloads (`.cargo\registry` and `.cargo\git` are links into it) are still there after a reset, and the next build is incremental.
+  - 25 GB per VM at most. `vm cache` shows the size; `vm cache clear <name>` empties one (VM stopped). When a build runs out of room, remove old checkouts' `target` folders in it or clear it.
+  - It belongs to every agent and project: another project's checkout there is not yours to delete. What a test must not inherit from an earlier run (an installed app, settings, a database) belongs on the system disk, which reset does clean.
 - **Large or loose files: the shared folder.** `/vmlab/share` on this machine is `C:\share` on `win` and `~/share` on `mac`, both ways, while the VM runs. On `mac` it appears about 30 s after SSH answers.
   - Measured with 1 GB: `win` reads 400 MB/s and writes 165 MB/s; `mac` reads 170 MB/s and writes 23 MB/s. For a large file out of `mac`, `scp` is faster (140 MB/s): `scp -P 2227 -i ~/.ssh/vmlab_ed25519 dev@127.0.0.1:<file> <dir>`.
   - Build on the guest's own disk (`vm push`), not in the shared folder: there every file is a network round trip. Builds in it were not measured.
   - It is one folder for both VMs and outlives `vm reset`: remove what you put there.
+
+## When a VM lacks something you need
+
+The user's word on this (2026-11-12): when the work needs something the VMs don't have, hack around it yourself. The lab is theirs to change and its sources are here.
+
+- **Read first:** `/vmlab/tools/vmlab/gpu/README.md` has every local change to the GPU stack with its cause and its test, and what is known not to work.
+- **Sources:** the lab's repository is `/vmlab/tools/vmlab` (git, branch `main`, no remote).
+  - Windows GPU, all in `gpu/win3d/`: the lab's QEMU (`build-qemu.sh`, `qemu-patches/`, source in `/vmlab/tmp/win-qemu/qemu`), the guest's Direct3D driver, which is Mesa (`build-guest-umd.sh`, `guest-patches/`), and its kernel driver (`build-guest-kmd.sh`, `kmd-patches/`). Upstream is github.com/VMLabDev/vmlab (`guest/win3d/`); its driver comes from github.com/arehnman/virtio-win-mesa.
+  - Mac GPU: `gpu/reims-vgpu-dev/` is github.com/steelbrain/reims-vgpu plus `gpu/reims/patches/*.dev.patch`; `gpu/reims/build-dev.sh` builds it.
+  - Guest setup: `win/`, `mac/`, `gpu/win3d/guest-scripts/`.
+- **What stays as it is:** a workaround made in a running VM lasts until `vm reset`. To keep one, add it to the lab's repository as a script or a patch with a line in the README that says why, and commit there; ask the user before `vm commit`, before posting anything upstream and before anything that needs root on this machine.
+- **Known case, Direct3D 12 on `win`:** the driver has Direct3D 9 to 11 only; Mesa has no Direct3D 12 driver interface, so adding it there is a new driver. An app that draws with Direct3D 12 alone (wgpu's `dx12` backend, which github.com/anomalyco/rune uses on Windows) gets Microsoft's software renderer (WARP) at best.
+  - The driver package ships a Direct3D 12 to Vulkan bridge (vkd3d-proton): `d3d12.dll`, `vkd3dcore.dll`, `dxgi-vulkan.dll` and `vulkan-1.dll` in `C:\ProgramData\vmlab-win3d\bundle\runtime\x64` (and `x86`).
+  - `win-venus.sh d3d12 bridge` installs it for all of Windows, and Chrome and Electron then lose WebGL (their GPU process takes only Microsoft-signed DLLs); `d3d12 native` undoes it.
+  - Not tried, and the likely way to have both: copy the bridge's DLLs beside the one app's `.exe` and leave Windows' own file alone. Windows looks in the app's folder first.
 
 ## Driving a VM's GUI (vmlab-mcp)
 
@@ -92,7 +110,7 @@ Using it:
 - **Start agent work without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
 - **Windows Session 0:** anything started over SSH runs in an invisible session: its screenshots come out black and Vulkan finds no GPU there. To start something on the visible desktop, run `C:\vmlab\run-interactive.ps1 -Command "<ps>" [-NoWait]`. It shows no console window of its own. Use the same wrapper for winget, which only works in the desktop session.
 - **Windows PowerShell 5.1 from SSH** needs a clean module path: `Remove-Item Env:PSModulePath; powershell …`. Otherwise core cmdlets such as `Get-FileHash` are missing, and `run-interactive.ps1` fails that way.
-- **Windows Direct3D 12:** a native program finds no Direct3D 12 device; Direct3D 11, Vulkan and OpenGL work. `win-venus.sh d3d12 bridge` adds Direct3D 12 through Vulkan and costs Chrome and Electron their WebGL; `d3d12 native` undoes it (`/vmlab/tools/vmlab/gpu/README.md`).
+- **Windows Direct3D 12:** a native program finds no Direct3D 12 device; Direct3D 11, Vulkan and OpenGL work. See [When a VM lacks something you need](#when-a-vm-lacks-something-you-need).
 - **Windows `Path` over SSH:** an SSH session gets the machine's `Path`, not the user's. A tool installed per user (as cargo is) is found over SSH only once its folder is on the machine `Path` and Windows has restarted.
 - **Windows features:** Windows Update is disabled, so `Add-WindowsCapability` and the Store fail. Use winget, or GitHub MSIs.
 - **Node 26 and Electron's postinstall:** the electron package's zip extraction can exit early, leaving `node_modules/electron/dist` with only `locales/`. Fix it by extracting the cached zip from `%LOCALAPPDATA%\electron\Cache` with `tar -xf` into `dist`, then writing `electron.exe` to `path.txt`.
@@ -123,6 +141,7 @@ Using it:
 - `win`: three disk layers in `/vmlab/images`. `win11-base.qcow2` is Windows as installed and is never written. `win11-ready.qcow2` on it is the clean state (GPU driver and the lab's fixes); `vm reset` returns to it and `vm commit` writes to it. `win11-venus.qcow2` holds the current run's changes. `win-venus.sh setup` builds the clean state again from `win11-base` (about 4 minutes).
 - `mac`: one disk, `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/disk.qcow2`. Its snapshot `clean` is the clean state.
 - `/vmlab/share` is the folder both VMs share with this machine. QEMU's own network serves it to the guest alone (a private `smbd` per VM run, at `\\10.0.2.4\qemu`); this machine's Samba services are masked and nothing listens on its network. Guest side: `win/setup-share.ps1`, `mac/setup-share.sh`. Rust: `win/install-rust.ps1`, `mac/install-rust.sh`.
+- The build caches are `~/.local/share/vmlab/cache/win.qcow2` and `mac.qcow2`, on the system disk. A missing one is made again at the VM's start from the empty formatted disk `/vmlab/images/<name>-cache-empty.qcow2`. Guest side: `win/setup-cache.ps1`, `mac/setup-cache.sh`. `VMLAB_CACHE=off` starts a VM without it.
 - `/vmlab/tools/vmlab/` is the lab's git repository (branch `main`, no remote): the GPU VMs' launchers and patches (`gpu/`), the build scripts (`win/`, `mac/`), the `vmlab-mcp` source (`vmlab-mcp/`) and the computer-use benchmark (`bench/`; run `python3 bench.py report`). Its `README.md` has the layout and what stays out of git.
 - This file, `~/.local/bin/vm`, its helpers and the two app-grid launchers are links into that repository's `home/`; `./install.sh` there makes the links. Edit them in place.
 
@@ -130,7 +149,7 @@ Using it:
 
 The VM SSD is 239 GB. On 2026-11-12 it had 63 GB free. The VMs' fixed cost is about 100 GB (Windows 45 GB, Mac 55 GB) and cannot shrink; Rust and the Visual Studio Build Tools are 6.4 GB of the Windows figure and 0.6 GB of the Mac's. Deleting any of this needs the user's go; nothing below is removed yet.
 
-Check first what is temporary: `vm reset win` drops the current Windows run (`win11-venus.qcow2`), which is usually the quickest gain: a Rust project's build output there is 2 to 6 GB. `/vmlab/share` holds whatever agents left in it. The Mac disk only grows (55 GB of a possible 96 GB); `vm reset mac` returns to its `clean` snapshot but the file keeps its size.
+Check first what is temporary: `vm reset win` drops the current Windows run (`win11-venus.qcow2`), which is usually the quickest gain. `/vmlab/share` holds whatever agents left in it. Build output is not on `/vmlab`: it is in the build caches on the system disk (`vm cache`, `vm cache clear <name>`). The Mac disk only grows (55 GB of a possible 96 GB); `vm reset mac` returns to its `clean` snapshot but the file keeps its size.
 
 Removable without losing anything in use, about 33 GB:
 
@@ -151,6 +170,6 @@ Removable at a cost:
 | `/vmlab/images/win11-venus.backup-2026-11-12.*` | 4.3 GB | The activated Windows clean state as it was before Rust and the shared folder were added; the only other copy of an activated one. |
 | `/vmlab/tmp/win3d-cache`, `win3d-src`, `podman`, `m2v-target`, `win-qemu` | 6 GB | Build trees of the Windows drivers, the shader translator and QEMU; their build scripts make them again (`win-qemu` holds the patched QEMU source, which `qemu-patches/` reproduces). |
 
-Never delete: `/vmlab/images/win11-base.qcow2` and `win11-ready.*` (Windows), `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` (the Mac), `/vmlab/reims/rustup` and `/vmlab/reims/cargo` (the Rust toolchain `build-dev.sh` uses), `/vmlab/iso/virtio-win.iso` and `win-config.iso`.
+Never delete: `/vmlab/images/win11-base.qcow2` and `win11-ready.*` (Windows), `/vmlab/images/*-cache-empty.qcow2` (the empty build cache disks), `/vmlab/reims-dev/data/reims-ctl/vms/mac26d/` (the Mac), `/vmlab/reims/rustup` and `/vmlab/reims/cargo` (the Rust toolchain `build-dev.sh` uses), `/vmlab/iso/virtio-win.iso` and `win-config.iso`.
 
 Measure with `df -h /vmlab` before and after, not with `du`: the disk is XFS, copies made on it can share blocks (reflink), and `du` counts shared blocks once per file. Deleting the stable Mac VM (54 GB by `du`) freed almost nothing, because the dev Mac's disk was such a copy.
