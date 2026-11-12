@@ -345,8 +345,9 @@ is incorrect"); no setting of Windows' SMB client changed that. Measured after t
 
 **Activation**: the ready state in use reports Windows as activated (a digital licence on the
 generic retail key). `win11-base` carries the generic volume key and is not activated, so a
-ready state built by `setup` is not either; the only other copy of the activated one is
-`win11-venus.backup-2026-11-12.*`. The lab runs no activation script.
+ready state built by `setup` is not either. `win11-ready.qcow2` is the only activated copy
+(its backup of 2026-11-12 was deleted for the space, at the user's word): running `setup`
+replaces it with an unactivated one. The lab runs no activation script.
 
 Measured 2026-11-11, Chrome 157 WebGL2 (`bench/`, 4 s a test), frames per second. Chrome renders
 through ANGLE's Direct3D 11 on "Hardsoft VirtIO GPU 3D controller"; pixels match native.
