@@ -78,6 +78,18 @@ pointer" below). Closing it shuts Windows down. Names the desktop shows carry no
   inhibitor for the window, kept while it is mapped. GDK's keyboard grab at each change of
   focus cannot be used: GNOME's question takes the keyboard for a moment, the grab is dropped,
   and that withdraws the question.
+  **The title bar is the desktop's** (2026-11-12, `0013`): a press on it (not on its buttons)
+  lets the inhibitor go, so Super and Alt+Tab are the desktop's though the window keeps the
+  keyboard; a press in the picture, or the window gaining the keyboard again (coming back
+  from the overview counts), asks for it again. The inhibitor is the surface's and GTK draws
+  the title bar in the same surface, so mutter itself makes no difference there (read in
+  mutter 46.2: shortcuts come back only through its restore-shortcuts key). A drag of the
+  title bar keeps them the desktop's too: the drag is the compositor's window move, which
+  takes the keyboard away and gives it back (`wl_keyboard.leave`, `enter`), and `0013` does
+  not count that as the window gaining the keyboard (the keyboard leaving while a button is
+  down on the title bar). Checked in the rig with the Windows guest, 2026-11-12: Super opens
+  Start; after a click or a drag on the title bar it opens GNOME's overview; back from the
+  overview, or after a click in the picture, it opens Start again.
 - **Clipboard and files**: text and pictures copied on either side paste on the other, and
   files dragged onto the window land on Windows' desktop (`-chardev qemu-vdagent`, the SPICE
   agent in the guest; `qemu-patches/0009` to `0011`). The window's clipboard was off before
@@ -156,7 +168,8 @@ the old icon for as long as it is open.
     and the window never left full screen.
   - `0012`: every key goes to the guest while the window has the keyboard ("Keyboard and
     pointer" above).
-  Checked 2026-11-12: `0001` to `0012` on the release's sources give the built files byte for
+  - `0013`: a press on the title bar gives the desktop its shortcuts back (the same place).
+  Checked 2026-11-12: `0001` to `0013` on the release's sources give the built files byte for
   byte.
     To try a window change without a guest: `build/qemu-system-x86_64 -L build/pc-bios
     -machine q35 -nodefaults -device VGA -display egl-headless` with `VMLAB_WINDOW=1
@@ -395,6 +408,22 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     to it and releases at Ctrl+Alt+Super; `patches/window-keys-to-the-guest-pointer-free.dev.patch`
     changes `native/linux/input.rs` (capture from focus gained to focus lost, no confinement,
     no chord; the click that focuses the window is sent).
+    **The title bar is the desktop's**, as on the Windows window: a press on it releases
+    capture (SDL lets its keyboard grab go; the window keeps the keyboard), a click into the
+    picture or gaining the keyboard again captures, and so does going to the whole screen,
+    which has no title bar (so the title bar's full screen button does not leave macOS without
+    Command). The title bar is libdecor's, and stock SDL drops a press on it; the lab's SDL
+    sends `SDL_EVENT_WINDOW_HIT_TEST` for it (`patches/sdl3-src-3.4.18-title-bar-press.patch`),
+    and `patches/window-title-bar-gives-the-desktop-its-shortcuts.dev.patch` acts on it.
+    libdecor starts the compositor's window move at every press on its title bar, a plain
+    click too, and mutter takes the keyboard away for it and gives it back at the button's
+    release: a loss within 250 ms of the press, and the gain that ends it, are the press's own
+    and capture nothing (`TITLE_MOVE_NS`; without it the window captured again at once and
+    Super never reached GNOME). Checked in the rig with macOS, 2026-11-12: after a click or a
+    drag on the title bar Super opens GNOME's overview; back from the overview, after a click
+    in the picture, and on the whole screen, Super+Space opens Spotlight.
+    In a rig test answer GNOME's "Allow inhibiting shortcuts" with a click on Allow first:
+    Escape there is Deny, and the answer holds for that window until the VM is started again.
   - **Boot screen**: black until macOS draws. `mac26.sh` boots a quiet copy of reims' firmware
     (`OVMF_CODE.vmlab.fd` in the VM's folder, made from its `OVMF_CODE.fd` by
     `../win3d/firmware/make-firmware.py`, as the Windows VM's, and again when reims' file
@@ -451,7 +480,8 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     and Power Off Now instead (`Actions=` in `vmlab-macos26.desktop`; added 2026-11-11, not
     yet clicked by anyone).
   - **SDL without xdg-foreign export** (`reims/sdl3-src-3.4.18-vmlab`, a copy of the crate
-    with `reims/patches/sdl3-src-3.4.18-no-xdg-foreign-export.patch`; `Cargo.toml` in
+    with `reims/patches/sdl3-src-3.4.18-no-xdg-foreign-export.patch` and
+    `sdl3-src-3.4.18-title-bar-press.patch` ("Keyboard and pointer" above); `Cargo.toml` in
     `reims-vgpu-dev/` points at it with `[patch.crates-io]`). **SDL's export crashes mutter
     46.2, and on the real desktop that ends the user's whole session.** SDL exports every
     window (`zxdg_exporter_v2.export_toplevel`); when the client goes without destroying its
@@ -535,10 +565,12 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
 - **Local window changes** (both lanes): `reims/patches/window-maximized-and-title.{dev,stable}.patch`
   and, on top of it in the dev lane, `window-pinned-mode.dev.patch`,
   `sdl-no-xdg-foreign-export.dev.patch` (`Cargo.toml`; `Cargo.lock` follows at the build),
-  `window-full-screen-clipboard-file-drop.dev.patch` and
-  `window-keys-to-the-guest-pointer-free.dev.patch`, are the uncommitted diff in each checkout
+  `window-full-screen-clipboard-file-drop.dev.patch`,
+  `window-keys-to-the-guest-pointer-free.dev.patch` and
+  `window-title-bar-gives-the-desktop-its-shortcuts.dev.patch`, are the uncommitted diff in each checkout
   (checked 2026-11-12: applied in that order to a7761508 they give the built sources). Apply them again after an update, then rebuild. A new SDL
-  version needs a new copy of its crate with `sdl3-src-3.4.18-no-xdg-foreign-export.patch`;
+  version needs a new copy of its crate with `sdl3-src-3.4.18-no-xdg-foreign-export.patch` and
+  `sdl3-src-3.4.18-title-bar-press.patch`;
   the installed QEMU has the change if `strings` finds `VMLAB_SDL_XDG_EXPORT` in it. Tests:
   `cargo test -p reims-vgpu-window --lib env::` with `RUSTUP_HOME=/vmlab/reims/rustup
   CARGO_HOME=/vmlab/reims/cargo`.

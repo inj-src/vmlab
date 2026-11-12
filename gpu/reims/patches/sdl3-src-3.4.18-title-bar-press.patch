@@ -1,0 +1,16 @@
+--- a/SDL/src/video/wayland/SDL_waylandevents.c
++++ b/SDL/src/video/wayland/SDL_waylandevents.c
+@@ -1038,6 +1038,13 @@
+         if (!ignore_click) {
+             SDL_SendMouseButton(nsTimestamp, window->sdlwindow, seat->pointer.sdl_id, sdl_button, down);
+         }
++    } else if (state && seat->keyboard.focus) {
++        /* vmlab: a press where the pointer is on a surface that is not SDL's: the title bar
++         * that libdecor draws around the window (its surfaces get this seat's pointer events
++         * too). The window with the keyboard is told with the event the other platforms send
++         * for a press on a title bar, so that the app can give the desktop its shortcuts back
++         * there (reims: native/linux/input.rs). */
++        SDL_SendWindowEvent(seat->keyboard.focus->sdlwindow, SDL_EVENT_WINDOW_HIT_TEST, 0, 0);
+     }
+ }
+ 

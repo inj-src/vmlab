@@ -1,0 +1,179 @@
+gtk: vmlab: a press on the title bar gives the desktop its shortcuts back
+
+The window's shortcuts inhibitor (0012) covers its whole surface, the title bar too, which
+GTK draws in the same surface: with the window active, Super and Alt+Tab went to the guest
+wherever the pointer was. A press on the title bar (not on one of its buttons, which take
+their own presses) now lets the inhibitor go: the window keeps the keyboard, and the
+desktop has its shortcuts. A press in the picture asks for it again, and so does the
+window gaining the keyboard, as before. The Mac window follows the same rule
+(../../reims/patches/window-title-bar-gives-the-desktop-its-shortcuts.dev.patch).
+
+A drag of the title bar is the compositor's window move (GTK asks for it once the pointer
+has gone past the drag threshold): mutter takes the keyboard from the window for it and
+gives it back when the button goes up. The keyboard leaving while a button is down on the
+title bar is that move, and the gain that ends it does not ask for the inhibitor again;
+without this a drag handed the shortcuts straight back to the guest.
+
+Also: empty vmlab_wl_keys_to_guest and _to_desktop for a build without Wayland, where
+0012 left the first one out.
+---
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index 1a89fda..e3102a4 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -142,6 +142,8 @@ struct GtkDisplayState {
+ 
+     GdkCursor *null_cursor;
+     GtkWidget *vmlab_header;      /* vmlab: the window's title bar */
++    bool vmlab_title_held;        /* vmlab: a button is down on the title bar */
++    bool vmlab_title_move;        /* vmlab: the keyboard is away for the title bar's window move */
+     GdkCursor *guest_cursor;      /* vmlab: the guest's pointer shape, for an absolute pointer */
+     bool guest_cursor_hidden;
+     Notifier mouse_mode_notifier;
+@@ -253,6 +255,7 @@ void vmlab_wl_switch(VirtualConsole *vc);
+ void vmlab_wl_uncover(VirtualConsole *vc);
+ void vmlab_wl_cover(VirtualConsole *vc);
+ void vmlab_wl_keys_to_guest(VirtualConsole *vc);
++void vmlab_wl_keys_to_desktop(void);
+ /* and what it asks of ui/gtk.c */
+ void gd_vmlab_rescale(VirtualConsole *vc);
+ void gd_vmlab_layout_changed(VirtualConsole *vc);
+diff --git a/ui/gtk-vmlab-wl.c b/ui/gtk-vmlab-wl.c
+index 48be3ab..d70b6ba 100644
+--- a/ui/gtk-vmlab-wl.c
++++ b/ui/gtk-vmlab-wl.c
+@@ -333,7 +333,8 @@ static const struct zwp_keyboard_shortcuts_inhibitor_v1_listener inhibitor_liste
+  * question.) When the compositor has taken it back (GNOME's Super+Escape gives the desktop its
+  * shortcuts again), it is asked for anew the next time the window gains the keyboard; GNOME
+  * then answers as the person did before, without asking. The pointer is never held. Called
+- * when the window gains the keyboard.
++ * when the window gains the keyboard, and at a press in the picture (after a press on the
++ * title bar gave the desktop its shortcuts back, vmlab_wl_keys_to_desktop).
+  */
+ void vmlab_wl_keys_to_guest(VirtualConsole *vc)
+ {
+@@ -367,6 +368,16 @@ void vmlab_wl_keys_to_guest(VirtualConsole *vc)
+     zwp_keyboard_shortcuts_inhibitor_v1_add_listener(wl.inhibitor, &inhibitor_listener, NULL);
+ }
+ 
++/*
++ * The desktop has its shortcuts again (Super, Alt+Tab) though the window keeps the keyboard:
++ * the inhibitor is let go. Called at a press on the window's title bar, the one place in the
++ * window that is the desktop's and not the guest's. vmlab_wl_keys_to_guest takes it again.
++ */
++void vmlab_wl_keys_to_desktop(void)
++{
++    g_clear_pointer(&wl.inhibitor, zwp_keyboard_shortcuts_inhibitor_v1_destroy);
++}
++
+ static void vmlab_wl_start(VirtualConsole *vc)
+ {
+     GtkWidget *window = gtk_widget_get_toplevel(vc->gfx.drawing_area);
+@@ -803,4 +814,12 @@ void vmlab_wl_cover(VirtualConsole *vc)
+ {
+ }
+ 
++void vmlab_wl_keys_to_guest(VirtualConsole *vc)
++{
++}
++
++void vmlab_wl_keys_to_desktop(void)
++{
++}
++
+ #endif
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 8426776..2313fd8 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -1329,6 +1329,11 @@ static gboolean gd_button_event(GtkWidget *widget, GdkEventButton *button,
+     GtkDisplayState *s = vc->s;
+     InputButton btn;
+ 
++    /* vmlab: a press in the picture: the keys are the guest's (again, after the title bar) */
++    if (button->type == GDK_BUTTON_PRESS) {
++        vmlab_wl_keys_to_guest(vc);
++    }
++
+     /* implicitly grab the input at the first click in the relative mode */
+     if (button->button == 1 && button->type == GDK_BUTTON_PRESS &&
+         !qemu_input_is_absolute(vc->gfx.dcl.con) && s->ptr_owner != vc) {
+@@ -2209,9 +2214,15 @@ static gboolean gd_focus_in_event(GtkWidget *widget,
+     win32_kbd_set_window(gd_win32_get_hwnd(vc));
+     /*
+      * vmlab: while the window has the keyboard, every key is the guest's, the desktop's own
+-     * shortcuts too (the Windows key, Alt+Tab). The pointer stays free.
++     * shortcuts too (the Windows key, Alt+Tab). The pointer stays free. Not when the keyboard
++     * comes back from the window move that a drag of the title bar started: the title bar gave
++     * the desktop its shortcuts (gd_vmlab_title_button), and the move is no new activation.
+      */
+-    vmlab_wl_keys_to_guest(vc);
++    if (vc->s->vmlab_title_move) {
++        vc->s->vmlab_title_move = false;
++    } else {
++        vmlab_wl_keys_to_guest(vc);
++    }
+     return TRUE;
+ }
+ 
+@@ -2223,6 +2234,12 @@ static gboolean gd_focus_out_event(GtkWidget *widget,
+ 
+     win32_kbd_set_window(NULL);
+     gtk_release_modifiers(s);
++    /*
++     * vmlab: the keyboard leaves while a button is down on the title bar: the compositor's
++     * window move, which eats the button's release.
++     */
++    s->vmlab_title_move = s->vmlab_title_held;
++    s->vmlab_title_held = false;
+     return TRUE;
+ }
+ 
+@@ -3111,6 +3128,35 @@ static void gd_vmlab_full_screen_clicked(GtkButton *button, void *opaque)
+  * vmlab: the title bar's full screen button. It takes no keyboard focus: the keys stay the
+  * guest's.
+  */
++/*
++ * vmlab: a press on the title bar (not on one of its buttons, which take their own presses)
++ * gives the desktop its shortcuts back: Super and Alt+Tab are the desktop's until a press in
++ * the picture, or until the window gains the keyboard again. The window keeps the keyboard
++ * throughout, so without this the title bar would be one more place where the guest has them.
++ * A drag of the title bar is the compositor's window move, which takes the keyboard away and
++ * gives it back: vmlab_title_held and vmlab_title_move tell that from a new activation.
++ */
++static gboolean gd_vmlab_title_button(GtkWidget *widget, GdkEventButton *button, void *opaque)
++{
++    GtkDisplayState *s = opaque;
++    GtkAllocation bar;
++
++    if (button->type == GDK_BUTTON_RELEASE) {
++        s->vmlab_title_held = false;
++        return FALSE;
++    }
++    if (button->type != GDK_BUTTON_PRESS || button->window != gtk_widget_get_window(widget)) {
++        return FALSE;
++    }
++    gtk_widget_get_allocation(s->vmlab_header, &bar);
++    if (button->x >= bar.x && button->x < bar.x + bar.width &&
++        button->y >= bar.y && button->y < bar.y + bar.height) {
++        vmlab_wl_keys_to_desktop();
++        s->vmlab_title_held = true;
++    }
++    return FALSE;
++}
++
+ static GtkWidget *gd_vmlab_full_screen_button(GtkDisplayState *s)
+ {
+     GtkWidget *button = gtk_button_new_from_icon_name("view-fullscreen-symbolic",
+@@ -3222,6 +3268,11 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+         gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header),
+                                 gd_vmlab_full_screen_button(s));
+         gtk_window_set_titlebar(GTK_WINDOW(s->window), s->vmlab_header);
++        gtk_widget_add_events(s->window, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
++        g_signal_connect(s->window, "button-press-event",
++                         G_CALLBACK(gd_vmlab_title_button), s);
++        g_signal_connect(s->window, "button-release-event",
++                         G_CALLBACK(gd_vmlab_title_button), s);
+ 
+         gtk_drag_dest_set(s->window, GTK_DEST_DEFAULT_ALL, NULL, 0, GDK_ACTION_COPY);
+         gtk_drag_dest_add_uri_targets(s->window);

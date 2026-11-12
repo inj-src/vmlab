@@ -1,0 +1,281 @@
+window: vmlab: a press on the title bar gives the desktop its shortcuts back
+
+The keyboard grab (the compositor's shortcuts inhibitor) covers the whole window, its title
+bar too: with the window active, Super and Alt+Tab went to macOS wherever the pointer was.
+Now, as on the Windows window (../win3d/qemu-patches/0013):
+  - a press on the title bar releases capture: the window keeps the keyboard, and the
+    desktop has its shortcuts;
+  - a click into the picture captures again (upstream's own rule), and so does the window
+    gaining the keyboard, as before;
+  - going to the whole screen, which has no title bar, captures again, so the title bar's
+    full screen button does not leave macOS without Command.
+  - the press makes libdecor start the compositor's window move (xdg_toplevel.move), and
+    mutter takes the keyboard from the window for it and gives it back when the button goes
+    up, at a plain click too. That loss (one within 250 ms of the press) and the gain after
+    it are the press's own and capture nothing; without this the window captured again at
+    once and the desktop never had its shortcuts.
+
+The title bar is libdecor's, not SDL's, and stock SDL drops a press on it. The lab's SDL
+(sdl3-src-3.4.18-title-bar-press.patch) sends SDL_EVENT_WINDOW_HIT_TEST for it, the event
+SDL's other platforms send for a press on a title bar.
+
+Applies after window-keys-to-the-guest-pointer-free.dev.patch.
+---
+diff --git a/crates/reims-vgpu-window/features.md b/crates/reims-vgpu-window/features.md
+index f537a6ca..95be5e8e 100644
+--- a/crates/reims-vgpu-window/features.md
++++ b/crates/reims-vgpu-window/features.md
+@@ -395,8 +395,14 @@ runtime's own device. The switches above apply, and `resolution=` too.
+   title says whether input is captured, as on macOS, with Ctrl+Alt+Super to
+   release. vmlab changes this on Linux: the keyboard is captured from the
+   moment the window gains it until it loses it, the pointer is never held,
+-  and no chord releases.
++  and no chord releases; a press on the window's title bar releases it, the
++  window keeping the keyboard, until a click in the image, and going to the
++  whole screen captures again; the compositor's window move that the press
++  starts takes the keyboard and gives it back, which captures nothing.
+   `test: native::linux::input::a_click_in_the_image_is_sent`,
++  `test: native::linux::input::the_title_bar_gives_the_desktop_its_shortcuts`,
++  `test: native::linux::input::the_title_bars_own_move_captures_nothing`,
++  `test: native::linux::input::the_whole_screen_captures_again`,
+   `test: native::linux::input::the_pointer_is_never_held`,
+   `test: native::linux::input::ctrl_alt_super_releases_nothing`,
+   `test: sdl::shell::the_end_lets_go_of_the_grab_and_the_holds`,
+diff --git a/crates/reims-vgpu-window/src/native/linux/input.rs b/crates/reims-vgpu-window/src/native/linux/input.rs
+index 48518b23..107c19ba 100644
+--- a/crates/reims-vgpu-window/src/native/linux/input.rs
++++ b/crates/reims-vgpu-window/src/native/linux/input.rs
+@@ -33,7 +33,14 @@
+ //! the keyboard (`SDL_SetWindowKeyboardGrab`): on Wayland the compositor's shortcuts inhibitor,
+ //! so its own shortcuts (Super, Alt+Tab) reach the guest. The pointer goes where the person
+ //! moves it, to the title bar and to other windows, and a click on another window is how the
+-//! keyboard is given back; there is no chord that releases it. (Upstream captures at a click
++//! keyboard is given back; there is no chord that releases it. A press on the window's own title
++//! bar releases capture while the window keeps the keyboard ([`Input::title_pressed`]): the
++//! desktop has its shortcuts there, as on any window's title bar, until a click into the image
++//! or until the window gains the keyboard again; on the whole screen, where there is no title
++//! bar, it is captured again ([`Input::full_screen_entered`]). The press starts the compositor's
++//! window move, which takes the keyboard from the window and gives it back when the button
++//! goes up: that loss (one within [`TITLE_MOVE_NS`] of the press) and the gain that ends it
++//! are the press's own and capture nothing. (Upstream captures at a click
+ //! into the image, holds the pointer over the image, and releases at Ctrl+Alt+Super.)
+ 
+ use crate::capture::{Capture, UNCAPTURED_SUFFIX};
+@@ -49,6 +56,10 @@ use crate::scroll::POINTS_PER_LINE;
+ /// nanoseconds of SDL's event clock: the compositor gives the keyboard and the click together.
+ pub(crate) const FOCUS_CLICK_NS: u64 = 100_000_000;
+ 
++/// vmlab: how soon after a press on the title bar a loss of the keyboard is the compositor's
++/// window move that the press started (the module doc), in nanoseconds of SDL's event clock.
++pub(crate) const TITLE_MOVE_NS: u64 = 250_000_000;
++
+ /// What the title ends with while captured: what capture is on and how to release it.
+ const CAPTURED_SUFFIX: &str = " \u{2014} input captured (press Ctrl+Alt+Super to release)";
+ 
+@@ -149,6 +160,10 @@ pub(crate) struct Input {
+     focused: bool,
+     /// When the window last gained the keyboard, on SDL's event clock.
+     focused_at: Option<u64>,
++    /// vmlab: when the title bar was last pressed, until the keyboard is next lost.
++    title_pressed_at: Option<u64>,
++    /// vmlab: the keyboard is away for the window move a title-bar press started.
++    title_move: bool,
+     /// What to send, in order, since [`send`] last took it.
+     out: Vec<ToHost>,
+ }
+@@ -290,15 +305,47 @@ impl Input {
+         self.focused = true;
+         self.focused_at = Some(timestamp);
+         let was_captured = self.is_captured();
+-        self.capture.click_in_image(true);
++        // vmlab: back from the window move of a title-bar press, the desktop keeps its shortcuts.
++        if !std::mem::take(&mut self.title_move) {
++            self.capture.click_in_image(true);
++        }
++        Reaction {
++            capture_changed: self.is_captured() != was_captured,
++        }
++    }
++
++    /// vmlab: a button went down on the window's title bar at `timestamp` (SDL's
++    /// `SDL_EVENT_WINDOW_HIT_TEST`, which the lab's SDL sends for it): the keys held are lifted
++    /// and capture is released, so the compositor's shortcuts are the desktop's. The window keeps
++    /// the keyboard: other keys still reach the guest, and a click into the image captures again.
++    pub(crate) fn title_pressed(&mut self, timestamp: u64) -> Reaction {
++        self.title_pressed_at = Some(timestamp);
++        self.lift_keys();
+         Reaction {
+-            capture_changed: !was_captured,
++            capture_changed: self.capture.release(),
++        }
++    }
++
++    /// vmlab: the window went to the whole screen, where it has no title bar: with the keyboard
++    /// it is captured, whatever the press on the title bar's button that sent it there released.
++    pub(crate) fn full_screen_entered(&mut self) -> Reaction {
++        let was_captured = self.is_captured();
++        if self.focused {
++            self.capture.click_in_image(true);
++        }
++        Reaction {
++            capture_changed: self.is_captured() != was_captured,
+         }
+     }
+ 
+-    /// The window lost the keyboard: every key and button held is lifted, and capture released.
+-    pub(crate) fn focus_lost(&mut self) -> Reaction {
++    /// The window lost the keyboard at `timestamp`: every key and button held is lifted, and
++    /// capture released.
++    pub(crate) fn focus_lost(&mut self, timestamp: u64) -> Reaction {
+         self.focused = false;
++        self.title_move = self
++            .title_pressed_at
++            .take()
++            .is_some_and(|t| timestamp.saturating_sub(t) < TITLE_MOVE_NS);
+         self.lift_keys();
+         self.lift_buttons();
+         Reaction {
+@@ -513,10 +560,60 @@ mod tests {
+                 ToHost::Key(KeyEvent::down(0xE3)),
+             ]
+         );
+-        assert!(input.focus_lost().capture_changed);
++        assert!(input.focus_lost(2_000_000_000).capture_changed);
+         assert_eq!(input.title_suffix(), UNCAPTURED_SUFFIX);
+     }
+ 
++    /// A press on the title bar releases capture and lifts the keys held, the window keeping
++    /// the keyboard; a click into the image captures again and is sent
++    #[test]
++    fn the_title_bar_gives_the_desktop_its_shortcuts() {
++        let mut input = focused();
++        input.key(0xE3, true, false);
++        input.take();
++        let r = input.title_pressed(4_000_000_000);
++        assert!(r.capture_changed && !input.is_captured());
++        assert_eq!(input.take(), vec![ToHost::Key(KeyEvent::up(0xE3))]);
++        assert!(!input.title_pressed(4_500_000_000).capture_changed);
++        // Still the window with the keyboard: a key reaches the guest.
++        input.key(0x04, true, false);
++        assert_eq!(input.take().len(), 1);
++        let r = input.button_down(BUTTON_LEFT, 5_000_000_000, &at((10.0, 10.0)));
++        assert!(r.capture_changed && input.is_captured());
++        assert_eq!(input.take(), vec![pointer(20, 20, BUTTON_LEFT)]);
++    }
++
++    /// The whole screen has no title bar: entering it captures again, with the keyboard only
++    #[test]
++    fn the_whole_screen_captures_again() {
++        let mut input = focused();
++        input.title_pressed(4_000_000_000);
++        assert!(input.full_screen_entered().capture_changed && input.is_captured());
++        assert!(!input.full_screen_entered().capture_changed);
++        input.focus_lost(9_000_000_000);
++        assert!(!input.full_screen_entered().capture_changed && !input.is_captured());
++    }
++
++    /// The compositor's window move that a title-bar press starts takes the keyboard away and
++    /// gives it back: that is no new activation, and the desktop keeps its shortcuts. A loss
++    /// that comes later is the person's, and the gain after it captures
++    #[test]
++    fn the_title_bars_own_move_captures_nothing() {
++        let mut input = focused();
++        input.title_pressed(4_000_000_000);
++        assert!(!input.focus_lost(4_002_000_000).capture_changed);
++        // However long the drag lasts.
++        assert!(!input.focus_gained(7_000_000_000).capture_changed && !input.is_captured());
++        // Later the person goes to another window and comes back.
++        input.focus_lost(8_000_000_000);
++        assert!(input.focus_gained(9_000_000_000).capture_changed && input.is_captured());
++        // A press that started no move (the second of a double click): the next loss is the
++        // person's.
++        input.title_pressed(10_000_000_000);
++        input.focus_lost(10_000_000_000 + TITLE_MOVE_NS);
++        assert!(input.focus_gained(12_000_000_000).capture_changed && input.is_captured());
++    }
++
+     /// Losing the keyboard lifts every key and button and releases capture
+     #[test]
+     fn losing_the_keyboard_leaves_nothing_stuck() {
+@@ -524,7 +621,7 @@ mod tests {
+         input.button_down(BUTTON_LEFT, 1_000_000_000, &at((10.0, 10.0)));
+         input.key(0x04, true, false);
+         input.take();
+-        let r = input.focus_lost();
++        let r = input.focus_lost(2_000_000_000);
+         assert!(r.capture_changed);
+         assert_eq!(
+             input.take(),
+diff --git a/crates/reims-vgpu-window/src/native/linux/sdl.rs b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+index 52e96270..f1df30c7 100644
+--- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
++++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+@@ -25,7 +25,9 @@
+ //! on Wayland through the compositor's shortcuts inhibitor (keyboard-shortcuts-inhibit), under
+ //! XWayland through an X keyboard grab, which XWayland hands the compositor
+ //! (xwayland-keyboard-grab). SDL holds the grab only while the window has the keyboard, and takes
+-//! it when the window gains it. SDL 3.4.18 opens windows through XWayland on a Wayland compositor
++//! it when the window gains it. vmlab: a press on the title bar lets the grab go until a click
++//! into the image (`super::input`); the lab's SDL reports that press as
++//! `SDL_EVENT_WINDOW_HIT_TEST`, stock SDL does not report it at all. SDL 3.4.18 opens windows through XWayland on a Wayland compositor
+ //! without fifo-v1 (read from its code), and cosmic-comp has none. Measured 2026-10-13 on
+ //! cosmic-comp 1.9.0, nested: through either route, while captured, its shortcuts (Super alone,
+ //! Super+Q, Super+A, Alt+Tab) stay unused and their keys reach the guest, a click that focuses the
+@@ -86,9 +88,15 @@ impl Input {
+         self.0.focus_gained(timestamp).capture_changed
+     }
+ 
+-    /// The window lost the keyboard: whether capture changed.
+-    pub(crate) fn focus_lost(&mut self) -> bool {
+-        self.0.focus_lost().capture_changed
++    /// The window lost the keyboard at `timestamp` (SDL's event clock): whether capture changed.
++    pub(crate) fn focus_lost(&mut self, timestamp: u64) -> bool {
++        self.0.focus_lost(timestamp).capture_changed
++    }
++
++    /// vmlab: the window went to the whole screen: whether capture changed
++    /// ([`input::Input::full_screen_entered`]).
++    pub(crate) fn full_screen_entered(&mut self) -> bool {
++        self.0.full_screen_entered().capture_changed
+     }
+ 
+     /// Whether input, the keyboard and the pointer, is captured.
+@@ -269,6 +277,12 @@ pub(crate) fn input_event(shell: &mut Shell, kind: u32, event: &SDL_Event) -> bo
+                 false
+             }
+         }
++        // vmlab: a press on the title bar (the lab's SDL sends this for libdecor's).
++        k if k == SDL_EVENT_WINDOW_HIT_TEST.0 => {
++            // SAFETY: a window event.
++            let timestamp = unsafe { event.window.timestamp };
++            shell.input.0.title_pressed(timestamp).capture_changed
++        }
+         k if k == SDL_EVENT_MOUSE_WHEEL.0 => {
+             // SAFETY: a wheel event.
+             let w = unsafe { event.wheel };
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index 382f4303..c347d29e 100644
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -342,7 +342,8 @@ impl Shell {
+             }
+             k if k == SDL_EVENT_WINDOW_MAXIMIZED.0 || k == SDL_EVENT_WINDOW_ENTER_FULLSCREEN.0 => {
+                 self.follows_guest = false;
+-                false
++                // vmlab: no title bar on the whole screen, so captured again.
++                k == SDL_EVENT_WINDOW_ENTER_FULLSCREEN.0 && self.input.full_screen_entered()
+             }
+             k if k == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN.0 => {
+                 os::hold_size(self);
+@@ -360,7 +361,10 @@ impl Shell {
+                 // SAFETY: a window event.
+                 self.input.focus_gained(unsafe { event.window.timestamp })
+             }
+-            k if k == SDL_EVENT_WINDOW_FOCUS_LOST.0 => self.input.focus_lost(),
++            k if k == SDL_EVENT_WINDOW_FOCUS_LOST.0 => {
++                // SAFETY: a window event.
++                self.input.focus_lost(unsafe { event.window.timestamp })
++            }
+             k if k == SDL_EVENT_WINDOW_MOUSE_ENTER.0 || k == SDL_EVENT_WINDOW_MOUSE_LEAVE.0 => {
+                 // SDL's cursor is the process's: another window may have hidden it.
+                 self.over_image = false;
