@@ -4,8 +4,11 @@ A Windows 11 and a macOS 26 test VM on one Ubuntu 24.04 laptop (Intel + RTX 4050
 virtual GPU, a window on the desktop and an MCP server for driving its GUI. This repository
 holds everything that makes them run except the disks and what is downloaded or built.
 
-- **Using the VMs** (the `vm` command, rules, gotchas): `home/.config/vmlab/README.md`. Agents
-  read it as `~/.config/vmlab/README.md` before any VM work.
+- **Using the VMs** (rules, the `vm` command, getting code in, the GUI server): `AGENTS.md`.
+  Agents read it before any VM work; the global instructions of Claude Code and Codex
+  (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) point at it.
+- **The reference behind it** (gotchas, working around what a VM lacks, where things live,
+  freeing disk space): `home/.config/vmlab/README.md`, linked as `~/.config/vmlab/README.md`.
 - **How the GPU VMs are built, and why each local change exists**: `gpu/README.md`.
 
 ## Layout
