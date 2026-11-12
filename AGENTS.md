@@ -4,10 +4,10 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 ## The VMs
 
-| Name | Guest | Inside it |
-|---|---|---|
+| Name  | Guest                                                                                                                                                     | Inside it                                                                                                                                                                                                                                    |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
-| `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3. | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc; not Xcode itself), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, Rust 1.99 (clippy, rustfmt), VS Code, Chrome (default browser), Cua Driver. No Homebrew. |
+| `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3.                                                                                   | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc; not Xcode itself), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, Rust 1.99 (clippy, rustfmt), VS Code, Chrome (default browser), Cua Driver.                         |
 
 - Login on both: user `dev`, password `vmlab`. It is an admin account and logs in automatically.
 - Each VM has 6 CPUs and 8 GB, a 1920×1080 screen when it runs without a window, and internet.
@@ -17,10 +17,10 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 - **One VM at a time.** If `vm status` shows another VM running, leave it alone and ask the user. Another agent, or the user at the VM window, may be in the middle of something.
 - **Start without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
-- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`).
+- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring recitative tasks, find a good balance between them.
 - `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
-- **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there.
+- **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there. For some tasks if 25GB is limiting, ask the user for an increase.
 
 ## Commands
 
@@ -66,15 +66,17 @@ vm reset <name>              back to the clean state
 
 `~/.local/bin/vmlab-mcp` is a stdio MCP server. It exposes the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs as one tool list. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
 
-**Add it only when the user asks for GUI work on a VM, and only for the current project.** Never add it globally.
+**Use it whenever work touches what a VM shows:** testing or checking an app's UI, its tray icon, menus, windows, focus, installers or dialogs. Add it to the project you are in when that work starts, before the first test (a running session needs a restart to see it), and look at the screen and click it, with `vm ssh` to confirm the result. Add it per project, with the commands below.
 
 - **Claude Code:** `claude mcp add -s local vmlab -- ~/.local/bin/vmlab-mcp`. The tools are `mcp__vmlab__*`. A session that is already running may need a restart before it sees them. Remove with `claude mcp remove -s local vmlab`.
 - **Codex:** `codex mcp add` writes the global config, so don't use it. Put this in `.codex/config.toml` at the project root:
+
   ```toml
   [mcp_servers.vmlab]
   command = "/home/inj-src/.local/bin/vmlab-mcp"
   tool_timeout_sec = 180
   ```
+
   - Codex reads a project's `.codex/config.toml` only if that project is trusted (`trust_level = "trusted"` under `[projects."<path>"]` in `~/.codex/config.toml`). Otherwise it ignores the file without a message. Check with `codex mcp list` from the project directory.
   - If the file should not be committed, add `.codex/config.toml` to `.git/info/exclude`.
   - The timeout matters: the first call after `vm start` can wait up to 90 s for the desktop.
