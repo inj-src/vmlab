@@ -88,6 +88,8 @@ cmd_start(){
     else "${RUN[$n]}" state load "$state" > /dev/null || exit 1
     fi
   fi
+  # Asked for a window while it runs already: show it, the way vm view does
+  if [[ -n $window && $(state_of "$n") == running ]]; then cmd_view "$n"; return; fi
   if [[ $(state_of "$n") != running ]]; then
     power_up
     case $n in
@@ -137,7 +139,8 @@ cmd_view(){
   if [[ $(state_of "$n") != running ]]; then cmd_start "$n" --window; return; fi
   if has_window "$n"; then echo "$n is running in a window on the desktop"; return; fi
   case $n in
-    win) setsid "${RUN[win]}" view >/dev/null 2>&1 < /dev/null & echo "viewer opened for win (it runs without its window: stop it and vm view win for the window)" ;;
+    win) setsid "${RUN[win]}" view >/dev/null 2>&1 < /dev/null &
+      echo "win was started without a window, so this is a plain viewer of its screen. For its real window: vm stop win, then vm view win" ;;
     mac) die "mac runs without a window: vm stop mac, then vm view mac" ;;
   esac
 }
@@ -315,7 +318,7 @@ state_lines(){
       [[ -z $last ]] || printf -- '-\t-\t\n'
       case ${N[i]} in win) printf -- "-\t-\t${b}Windows$z\n" ;; mac) printf -- "-\t-\t${b}Mac$z\n" ;; esac; last=${N[i]}
     fi
-    printf "%s\t%s\t  %-$(( wn + 3 ))s${C[i]}%-${ww}s$z$d%-${wm}s%-${wr}s%s$z\n" "${N[i]}" "${S[i]}" "${S[i]}" "${W[i]}" "${M[i]}" "${R[i]}" "${T[i]}"
+    printf "%s\t%s\t%-$(( wn + 3 ))s${C[i]}%-${ww}s$z$d%-${wm}s%-${wr}s%s$z\n" "${N[i]}" "${S[i]}" "${S[i]}" "${W[i]}" "${M[i]}" "${R[i]}" "${T[i]}"
   done
 }
 state_json(){
@@ -337,7 +340,7 @@ state_menu(){
   keys="${k}enter$d start   ${k}s$d save   ${k}n$d save as new   ${k}e$d note   ${k}d$d delete   ${k}q$d quit$k"
   fzf --ansi --no-sort --layout=reverse --margin=1,2,0,2 --height=$(( n + 3 )) <<< "$items" \
     --no-input --info=hidden --no-separator --no-scrollbar --no-mouse --delimiter=$'\t' --with-nth=3 \
-    --ellipsis='…' --pointer='▌' --gutter=' ' --color='16,fg+:-1:bold,bg+:-1,gutter:-1,pointer:4,footer:-1' \
+    --ellipsis='…' --pointer='❯' --gutter=' ' --color='16,fg+:-1:bold,bg+:-1,gutter:-1,pointer:4,footer:-1' \
     --footer=$'\n'"$keys" --footer-border=none --bind="load:pos(${pos:-2})" \
     --bind="down,j,ctrl-n,tab:transform:i=1; p=\$((FZF_POS + 1)); $step; [ \$p -le $n ] || p=2; echo \"pos(\$p)\"" \
     --bind="up,k,ctrl-p,shift-tab:transform:i=-1; p=\$((FZF_POS - 1)); $step; [ \$p -ge 1 ] || p=$n; echo \"pos(\$p)\"" \
@@ -478,7 +481,7 @@ sub=${1:-help}; shift || true
 case $sub in
   status|help) "cmd_$sub" ;;
   start) [[ $# -ge 1 ]] || die "usage: vm start <name> [state] [--window]"; cmd_start "$@" ;;
-  stop|ip|port|view) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
+  stop|ip|port|view) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   reset|commit) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$@" ;;
   states) cmd_states "$@" ;;
   save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--replace] [note...]"; cmd_save "$@" ;;
