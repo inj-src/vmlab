@@ -276,18 +276,43 @@ state_rows(){
     done < <("${RUN[$n]}" state list | sort)
   done
 }
-# The same as a table. $1 = fzf: the vm and the state in front of each line, for fzf's {1} {2},
-# and colours.
+# The same as a table, for agents and pipes
 state_table(){
-  local n name bytes when cur chg note now b="" d="" y="" g="" z=""
-  [[ ${1:-} == fzf ]] && { b=$'\e[1m' d=$'\e[2m' y=$'\e[33m' g=$'\e[32m' z=$'\e[0m'; }
-  [[ ${1:-} == fzf ]] || printf '%-4s %-16s %7s  %-16s  %-15s  %s\n' VM STATE SIZE SAVED NOW NOTE
+  local n name bytes when cur chg note now
+  printf '%-4s %-16s %7s  %-16s  %-15s  %s\n' VM STATE SIZE SAVED NOW NOTE
   while IFS=$'\t' read -r n name bytes when cur chg note; do
     now=""; [[ $cur == loaded ]] && now=loaded; [[ $chg == changed ]] && now="loaded, changed"
     [[ $cur == loaded && $(state_of "$n") == running ]] && now=running
-    [[ ${1:-} == fzf ]] && printf '%s\t%s\t' "$n" "$name"
-    printf "%-4s $b%-16s$z %7s  %-16s  ${now:+$([[ $now == loaded ]] && echo "$g" || echo "$y")}%-15s$z  $d%s$z\n" \
-      "$n" "$name" "$(st_size "$bytes")" "$(st_when "$when")" "$now" "$note"
+    printf '%-4s %-16s %7s  %-16s  %-15s  %s\n' "$n" "$name" "$(st_size "$bytes")" "$(st_when "$when")" "$now" "$note"
+  done < <(state_rows)
+}
+# The list's lines for a terminal $1 wide: the vm and the state in front for fzf's {1} {2},
+# then what is shown. The VM's name stands once, on its first line. A long note goes on under
+# its own beginning (under the state's name where the terminal is narrow); a line break inside
+# a line is written as \037 here, for state_menu to count.
+NOTE_COL=60
+st_day(){
+  [[ $1 == - ]] && return; local d; d=$(date -d "@$1" +%F)
+  if [[ $d == $(date +%F) ]]; then echo today; elif [[ $d == $(date -d yesterday +%F) ]]; then echo yesterday
+  elif [[ ${d%%-*} == $(date +%Y) ]]; then date -d "@$1" '+%-d %b'; else date -d "@$1" '+%b %Y'; fi
+}
+st_room(){ [[ $1 == - ]] || awk -v b="$1" 'BEGIN { if (b >= 2^30) printf "%.1f GB", b / 2^30; else if (b >= 2^20) printf "%d MB", b / 2^20; else printf "<1 MB" }'; }
+state_lines(){
+  local n name bytes when cur chg note now col last="" label l first at w d=$'\e[2m' z=$'\e[0m'
+  w=$(( $1 - 6 - NOTE_COL )) at=$NOTE_COL
+  (( w >= 48 )) || w=$(( $1 - 6 - 9 )) at=9
+  while IFS=$'\t' read -r n name bytes when cur chg note; do
+    label=""; [[ $n == "$last" ]] || case $n in win) label=Windows ;; mac) label=Mac ;; esac; last=$n
+    now="" col=$d; [[ $cur == loaded ]] && now=current
+    [[ $chg == changed ]] && now="unsaved changes" col=$'\e[33m'
+    [[ $cur == loaded && $(state_of "$n") == running ]] && now=running col=$'\e[32m'
+    [[ $name == clean ]] && note="what a reset returns to"
+    printf "%s\t%s\t%-9s%-17s$col%-16s$z%7s  %-9s" "$n" "$name" "$label" "$name" "$now" "$(st_room "$bytes")" "$(st_day "$when")"
+    first=$(( at == NOTE_COL ))
+    while IFS= read -r l; do
+      (( first )) && printf "$d%s$z" "$l" || printf "\037%*s$d%s$z" "$at" "" "$l"; first=0
+    done < <(fold -s -w "$w" <<< "$note")
+    echo
   done < <(state_rows)
 }
 state_json(){
@@ -295,81 +320,70 @@ state_json(){
     saved: (.[3] | tonumber? // null | if . then todate else null end), loaded: (.[4] == "loaded"),
     changed: (.[5] == "changed"), note: .[6]}]'
 }
-# What fzf shows beside the line the bar is on
-state_show(){
-  local n=$1 name=$2 r bytes when cur chg note title
-  r=$(state_rows | awk -F'\t' -v n="$n" -v s="$name" '$1 == n && $2 == s') || true
-  [[ -n $r ]] || { echo "no state '$name' of $n"; return; }
-  IFS=$'\t' read -r _ _ bytes when cur chg note <<< "$r"
-  case $n in win) title="Windows 11" ;; mac) title="macOS 26" ;; esac
-  printf '\e[1m%s: %s\e[0m\n\n' "$title" "$name"
-  [[ -f $STATES_DIR/$n/$name.note ]] && { cat "$STATES_DIR/$n/$name.note"; echo; } || { [[ -n $note ]] && printf '%s\n\n' "$note"; }
-  [[ $when == - ]] || echo "Saved    $(st_when "$when")"
-  case $n:$name in
-    *:clean) ;;
-    win:*) echo "Size     $(st_size "$bytes"), what its run wrote on top of the clean state" ;;
-    mac:*) echo "Size     kept inside the Mac's disk file ($(du -h "$LAB/reims-dev/data/reims-ctl/vms/mac26d/disk.qcow2" 2>/dev/null | cut -f1) with all its states)" ;;
-  esac
-  echo
-  if [[ $cur == loaded ]]; then
-    if [[ $(state_of "$n") == running ]]; then echo "The VM is running on this state now."
-    elif [[ $chg == changed ]]; then echo "The VM is off. Its disk is this state plus what it did since: Enter goes on from there."
-      [[ $name == clean ]] || echo "Ctrl-S keeps that in the state."
-    else echo "The VM is off and its disk is this state as saved."; fi
-  else
-    echo "The VM is $([[ $(state_of "$n") == running ]] && echo running || echo off), on '$(st_cur "$n")'$(st_chg "$n" && echo ' with changes not saved')."
-  fi
-  echo; echo "$(df -h --output=avail "$LAB" | tail -1 | tr -d ' ') free on $LAB"
-}
-# The list to work in (fzf): a line a state, what it is beside it, the keys below
+# The list to work in (fzf): a line a state and the keys below, in the terminal's own colours
+# and as tall as what it shows. A key hands over to its work (state_do), which starts the list
+# again with the bar on $1 $2, so the height and the wrapping fit what there is now.
 state_menu(){
-  local self rows; self=$(readlink -f "${BASH_SOURCE[0]}"); rows="$self states --fzf-rows"
-  "$self" states --fzf-rows | fzf --ansi --no-sort --layout=reverse --style=full --cycle --highlight-line \
-    --delimiter=$'\t' --with-nth=3 --info=hidden --exact --track --id-nth=1,2 \
-    --border-label=' The VMs and their saved states ' --input-label=' Filter ' --ghost='type to narrow the list' \
-    --header="$(printf '%-4s %-16s %7s  %-16s  %-15s  %s' VM STATE SIZE SAVED NOW NOTE)" \
-    --footer=$'Enter   start it in a window          Ctrl-E  edit the note\nCtrl-S  save the VM over this state   Ctrl-D  delete it\nCtrl-N  save the VM as a new state    Esc     leave' \
-    --preview="$self states --show {1} {2}" --preview-window='right,38%,wrap,<120(down,9,wrap)' --preview-label=' This state ' \
+  local self items pos keys k=$'\e[0m' d=$'\e[2m'
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  items=$(state_lines "$(tput cols)")
+  pos=$(awk -F'\t' -v n="${1:-}" -v s="${2:-}" '$1 == n && $2 == s { print NR }' <<< "$items")
+  keys="${k}enter$d start   ${k}s$d save   ${k}n$d save as new   ${k}e$d note   ${k}d$d delete   ${k}q$d quit$k"
+  tr '\n\037' '\0\n' <<< "$items" | fzf --read0 --ansi --no-sort --layout=reverse --margin=1,2,0,2 \
+    --height=$(( $(tr '\037' '\n' <<< "$items" | wc -l) + 3 )) \
+    --no-input --info=hidden --no-separator --no-scrollbar --cycle --delimiter=$'\t' --with-nth=3 \
+    --pointer='▌' --gutter=' ' --color='16,fg+:-1:bold,bg+:-1,gutter:-1,pointer:4,footer:-1' \
+    --footer=$'\n'"$keys" --footer-border=none \
+    --bind="load:pos(${pos:-1})" --bind="resize:become($self states --at {1} {2})" \
     --bind="enter:become($self start {1} {2} --window)" \
-    --bind="ctrl-s:execute($self states --do save {1} {2})+reload($rows)+refresh-preview" \
-    --bind="ctrl-n:execute($self states --do new {1})+reload($rows)+refresh-preview" \
-    --bind="ctrl-e:execute($self states --do note {1} {2})+reload($rows)+refresh-preview" \
-    --bind="ctrl-d:execute($self states --do clear {1} {2})+reload($rows)+refresh-preview" || true
+    --bind="s:become($self states --do save {1} {2})" \
+    --bind="n:become($self states --do new {1} {2})" \
+    --bind="e:become($self states --do note {1} {2})" \
+    --bind="d:become($self states --do clear {1} {2})" \
+    --bind='q:abort,j:down,k:up' || true
 }
-# The list's keys. Each ends on a key press, so what happened stays readable before fzf is back.
+# The list's keys: the work, then the list again with the bar where it was (on the new state
+# after "save as new"). The list shows what a key did; only a refusal waits for a key press, so
+# that it can be read first. Questions here take one key, without Enter.
+ask1(){ local a; read -r -n1 -p "$1 [y/N] " a < /dev/tty; echo > /dev/tty; [[ $a == [yY] ]]; }
 state_do(){
-  local act=$1 n=$2 name=${3:-} note
+  local act=$1 n=$2 name=${3:-} new="" note rc=0
+  printf '\e7\n' > /dev/tty          # the place the list was at: its questions go there
+  [[ $act != new ]] || read -r -e -p "Name for $n as it is now: " new < /dev/tty || true
   (
     case $act in
-      save) [[ $name != clean ]] || die "the clean state is changed with: vm commit $n"
-        ask "Save $n as it is now over '$name'?" || exit 0
+      save) [[ $name != clean ]] || die "the clean state is not saved over (vm commit $n changes it)"
+        ask1 "Save $n as it is now over '$name'?" || exit 3
         stop_for_save "$n" && cmd_save "$n" "$name" --replace ;;
-      new) read -r -e -p "A name for $n as it is now (lower-case letters, digits, . _ -): " name < /dev/tty
-        [[ -n $name ]] || exit 0
-        [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $name != clean ]] || die "not a name for a state (up to 16 lower-case letters, digits, . _ -): '$name'"
-        read -r -e -p "A note on it (may be empty): " note < /dev/tty
-        stop_for_save "$n" && cmd_save "$n" "$name" $note ;;
+      new) [[ -n $new ]] || exit 3
+        [[ $new =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $new != clean ]] || die "a name is up to 16 lower-case letters, digits and . _ -"
+        ! st_has "$n" "$new" || die "$n has a state '$new' already"
+        read -r -e -p "Note (may be empty): " note < /dev/tty
+        stop_for_save "$n" && cmd_save "$n" "$new" $note ;;
       note) [[ $name != clean ]] || die "the clean state has no note"
         read -r -e -i "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)" -p "Note on '$name': " note < /dev/tty
         cmd_note "$n" "$name" "$note" ;;
       clear) [[ $name != clean ]] || die "the clean state cannot be deleted"
-        cmd_clear "$n" "$name" ;;
+        ask1 "Delete $n's state '$name'? This cannot be undone." || exit 3
+        cmd_clear "$n" "$name" -y ;;
     esac
-  ) || true
-  read -r -n1 -s -p "(any key)" < /dev/tty || true
+  ) > /dev/null || rc=$?
+  (( rc == 0 || rc == 3 )) || read -r -n1 -s -p "(any key)" < /dev/tty || true
+  (( rc == 0 )) && [[ $act == new ]] && name=$new
+  printf '\e8\e[J' > /dev/tty        # and are gone when the list is back
+  state_menu "$n" "$name"
 }
 stop_for_save(){
   [[ $(state_of "$1") == running ]] || return 0
-  ask "$1 is running, and a state is the disk of a VM that is shut down. Shut it down now?" || return 1
-  cmd_stop "$1"
+  ask1 "$1 is running, and a state is the disk of a VM that is shut down. Shut it down now?" || exit 3
+  echo "shutting $1 down" > /dev/tty; cmd_stop "$1"
 }
 
 cmd_states(){
   case ${1:-} in
     --json) state_json ;;
     --plain) state_table ;;
-    --fzf-rows) state_table fzf ;;
-    --show) state_show "$2" "$3" ;;
+    --at) tty_both || die "vm states --at is the list's own"; state_menu "${2:-}" "${3:-}" ;;
     --do) shift; state_do "$@" ;;
     '') if tty_both && command -v fzf > /dev/null; then state_menu; else state_table; fi ;;
     *) die "usage: vm states [--plain|--json]" ;;
