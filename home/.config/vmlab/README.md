@@ -68,13 +68,14 @@ vm reset <name>              back to the clean state
 
 The user's word on this (2026-11-12): when the work needs something the VMs don't have, hack around it yourself. The lab is theirs to change and its sources are here.
 
+- **Tell the user every time:** when you had to work around something, say so in your report: what was missing, what you changed to get past it, and whether the change is still in place.
 - **Read first:** `/vmlab/tools/vmlab/gpu/README.md` has every local change to the GPU stack with its cause and its test, and what is known not to work.
 - **Sources:** the lab's repository is `/vmlab/tools/vmlab` (git, branch `main`, no remote).
   - Windows GPU, all in `gpu/win3d/`: the lab's QEMU (`build-qemu.sh`, `qemu-patches/`, source in `/vmlab/tmp/win-qemu/qemu`), the guest's Direct3D driver, which is Mesa (`build-guest-umd.sh`, `guest-patches/`), and its kernel driver (`build-guest-kmd.sh`, `kmd-patches/`). Upstream is github.com/VMLabDev/vmlab (`guest/win3d/`); its driver comes from github.com/arehnman/virtio-win-mesa.
   - Mac GPU: `gpu/reims-vgpu-dev/` is github.com/steelbrain/reims-vgpu plus `gpu/reims/patches/*.dev.patch`; `gpu/reims/build-dev.sh` builds it.
   - Guest setup: `win/`, `mac/`, `gpu/win3d/guest-scripts/`.
 - **What stays as it is:** a workaround made in a running VM lasts until `vm reset`. To keep one, add it to the lab's repository as a script or a patch with a line in the README that says why, and commit there; ask the user before `vm commit`, before posting anything upstream and before anything that needs root on this machine.
-- **Known case, Direct3D 12 on `win`:** the driver has Direct3D 9 to 11 only; Mesa has no Direct3D 12 driver interface, so adding it there is a new driver. An app that draws with Direct3D 12 alone (wgpu's `dx12` backend, which github.com/anomalyco/rune uses on Windows) gets Microsoft's software renderer (WARP) at best.
+- **Known case, Direct3D 12 on `win`:** the driver has Direct3D 9 to 11 only; Mesa has no Direct3D 12 driver interface, so adding it there is a new driver. An app that draws with Direct3D 12 alone (wgpu's `dx12` backend, for one) gets Microsoft's software renderer (WARP) at best.
   - The driver package ships a Direct3D 12 to Vulkan bridge (vkd3d-proton): `d3d12.dll`, `vkd3dcore.dll`, `dxgi-vulkan.dll` and `vulkan-1.dll` in `C:\ProgramData\vmlab-win3d\bundle\runtime\x64` (and `x86`).
   - `win-venus.sh d3d12 bridge` installs it for all of Windows, and Chrome and Electron then lose WebGL (their GPU process takes only Microsoft-signed DLLs); `d3d12 native` undoes it.
   - Not tried, and the likely way to have both: copy the bridge's DLLs beside the one app's `.exe` and leave Windows' own file alone. Windows looks in the app's folder first.
