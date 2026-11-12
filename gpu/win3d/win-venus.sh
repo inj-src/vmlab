@@ -130,6 +130,10 @@ start(){
 
   [[ -x $RENDER_SERVER ]] || die "$RENDER_SERVER is missing"
   [[ ${#layer[@]} == 0 || -f $HERE/host-layer/libVkLayer_vmlab_coherent_memory.so ]] || die "build the layer first: $HERE/host-layer/build.sh"
+  # Helpers left by a run that ended by itself (Windows shut down from inside, or its window
+  # closed, which powers it down; only `stop` and `kill` end them): their units would refuse
+  # the new ones their names.
+  systemctl --user stop vmlab-win-venus-net vmlab-win-venus-scale 2>/dev/null || true
   rm -f "$S"/{net,qmp,ga}.sock "$S"/{net,qemu}.pid "$S/size"; : > "$S/qemu.log"; : > "$S/net.log"
   # Both run as transient user units, so they outlive the terminal or app that started them,
   # and QEMU's stderr (the render server's messages too) lands in qemu.log.
