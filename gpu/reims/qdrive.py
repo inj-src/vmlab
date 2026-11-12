@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""qdrive.py: look at and drive a reims VM through its QMP socket, with no window.
+"""qdrive.py: look at and drive a VM through its QMP socket, with no window. The keys and the
+pointer are the VM's own hardware (a USB keyboard and tablet), so the guest sees them as a
+person's: Windows does not mark them as injected, as it does input sent from inside it.
 
   qdrive.py VM shot FILE.png            screenshot (the display's own size)
   qdrive.py VM click X Y [right|double] click at a pixel of that screenshot
   qdrive.py VM move X Y                 move the pointer
   qdrive.py VM drag X1 Y1 X2 Y2         press at one point, release at the other
   qdrive.py VM type 'text'              type US-keyboard text
-  qdrive.py VM key cmd+q [ret ...]      key chords: cmd, opt, ctrl, shift + a QEMU key name
+  qdrive.py VM key cmd+q [ret ...]      key chords: cmd (= win), opt (= alt), ctrl, shift + a
+                                        QEMU key name (ret, esc, tab, f4, up, delete, a, 1 ...)
   qdrive.py VM qmp '{"execute":...}'    one raw QMP command
 
+  qdrive.py VM size                     the screen's size, WxH
+
 VM is a reims VM name (its directory under the reims data dir) or a path to a qmp.sock.
+QDRIVE_VNC=PORT: the picture and its size come from the VM's VNC server on 127.0.0.1:PORT
+(the Windows VM: QMP's screendump has no picture of a guest that draws through the GPU).
 """
-import json, os, socket, sys, tempfile, time
+import json, os, socket, struct, subprocess, sys, tempfile, time
 
 VMS = '/vmlab/reims/data/reims-ctl/vms'
-MODS = {'cmd': 'meta_l', 'opt': 'alt', 'alt': 'alt', 'ctrl': 'ctrl', 'shift': 'shift'}
+VNC = os.environ.get('QDRIVE_VNC')
+VNCSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../win3d/vncshot.py')
+MODS = {'cmd': 'meta_l', 'win': 'meta_l', 'opt': 'alt', 'alt': 'alt', 'ctrl': 'ctrl', 'shift': 'shift'}
 PLAIN = {' ': 'spc', '\n': 'ret', '\t': 'tab', '-': 'minus', '=': 'equal', '[': 'bracket_left', ']': 'bracket_right',
          '\\': 'backslash', ';': 'semicolon', "'": 'apostrophe', '`': 'grave_accent', ',': 'comma', '.': 'dot', '/': 'slash'}
 SHIFTED = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
@@ -49,6 +58,7 @@ class Qmp:
         for q in reversed(qcodes): self.events(ev(q, False))
 
     def size(self):
+        if VNC: return vnc_size(int(VNC))
         with tempfile.TemporaryDirectory(dir='/vmlab/run') as d:
             w, h, _ = read_ppm(self.shot_ppm(os.path.join(d, 's.ppm')))
         return w, h
@@ -66,6 +76,21 @@ class Qmp:
         self.events({'type': 'btn', 'data': {'down': down, 'button': name}})
 
 
+def vnc_size(port):
+    """The screen's size from the VNC server's greeting (no password, as the lab's are)."""
+    s = socket.create_connection(('127.0.0.1', port), 10); s.settimeout(15)
+    def rd(n):
+        b = b''
+        while len(b) < n:
+            c = s.recv(n - len(b))
+            if not c: raise EOFError
+            b += c
+        return b
+    rd(12); s.sendall(b'RFB 003.008\n'); rd(rd(1)[0]); s.sendall(b'\x01'); rd(4); s.sendall(b'\x01')
+    w, h = struct.unpack('>HH', rd(4)); s.close()
+    return w, h
+
+
 def read_ppm(path):
     data = open(path, 'rb').read()
     parts, pos = [], 0
@@ -80,7 +105,12 @@ def main():
     if len(sys.argv) < 3: raise SystemExit(__doc__)
     vm, verb, args = sys.argv[1], sys.argv[2], sys.argv[3:]
     q = Qmp(vm if '/' in vm else f'{VMS}/{vm}/qmp.sock')
-    if verb == 'shot':
+    if verb == 'size':
+        print('%dx%d' % q.size())
+    elif verb == 'shot' and VNC:
+        w, h = subprocess.run([sys.executable, '-I', VNCSHOT, VNC, args[0]], check=True, capture_output=True, text=True).stdout.split()
+        print(f'{w}x{h} {args[0]}')
+    elif verb == 'shot':
         from PIL import Image
         os.makedirs('/vmlab/run', exist_ok=True)
         with tempfile.TemporaryDirectory(dir='/vmlab/run') as d:

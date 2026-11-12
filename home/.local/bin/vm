@@ -130,6 +130,35 @@ cmd_tunnel(){
 # Anchored to ^ssh so it never matches the shell that runs it.
 cmd_untunnel(){ pkill -f "^ssh .*-L 127\.0\.0\.1:$1:" && echo "closed localhost:$1" || echo "no tunnel on localhost:$1"; }
 
+# vm forward <name> <port>...: this machine's 127.0.0.1:<port> on the guest's own localhost:<port>
+# (an SSH remote forward), for a guest program that expects a service of this machine on
+# localhost. GUEST:HOST gives the guest another port number. Closed by vm unforward, or with the VM.
+cmd_forward(){
+  local n=$1 p args=(); shift; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running"
+  for p in "$@"; do
+    [[ $p =~ ^([0-9]+)(:([0-9]+))?$ ]] || die "usage: vm forward <name> <port|guestport:hostport>..."
+    # (asked first: Windows' sshd lets a second forward have a port that is taken, and says nothing)
+    pgrep -f "^ssh .*-p ${PORT[$n]} .*-R ${BASH_REMATCH[1]}:127\\.0\\.0\\.1:" > /dev/null &&
+      die "$n's port ${BASH_REMATCH[1]} is forwarded already (vm unforward $n closes all of $n's)"
+    args+=(-R "${BASH_REMATCH[1]}:127.0.0.1:${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}")
+  done
+  ssh $(ssh_opts "$n") -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "${args[@]}" "${GUSER[$n]}@127.0.0.1" ||
+    die "no forward: is a port taken in $n already (vm unforward $n)?"
+  echo "$n: localhost ports ${*} reach this machine (close with: vm unforward $n)"
+}
+cmd_unforward(){ need "$1"; pkill -f "^ssh .*-p ${PORT[$1]} .*-R [0-9]+:127\.0\.0\.1:" && echo "closed $1's forwards" || echo "$1 has no forwards"; }
+
+# vm gui <name> <verb>...: the VM's screen, keyboard and pointer from outside it (gpu/reims/qdrive.py)
+cmd_gui(){
+  local n=$1; shift; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"
+  case $n in
+    win) QDRIVE_VNC=5911 exec python3 -I "$LAB/tools/vmlab/gpu/reims/qdrive.py" "$LAB/run/win-venus/qmp.sock" "$@" ;;
+    mac) exec "${RUN[mac]}" gui "$@" ;;
+  esac
+}
+
 # vm push <name> <dir> [dest]: the git work tree <dir> is in, as it is now (uncommitted changes
 # and untracked files too, ignored files not), mirrored to a checkout in the guest. It goes as
 # a git bundle over SSH, after the first time only what changed. In the guest, files that left
@@ -217,6 +246,16 @@ vm cache                       how large each VM's build cache is. C:\cache and 
 vm cache clear <name>          empty that VM's build cache (VM must be stopped)
 vm tunnel <name> <port> [lp]   forward VM's 127.0.0.1:<port> to localhost:<lp>
 vm untunnel <localport>        close a tunnel opened by vm tunnel
+vm forward <name> <port>...    the other way: this machine's 127.0.0.1:<port> on the VM's own
+                               localhost:<port> (GUEST:HOST for another number in the VM)
+vm unforward <name>            close that VM's forwards
+vm gui <name> shot FILE.png    the VM's screen as a picture, whatever is on it
+vm gui <name> click X Y [right|double] | move X Y | drag X1 Y1 X2 Y2
+vm gui <name> type 'text' | key ctrl+s [ret ...] | size
+                               the VM's own keyboard and pointer, at pixels of that picture.
+                               The guest takes them for a person's (Windows does not mark
+                               them as injected). Key names: win (= cmd), alt, ctrl, shift
+                               and QEMU's (ret, esc, tab, f4, up, delete, a, 1)
 vm view <name>                 start it in its window; if it already runs without one, win
                                opens a plain viewer and mac has to be stopped first
 vm ip <name>, vm port <name>   where the VM's SSH is: 127.0.0.1 and a port (win 2222, mac 2227)
@@ -237,5 +276,8 @@ case $sub in
   cache) cmd_cache "$@" ;;
   push) [[ $# -ge 2 && $# -le 3 ]] || die "usage: vm push <name> <dir> [dest]"; cmd_push "$@" ;;
   tunnel) [[ $# -ge 2 ]] || die "usage: vm tunnel <name> <port> [localport]"; cmd_tunnel "$@" ;;
+  forward) [[ $# -ge 2 ]] || die "usage: vm forward <name> <port|guestport:hostport>..."; cmd_forward "$@" ;;
+  unforward) [[ $# -ge 1 ]] || die "usage: vm unforward <name>"; cmd_unforward "$1" ;;
+  gui) [[ $# -ge 2 ]] || die "usage: vm gui <name> shot FILE.png | click X Y | type 'text' | key ctrl+s (vm help)"; cmd_gui "$@" ;;
   *) die "unknown command '$sub' (vm help)" ;;
 esac
