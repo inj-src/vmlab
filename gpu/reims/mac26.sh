@@ -44,7 +44,7 @@
 #   MAC26_SHARE=DIR|off                  the host folder macOS sees as smb://10.0.2.4/qemu
 #                                        (in the guest: ~/share). Default /vmlab/share, the
 #                                        same folder as the Windows VM's. QEMU starts a
-#                                        private smbd for it (-netdev user,smb=); the host's
+#                                        private smbd for it (../share-smbd.sh); the host's
 #                                        own Samba services are masked.
 #   VMLAB_CACHE=DIR|off                  where the build cache is: a second disk, ~/cache in
 #                                        the guest, that reset and commit leave alone
@@ -126,8 +126,11 @@ start(){
   local share=${MAC26_SHARE:-/vmlab/share}
   if [[ $share != off && -x /usr/sbin/smbd ]]; then
     mkdir -p "$share"
-    sed -i "s|^\(  -netdev 'user,id=net0,[^']*\)'|\1,smb=$share'|" "$V/run.sh"
-    grep -q ",smb=$share'" "$V/run.sh" || die "could not give run.sh the shared folder"
+    # (not QEMU's own smb=: ../share-smbd.sh says why)
+    local smbd="guestfwd=tcp:10.0.2.4:445-cmd:/vmlab/tools/vmlab/gpu/share-smbd.sh $share $V/smb"
+    rm -rf "$V/smb"
+    sed -i "s|^\(  -netdev 'user,id=net0,[^']*\)'|\1,$smbd'|" "$V/run.sh"
+    grep -q ",$smbd'" "$V/run.sh" || die "could not give run.sh the shared folder"
   fi
   local cache=${VMLAB_CACHE:-$HOME/.local/share/vmlab/cache} empty=/vmlab/images/mac-cache-empty.qcow2
   if [[ $cache != off ]]; then
