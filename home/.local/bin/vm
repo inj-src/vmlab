@@ -59,16 +59,36 @@ cmd_status(){
     s=$(state_of "$n")
     [[ $s == running ]] && addr=127.0.0.1:${PORT[$n]}
     [[ $s == running && -f $STATE/$n.owner ]] && owner=$(cat "$STATE/$n.owner")
-    printf '%-4s %-8s %-15s %s\n' "$n" "$s" "$addr" "${owner:+started by $owner}"
+    local on; on=$(st_cur "$n"); st_chg "$n" && on+=", changed since"
+    printf '%-4s %-8s %-15s %s\n' "$n" "$s" "$addr" "${owner:+started by $owner  }state: $on"
   done
 }
 
 cmd_start(){
-  local n=$1 window=${2:-}; need "$n"
-  [[ -z $window || $window == --window ]] || die "usage: vm start <name> [--window]"
+  local n=$1 window="" state="" a; shift; need "$n"
+  for a in "$@"; do case $a in
+    --window) window=--window ;;
+    ''|-*) [[ -z $a ]] || die "usage: vm start <name> [state] [--window]" ;;
+    *) [[ -z $state ]] || die "usage: vm start <name> [state] [--window]"; state=$a ;;
+  esac; done
+  # A state: its disk becomes the VM's. The same state again goes on where the VM stopped:
+  # start never drops what a run wrote, reset does.
+  local other=""
+  [[ $(state_of "$n") == running ]] || other=$(running_vms | grep -vx "$n" || true)
+  [[ -z $other ]] || die "'$other' is running (one VM at a time). Leave it alone and ask the user, or the user can run: vm stop $other"
+  if [[ -n $state ]]; then
+    local cur; cur=$(st_cur "$n")
+    if [[ $(state_of "$n") == running ]]; then
+      [[ $cur == "$state" ]] || die "$n is running on '$cur' (vm stop $n first)"
+    elif [[ $cur == "$state" ]]; then
+      if st_chg "$n" && [[ $state != clean ]]; then
+        echo "$n goes on from where it stopped: '$state' with changes not saved (for the state as saved: vm reset $n --discard, then start again)"
+      fi
+    elif [[ $state == clean ]]; then "${RUN[$n]}" reset > /dev/null || exit 1
+    else "${RUN[$n]}" state load "$state" > /dev/null || exit 1
+    fi
+  fi
   if [[ $(state_of "$n") != running ]]; then
-    local other; other=$(running_vms | grep -vx "$n" || true)
-    [[ -z $other ]] || die "'$other' is running (one VM at a time). Leave it alone and ask the user, or the user can run: vm stop $other"
     power_up
     case $n in
       win) "${RUN[win]}" start "$WIN_GPU" $window >/dev/null ;;
@@ -92,17 +112,19 @@ cmd_stop(){
 }
 
 cmd_reset(){
-  local n=$1; need "$n"
+  local n=$1 flag=${2:-}; need "$n"
+  [[ -z $flag || $flag == --discard ]] || die "usage: vm reset <name> [--discard]"
   [[ $(state_of "$n") != running ]] || die "stop $n first (vm stop $n)"
-  "${RUN[$n]}" reset >/dev/null
+  "${RUN[$n]}" reset $flag >/dev/null || exit 1
   echo "$n reset to its clean state"
 }
 
 cmd_commit(){
   # Make the stopped VM's disk as it is now the clean state that reset returns to.
-  local n=$1; need "$n"
+  local n=$1 flag=${2:-}; need "$n"
+  [[ -z $flag || $flag == --drop-states ]] || die "usage: vm commit <name> [--drop-states]"
   [[ $(state_of "$n") != running ]] || die "stop $n first"
-  "${RUN[$n]}" commit >/dev/null
+  "${RUN[$n]}" commit $flag >/dev/null || exit 1
   echo "$n: its disk as it is now is the clean state"
 }
 
@@ -229,9 +251,165 @@ cmd_cache(){
   else die "usage: vm cache | vm cache clear <name>"; fi
 }
 
+# ---- Named states: a VM's disk kept under a name (the launchers do the keeping: gpu/states.sh).
+# The marks and the notes are files in $STATES_DIR/<vm>/.
+STATES_DIR=$LAB/images/states
+st_cur(){ cat "$STATES_DIR/$1/.current" 2>/dev/null || echo clean; }
+st_chg(){ [[ -e $STATES_DIR/$1/.changed ]]; }
+st_has(){ "${RUN[$1]}" state list | cut -f1 | grep -qx -- "$2"; }
+st_size(){ [[ $1 == - ]] && echo - || numfmt --to=iec --format=%.1f "$1"; }
+st_when(){ [[ $1 == - ]] && echo - || date -d "@$1" '+%Y-%m-%d %H:%M'; }
+ask(){ local a; read -r -p "$1 [y/N] " a < /dev/tty; [[ $a == [yY]* ]]; }
+tty_both(){ [[ -t 0 && -t 1 ]]; }
+
+# One line a state, tabs between: vm, state, bytes or -, time saved (epoch) or -, "loaded" where
+# the VM's disk is that state, "changed" where it ran since, the note. The clean state is first.
+state_rows(){
+  local n name bytes when cur
+  for n in win mac; do
+    cur=$(st_cur "$n")
+    printf '%s\tclean\t-\t-\t%s\t%s\t%s\n' "$n" "$([[ $cur == clean ]] && echo loaded || echo -)" \
+      "$([[ $cur == clean ]] && st_chg "$n" && echo changed || echo -)" "what vm reset $n returns to"
+    while IFS=$'\t' read -r name bytes when; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$name" "$bytes" "$when" "$([[ $cur == "$name" ]] && echo loaded || echo -)" \
+        "$([[ $cur == "$name" ]] && st_chg "$n" && echo changed || echo -)" "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)"
+    done < <("${RUN[$n]}" state list | sort)
+  done
+}
+# The same as a table. $1 = fzf: the vm and the state in front of each line, for fzf's {1} {2},
+# and colours.
+state_table(){
+  local n name bytes when cur chg note now b="" d="" y="" g="" z=""
+  [[ ${1:-} == fzf ]] && { b=$'\e[1m' d=$'\e[2m' y=$'\e[33m' g=$'\e[32m' z=$'\e[0m'; }
+  [[ ${1:-} == fzf ]] || printf '%-4s %-16s %7s  %-16s  %-15s  %s\n' VM STATE SIZE SAVED NOW NOTE
+  while IFS=$'\t' read -r n name bytes when cur chg note; do
+    now=""; [[ $cur == loaded ]] && now=loaded; [[ $chg == changed ]] && now="loaded, changed"
+    [[ $cur == loaded && $(state_of "$n") == running ]] && now=running
+    [[ ${1:-} == fzf ]] && printf '%s\t%s\t' "$n" "$name"
+    printf "%-4s $b%-16s$z %7s  %-16s  ${now:+$([[ $now == loaded ]] && echo "$g" || echo "$y")}%-15s$z  $d%s$z\n" \
+      "$n" "$name" "$(st_size "$bytes")" "$(st_when "$when")" "$now" "$note"
+  done < <(state_rows)
+}
+state_json(){
+  state_rows | jq -Rn '[inputs | split("\t") | {vm: .[0], state: .[1], size_bytes: (.[2] | tonumber? // null),
+    saved: (.[3] | tonumber? // null | if . then todate else null end), loaded: (.[4] == "loaded"),
+    changed: (.[5] == "changed"), note: .[6]}]'
+}
+# What fzf shows beside the line the bar is on
+state_show(){
+  local n=$1 name=$2 r bytes when cur chg note title
+  r=$(state_rows | awk -F'\t' -v n="$n" -v s="$name" '$1 == n && $2 == s') || true
+  [[ -n $r ]] || { echo "no state '$name' of $n"; return; }
+  IFS=$'\t' read -r _ _ bytes when cur chg note <<< "$r"
+  case $n in win) title="Windows 11" ;; mac) title="macOS 26" ;; esac
+  printf '\e[1m%s: %s\e[0m\n\n' "$title" "$name"
+  [[ -f $STATES_DIR/$n/$name.note ]] && { cat "$STATES_DIR/$n/$name.note"; echo; } || { [[ -n $note ]] && printf '%s\n\n' "$note"; }
+  [[ $when == - ]] || echo "Saved    $(st_when "$when")"
+  case $n:$name in
+    *:clean) ;;
+    win:*) echo "Size     $(st_size "$bytes"), what its run wrote on top of the clean state" ;;
+    mac:*) echo "Size     kept inside the Mac's disk file ($(du -h "$LAB/reims-dev/data/reims-ctl/vms/mac26d/disk.qcow2" 2>/dev/null | cut -f1) with all its states)" ;;
+  esac
+  echo
+  if [[ $cur == loaded ]]; then
+    if [[ $(state_of "$n") == running ]]; then echo "The VM is running on this state now."
+    elif [[ $chg == changed ]]; then echo "The VM is off. Its disk is this state plus what it did since: Enter goes on from there."
+      [[ $name == clean ]] || echo "Ctrl-S keeps that in the state."
+    else echo "The VM is off and its disk is this state as saved."; fi
+  else
+    echo "The VM is $([[ $(state_of "$n") == running ]] && echo running || echo off), on '$(st_cur "$n")'$(st_chg "$n" && echo ' with changes not saved')."
+  fi
+  echo; echo "$(df -h --output=avail "$LAB" | tail -1 | tr -d ' ') free on $LAB"
+}
+# The list to work in (fzf): a line a state, what it is beside it, the keys below
+state_menu(){
+  local self rows; self=$(readlink -f "${BASH_SOURCE[0]}"); rows="$self states --fzf-rows"
+  "$self" states --fzf-rows | fzf --ansi --no-sort --layout=reverse --style=full --cycle --highlight-line \
+    --delimiter=$'\t' --with-nth=3 --info=hidden --exact --track --id-nth=1,2 \
+    --border-label=' The VMs and their saved states ' --input-label=' Filter ' --ghost='type to narrow the list' \
+    --header="$(printf '%-4s %-16s %7s  %-16s  %-15s  %s' VM STATE SIZE SAVED NOW NOTE)" \
+    --footer=$'Enter   start it in a window          Ctrl-E  edit the note\nCtrl-S  save the VM over this state   Ctrl-D  delete it\nCtrl-N  save the VM as a new state    Esc     leave' \
+    --preview="$self states --show {1} {2}" --preview-window='right,38%,wrap,<120(down,9,wrap)' --preview-label=' This state ' \
+    --bind="enter:become($self start {1} {2} --window)" \
+    --bind="ctrl-s:execute($self states --do save {1} {2})+reload($rows)+refresh-preview" \
+    --bind="ctrl-n:execute($self states --do new {1})+reload($rows)+refresh-preview" \
+    --bind="ctrl-e:execute($self states --do note {1} {2})+reload($rows)+refresh-preview" \
+    --bind="ctrl-d:execute($self states --do clear {1} {2})+reload($rows)+refresh-preview" || true
+}
+# The list's keys. Each ends on a key press, so what happened stays readable before fzf is back.
+state_do(){
+  local act=$1 n=$2 name=${3:-} note
+  (
+    case $act in
+      save) [[ $name != clean ]] || die "the clean state is changed with: vm commit $n"
+        ask "Save $n as it is now over '$name'?" || exit 0
+        stop_for_save "$n" && cmd_save "$n" "$name" --replace ;;
+      new) read -r -e -p "A name for $n as it is now (lower-case letters, digits, . _ -): " name < /dev/tty
+        [[ -n $name ]] || exit 0
+        [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $name != clean ]] || die "not a name for a state (up to 16 lower-case letters, digits, . _ -): '$name'"
+        read -r -e -p "A note on it (may be empty): " note < /dev/tty
+        stop_for_save "$n" && cmd_save "$n" "$name" $note ;;
+      note) [[ $name != clean ]] || die "the clean state has no note"
+        read -r -e -i "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)" -p "Note on '$name': " note < /dev/tty
+        cmd_note "$n" "$name" "$note" ;;
+      clear) [[ $name != clean ]] || die "the clean state cannot be deleted"
+        cmd_clear "$n" "$name" ;;
+    esac
+  ) || true
+  read -r -n1 -s -p "(any key)" < /dev/tty || true
+}
+stop_for_save(){
+  [[ $(state_of "$1") == running ]] || return 0
+  ask "$1 is running, and a state is the disk of a VM that is shut down. Shut it down now?" || return 1
+  cmd_stop "$1"
+}
+
+cmd_states(){
+  case ${1:-} in
+    --json) state_json ;;
+    --plain) state_table ;;
+    --fzf-rows) state_table fzf ;;
+    --show) state_show "$2" "$3" ;;
+    --do) shift; state_do "$@" ;;
+    '') if tty_both && command -v fzf > /dev/null; then state_menu; else state_table; fi ;;
+    *) die "usage: vm states [--plain|--json]" ;;
+  esac
+}
+# vm save <name> <state> [--replace] [note...]
+cmd_save(){
+  local n=$1 name=${2:-} replace=0 a note=(); need "$n"; shift 2 || die "usage: vm save <name> <state> [--replace] [note...]"
+  for a in "$@"; do [[ $a == --replace ]] && replace=1 || note+=("$a"); done
+  [[ $(state_of "$n") != running ]] || die "$n is running: vm stop $n first (a state is the disk of a VM that is shut down)"
+  if (( ! replace )) && st_has "$n" "$name"; then
+    if tty_both; then ask "$n has a state '$name' already. Replace it?" || die "not saved"
+    else die "$n has a state '$name' already: vm save $n $name --replace writes over it"; fi
+  fi
+  "${RUN[$n]}" state save "$name" > /dev/null || exit 1
+  (( ${#note[@]} )) && echo "${note[*]}" > "$STATES_DIR/$n/$name.note"
+  echo "$n: saved as '$name' (start it with: vm start $n $name)"
+}
+cmd_note(){
+  local n=$1 name=$2; need "$n"; shift 2
+  st_has "$n" "$name" || die "$n has no state '$name' (vm states)"
+  mkdir -p "$STATES_DIR/$n"; echo "$*" > "$STATES_DIR/$n/$name.note"; echo "$n: note on '$name' set"
+}
+# vm clear <name> <state>... | --all   [-y]
+cmd_clear(){
+  local n=$1 a yes=0 all=0 names=(); need "$n"; shift
+  for a in "$@"; do case $a in -y|--yes) yes=1 ;; --all) all=1 ;; *) names+=("$a") ;; esac; done
+  (( all )) && mapfile -t names < <("${RUN[$n]}" state list | cut -f1)
+  (( ${#names[@]} )) || { (( all )) && { echo "$n has no states"; return; }; die "usage: vm clear <name> <state>... | --all  [-y]"; }
+  for a in "${names[@]}"; do st_has "$n" "$a" || die "$n has no state '$a' (vm states)"; done
+  if (( ! yes )) && tty_both; then ask "Delete $n's state${names[1]:+s} ${names[*]}? This cannot be undone." || die "nothing deleted"; fi
+  for a in "${names[@]}"; do "${RUN[$n]}" state rm "$a" > /dev/null || exit 1; echo "$n: '$a' deleted"; done
+}
+
 cmd_help(){ cat <<'EOF'
 vm status                      which VM is running, where its SSH is, who started it
-vm start <win|mac> [--window]  boot (refuses if the other VM is running) and wait for SSH.
+vm start <win|mac> [state] [--window]
+                               boot (refuses if the other VM is running) and wait for SSH.
+                               With a state (vm states): that state's disk, or the VM as it
+                               stopped if it is on that state already.
                                --window: in a window on the desktop (full screen: its title
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
                                it land on the guest's desktop). Without: no window
@@ -261,16 +439,32 @@ vm view <name>                 start it in its window; if it already runs withou
 vm ip <name>, vm port <name>   where the VM's SSH is: 127.0.0.1 and a port (win 2222, mac 2227)
 Shared folder: /vmlab/share on this machine is C:\share on win and ~/share on mac.
 vm stop <name>                 graceful shutdown (forced after 2 min)
-vm reset <name>                discard all changes since the clean state (VM must be stopped)
-vm commit <name>               make the current state the new clean state (VM must be stopped)
+vm reset <name> [--discard]    discard all changes since the clean state (VM must be stopped).
+                               A VM that ran on a named state and was not saved since is
+                               only reset with --discard
+vm commit <name>               make the current state the new clean state (VM must be stopped).
+                               win: its named states are built on the clean state and a
+                               commit ends them: --drop-states deletes them with it
+vm save <name> <state> [note]  keep the stopped VM's disk as it is under a name, beside the
+                               clean state. --replace writes over a state of that name
+vm note <name> <state> text    the line of text the list shows beside a state
+vm states                      the states of both VMs. In a terminal: a list to work in (start,
+                               save, note, delete). --plain: a table. --json: for programs
+vm clear <name> <state>...     delete states; --all: every state of that VM. In a terminal it
+                               asks first (-y: no question)
 EOF
 }
 
 sub=${1:-help}; shift || true
 case $sub in
   status|help) "cmd_$sub" ;;
-  start) [[ $# -ge 1 ]] || die "usage: vm start <name> [--window]"; cmd_start "$1" "${2:-}" ;;
-  stop|reset|commit|ip|port|view) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
+  start) [[ $# -ge 1 ]] || die "usage: vm start <name> [state] [--window]"; cmd_start "$@" ;;
+  stop|ip|port|view) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
+  reset|commit) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$@" ;;
+  states) cmd_states "$@" ;;
+  save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--replace] [note...]"; cmd_save "$@" ;;
+  note) [[ $# -ge 3 ]] || die "usage: vm note <name> <state> <text>"; cmd_note "$@" ;;
+  clear) [[ $# -ge 2 ]] || die "usage: vm clear <name> <state>... | --all  [-y]"; cmd_clear "$@" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;
   untunnel) [[ $# -ge 1 ]] || die "usage: vm untunnel <localport>"; cmd_untunnel "$1" ;;
   cache) cmd_cache "$@" ;;
