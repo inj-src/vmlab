@@ -2,10 +2,11 @@
 # name=value a line. Run over SSH (elevated).
 $gpu = Get-CimInstance Win32_VideoController | Where-Object Name -like '*VirtIO GPU 3D*'
 "gpu=" + $gpu.Status
-$class = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
-"hwcursor=" + (Get-ChildItem $class -ErrorAction SilentlyContinue |
-    ForEach-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).HWCursor } |
-    Where-Object { $_ -eq 1 } | Select-Object -First 1)
+# HWCursor of the device that is there now: Windows keeps one set of driver settings for each
+# PCI slot the GPU has ever been in, and a moved GPU starts again from the driver's default, 0
+$driver = (Get-PnpDevice -Class Display -PresentOnly | Where-Object FriendlyName -like '*VirtIO GPU 3D*' |
+    Get-PnpDeviceProperty -KeyName DEVPKEY_Device_Driver).Data
+"hwcursor=" + (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$driver" -ErrorAction SilentlyContinue).HWCursor
 "umd=" + (Get-FileHash "$env:WINDIR\System32\viogpu_d3d10.dll" -Algorithm SHA256).Hash.ToLower()
 "kmd=" + (Get-FileHash ((Get-CimInstance Win32_SystemDriver | Where-Object Name -eq VioGpu3D).PathName) -Algorithm SHA256).Hash.ToLower()
 "d3d12=" + (Get-AuthenticodeSignature "$env:WINDIR\System32\d3d12.dll").Status

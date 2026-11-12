@@ -207,6 +207,15 @@ before 2026-11-11 the pointer trailed the mouse:
   inside Windows. `mouse=off` on that chardev (in `win-venus.sh`) leaves the tablet.
   `query-mice` over QMP shows which device is current.
 
+- **The GPU keeps its PCI slot** (2026-11-12). Windows keeps a device's driver settings under
+  the slot it sits in. `win-venus.sh` left the slots to QEMU's numbering, so the build cache's
+  disk, added before the GPU on the command line, moved the GPU from slot 4 to 5: Windows set
+  it up as a new device (class key `0002`) with the INF's `HWCursor=0`, and the pointer
+  trailed again. Every device now has its slot written out (`addr=`), `HWCursor=1` is in both
+  keys, and `ready-checks.ps1` reads the key of the device that is present, not any key. If
+  the pointer trails: `vnccursor.py` (below) times out when Windows is not handing its cursor
+  over; then look at `HWCursor` under the present device's class key.
+
 `build-guest-kmd.sh` builds and test-signs the driver (the release's build scripts, podman, the
 lab's own key in `signing/`, output `guest-kmd/`; 2 minutes once Microsoft's driver kit is in
 `/vmlab/tmp/win3d-cache`); `build-guest-kmd.sh install` puts `viogpu3d.sys` into the running VM's
@@ -304,6 +313,12 @@ layer. What it does:
    `guest-scripts/clear-history.ps1`: `win11-base` carries the Run box's list and the recent
    items of the lab's own setup.
 5. The theme "Windows (light)" (`guest-scripts/set-theme.ps1`, the user's choice).
+6. Windows' own animations, fades, shadows and transparency (`guest-scripts/default-ui.ps1`,
+   run with step 2 before its restart; the user's wish, 2026-11-12). `win11-base` has them
+   off, the "best performance" set from the time the VM had no GPU. Applied by hand to the
+   ready state in use and checked in its desktop session (`SystemParametersInfo`: client
+   area, minimize, menu, combo box and tooltip animation all on); the step inside `setup`
+   has not been run.
 
 **Activation**: the ready state in use reports Windows as activated (a digital licence on the
 generic retail key). `win11-base` carries the generic volume key and is not activated, so a

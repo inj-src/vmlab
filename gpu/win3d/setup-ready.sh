@@ -16,6 +16,8 @@
 #   5. the lab's helper for the desktop session (win/run-interactive.ps1) and Cua Driver's
 #      logon task, both started with no console window (the helper on win11-base shows one)
 #   6. the theme "Windows (light)"
+#   7. Windows' own animations, fades and transparency (guest-scripts/default-ui.ps1; win11-base
+#      has them off, from the time the VM had no GPU). Done with step 3, before its restart.
 # WIN_VENUS_READY=FILE builds that file instead (a trial run beside the real ready state).
 set -euo pipefail
 HERE=/vmlab/tools/vmlab/gpu/win3d
@@ -75,8 +77,10 @@ sleep 20; wait_up                           # its last restart
 say "2. the lab's Direct3D and kernel drivers"
 "$HERE/build-guest-umd.sh" install > /dev/null
 "$HERE/build-guest-kmd.sh" install > /dev/null
-say "3. Microsoft's d3d12.dll"
+say "3. Microsoft's d3d12.dll, and Windows' own visual effects"
 "$W" d3d12 native > /dev/null
+"$W" scp "$HERE/guest-scripts/default-ui.ps1" dev@127.0.0.1:C:/vmlab/
+gssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\vmlab\default-ui.ps1' > /dev/null
 restart
 
 say "4. no account lockout"

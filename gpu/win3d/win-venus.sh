@@ -165,7 +165,7 @@ start(){
       if [[ -f $CACHE_EMPTY ]]; then cp "$CACHE_EMPTY" "$CACHE/win.qcow2"; else qemu-img create -q -f qcow2 "$CACHE/win.qcow2" 25G; fi
     fi
     cache=(-blockdev "driver=qcow2,node-name=cache0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename=$CACHE/win.qcow2"
-      -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=io0)
+      -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=io0,addr=2)
   fi
 
   echo "$gpu" > "$S/gpu"
@@ -174,6 +174,10 @@ start(){
   # (../README.md, "The pointer").
   # For diagnosis: WIN_VENUS_STRACE=FILE records the system calls of QEMU's main thread there
   local trace=(); [[ -n ${WIN_VENUS_STRACE:-} ]] && trace=(strace -o "$WIN_VENUS_STRACE" -tt -T)
+  # Every PCI device has its slot written out (addr=). Windows keeps a device's settings under
+  # its slot: left to QEMU's numbering, the cache disk (added 2026-11-12) moved the GPU from
+  # slot 4 to 5, Windows set it up as a new device with the driver's defaults (HWCursor=0), and
+  # the pointer trailed again. A new device takes a free slot (8 and up), never one of these.
   unit vmlab-win-venus "$S/qemu.log" --setenv=VK_LOADER_DRIVERS_SELECT="$select" --setenv=RENDER_SERVER_EXEC_PATH="$RENDER_SERVER" "${layer[@]}" "${env[@]}" \
     "${trace[@]}" "$QEMU" -name win-venus -L /usr/share/qemu -L /usr/share/seabios -L /usr/lib/ipxe/qemu -machine q35,hpet=off -accel kvm \
     -cpu host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_frequencies,hv_tlbflush,hv_ipi,hv_time \
@@ -182,16 +186,16 @@ start(){
     -drive if=pflash,format=raw,file="$S/OVMF_VARS.fd" \
     -object iothread,id=io0 \
     -blockdev driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename="$DISK" \
-    -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0 "${cache[@]}" \
+    -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0,addr=1 "${cache[@]}" \
     -drive if=none,id=cd0,media=cdrom,readonly=on,format=raw,file="$ISO" -device ide-cd,drive=cd0 \
     -netdev "stream,id=n,server=off,addr.type=unix,addr.path=$S/net.sock" \
-    -device virtio-net-pci,netdev=n,mac=52:54:00:58:55:6c \
-    -device virtio-serial-pci \
+    -device virtio-net-pci,netdev=n,mac=52:54:00:58:55:6c,addr=3 \
+    -device virtio-serial-pci,addr=4 \
     -chardev socket,id=ga,path="$S/ga.sock",server=on,wait=off -device virtserialport,chardev=ga,name=org.qemu.guest_agent.0 \
     -chardev qemu-vdagent,id=clip,name=vdagent,clipboard=on,mouse=off -device virtserialport,chardev=clip,name=com.redhat.spice.0 \
-    -device virtio-vga-gl,venus=true,blob=true,hostmem=4G,xres=1920,yres=1080 "${display[@]}" \
-    -audiodev "$audio,id=snd0" -device ich9-intel-hda -device hda-duplex,audiodev=snd0 \
-    -device qemu-xhci -device usb-tablet -device usb-kbd \
+    -device virtio-vga-gl,venus=true,blob=true,hostmem=4G,xres=1920,yres=1080,addr=5 "${display[@]}" \
+    -audiodev "$audio,id=snd0" -device ich9-intel-hda,addr=6 -device hda-duplex,audiodev=snd0 \
+    -device qemu-xhci,addr=7 -device usb-tablet -device usb-kbd \
     -qmp unix:"$S/qmp.sock",server=on,wait=off -monitor none -serial file:"$S/serial.log" -parallel none \
     -pidfile "$S/qemu.pid"
   up qemu || { stop_helpers; die "QEMU did not start: $(tail -5 "$S/qemu.log")"; }
