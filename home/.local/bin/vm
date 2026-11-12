@@ -286,61 +286,67 @@ state_table(){
     printf '%-4s %-16s %7s  %-16s  %-15s  %s\n' "$n" "$name" "$(st_size "$bytes")" "$(st_when "$when")" "$now" "$note"
   done < <(state_rows)
 }
-# The list's lines for a terminal $1 wide: the vm and the state in front for fzf's {1} {2},
-# then what is shown. The VM's name stands once, on its first line. A long note goes on under
-# its own beginning (under the state's name where the terminal is narrow); a line break inside
-# a line is written as \037 here, for state_menu to count.
-NOTE_COL=60
+# The list's lines: the vm and the state in front for fzf's {1} {2}, then what is shown. A line
+# of "-" in front is not a state: a VM's title, or the empty line before the next one. Every
+# state is one line; fzf cuts a long note off at the terminal's edge.
 st_day(){
-  [[ $1 == - ]] && return; local d; d=$(date -d "@$1" +%F)
+  local d; d=$(date -d "@$1" +%F)
   if [[ $d == $(date +%F) ]]; then echo today; elif [[ $d == $(date -d yesterday +%F) ]]; then echo yesterday
   elif [[ ${d%%-*} == $(date +%Y) ]]; then date -d "@$1" '+%-d %b'; else date -d "@$1" '+%b %Y'; fi
 }
-st_room(){ [[ $1 == - ]] || awk -v b="$1" 'BEGIN { if (b >= 2^30) printf "%.1f GB", b / 2^30; else if (b >= 2^20) printf "%d MB", b / 2^20; else printf "<1 MB" }'; }
+st_room(){ awk -v b="$1" 'BEGIN { if (b >= 2^30) printf "%.1f GB", b / 2^30; else if (b >= 2^20) printf "%d MB", b / 2^20; else printf "<1 MB" }'; }
 state_lines(){
-  local n name bytes when cur chg note now col last="" label l first at w d=$'\e[2m' z=$'\e[0m'
-  w=$(( $1 - 6 - NOTE_COL )) at=$NOTE_COL
-  (( w >= 48 )) || w=$(( $1 - 6 - 9 )) at=9
+  local n name bytes when cur chg note i last="" wn=0 ww=0 wr=0 wm=0 b=$'\e[1m' d=$'\e[2m' z=$'\e[0m'
+  local -a N=() S=() C=() W=() R=() M=() T=()
   while IFS=$'\t' read -r n name bytes when cur chg note; do
-    label=""; [[ $n == "$last" ]] || case $n in win) label=Windows ;; mac) label=Mac ;; esac; last=$n
-    now="" col=$d; [[ $cur == loaded ]] && now=current
-    [[ $chg == changed ]] && now="unsaved changes" col=$'\e[33m'
-    [[ $cur == loaded && $(state_of "$n") == running ]] && now=running col=$'\e[32m'
-    [[ $name == clean ]] && note="what a reset returns to"
-    printf "%s\t%s\t%-9s%-17s$col%-16s$z%7s  %-9s" "$n" "$name" "$label" "$name" "$now" "$(st_room "$bytes")" "$(st_day "$when")"
-    first=$(( at == NOTE_COL ))
-    while IFS= read -r l; do
-      (( first )) && printf "$d%s$z" "$l" || printf "\037%*s$d%s$z" "$at" "" "$l"; first=0
-    done < <(fold -s -w "$w" <<< "$note")
-    echo
+    i=${#N[@]}; N[i]=$n S[i]=$name C[i]="" W[i]="" R[i]="" M[i]="" T[i]=$note
+    [[ $cur == loaded ]] && W[i]=current
+    [[ $chg == changed ]] && W[i]="unsaved changes" C[i]=$'\e[33m'
+    [[ $cur == loaded && $(state_of "$n") == running ]] && W[i]=running C[i]=$'\e[32m'
+    [[ $when == - ]] || M[i]="saved $(st_day "$when")"
+    [[ $bytes == - ]] || R[i]=$(st_room "$bytes")
+    [[ $name == clean ]] && T[i]="what a reset returns to"
+    (( ${#name} > wn )) && wn=${#name}; (( ${#W[i]} > ww )) && ww=${#W[i]}
+    (( ${#M[i]} > wm )) && wm=${#M[i]}; (( ${#R[i]} > wr )) && wr=${#R[i]}
   done < <(state_rows)
+  (( ww )) && ww=$(( ww + 3 )); (( wm )) && wm=$(( wm + 3 )); (( wr )) && wr=$(( wr + 3 ))
+  for i in "${!N[@]}"; do
+    if [[ ${N[i]} != "$last" ]]; then
+      [[ -z $last ]] || printf -- '-\t-\t\n'
+      case ${N[i]} in win) printf -- "-\t-\t${b}Windows$z\n" ;; mac) printf -- "-\t-\t${b}Mac$z\n" ;; esac; last=${N[i]}
+    fi
+    printf "%s\t%s\t  %-$(( wn + 3 ))s${C[i]}%-${ww}s$z$d%-${wm}s%-${wr}s%s$z\n" "${N[i]}" "${S[i]}" "${S[i]}" "${W[i]}" "${M[i]}" "${R[i]}" "${T[i]}"
+  done
 }
 state_json(){
   state_rows | jq -Rn '[inputs | split("\t") | {vm: .[0], state: .[1], size_bytes: (.[2] | tonumber? // null),
     saved: (.[3] | tonumber? // null | if . then todate else null end), loaded: (.[4] == "loaded"),
     changed: (.[5] == "changed"), note: .[6]}]'
 }
-# The list to work in (fzf): a line a state and the keys below, in the terminal's own colours
-# and as tall as what it shows. A key hands over to its work (state_do), which starts the list
-# again with the bar on $1 $2, so the height and the wrapping fit what there is now.
+# The list to work in (fzf): the VMs as titles, a line a state under each and the keys below, in
+# the terminal's own colours and as tall as what it shows. The bar steps over the lines that
+# are not states ($skip: their numbers). A key hands over to its work (state_do), which starts
+# the list again with the bar on $1 $2.
 state_menu(){
-  local self items pos keys k=$'\e[0m' d=$'\e[2m'
+  local self items pos skip n step keys k=$'\e[0m' d=$'\e[2m'
   self=$(readlink -f "${BASH_SOURCE[0]}")
-  items=$(state_lines "$(tput cols)")
+  items=$(state_lines); n=$(wc -l <<< "$items")
+  skip=$(awk -F'\t' '$1 == "-" { printf " %d", NR } END { print " " }' <<< "$items")
   pos=$(awk -F'\t' -v n="${1:-}" -v s="${2:-}" '$1 == n && $2 == s { print NR }' <<< "$items")
+  step="while case '$skip' in *\" \$p \"*) true ;; *) false ;; esac; do p=\$((p + i)); done"
   keys="${k}enter$d start   ${k}s$d save   ${k}n$d save as new   ${k}e$d note   ${k}d$d delete   ${k}q$d quit$k"
-  tr '\n\037' '\0\n' <<< "$items" | fzf --read0 --ansi --no-sort --layout=reverse --margin=1,2,0,2 \
-    --height=$(( $(tr '\037' '\n' <<< "$items" | wc -l) + 3 )) \
-    --no-input --info=hidden --no-separator --no-scrollbar --cycle --delimiter=$'\t' --with-nth=3 \
-    --pointer='▌' --gutter=' ' --color='16,fg+:-1:bold,bg+:-1,gutter:-1,pointer:4,footer:-1' \
-    --footer=$'\n'"$keys" --footer-border=none \
-    --bind="load:pos(${pos:-1})" --bind="resize:become($self states --at {1} {2})" \
+  fzf --ansi --no-sort --layout=reverse --margin=1,2,0,2 --height=$(( n + 3 )) <<< "$items" \
+    --no-input --info=hidden --no-separator --no-scrollbar --no-mouse --delimiter=$'\t' --with-nth=3 \
+    --ellipsis='…' --pointer='▌' --gutter=' ' --color='16,fg+:-1:bold,bg+:-1,gutter:-1,pointer:4,footer:-1' \
+    --footer=$'\n'"$keys" --footer-border=none --bind="load:pos(${pos:-2})" \
+    --bind="down,j,ctrl-n,tab:transform:i=1; p=\$((FZF_POS + 1)); $step; [ \$p -le $n ] || p=2; echo \"pos(\$p)\"" \
+    --bind="up,k,ctrl-p,shift-tab:transform:i=-1; p=\$((FZF_POS - 1)); $step; [ \$p -ge 1 ] || p=$n; echo \"pos(\$p)\"" \
+    --bind="home:pos(2),end:last,page-up:ignore,page-down:ignore,q:abort" \
     --bind="enter:become($self start {1} {2} --window)" \
     --bind="s:become($self states --do save {1} {2})" \
     --bind="n:become($self states --do new {1} {2})" \
     --bind="e:become($self states --do note {1} {2})" \
-    --bind="d:become($self states --do clear {1} {2})" \
-    --bind='q:abort,j:down,k:up' || true
+    --bind="d:become($self states --do clear {1} {2})" || true
 }
 # The list's keys: the work, then the list again with the bar where it was (on the new state
 # after "save as new"). The list shows what a key did; only a refusal waits for a key press, so
@@ -383,7 +389,6 @@ cmd_states(){
   case ${1:-} in
     --json) state_json ;;
     --plain) state_table ;;
-    --at) tty_both || die "vm states --at is the list's own"; state_menu "${2:-}" "${3:-}" ;;
     --do) shift; state_do "$@" ;;
     '') if tty_both && command -v fzf > /dev/null; then state_menu; else state_table; fi ;;
     *) die "usage: vm states [--plain|--json]" ;;
