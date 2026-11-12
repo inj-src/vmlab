@@ -50,7 +50,10 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   are missing; the driver's `Install.cmd` and `run-interactive.ps1` fail that way.
 - **Keyboard without SSH** (a locked account, a boot menu, Automatic Repair after a forced
   power-off): `python3 -I reims/qdrive.py /vmlab/run/win-venus/qmp.sock key cmd+r`, `type
-  'text'`, `key alt+y` (the UAC prompt's Yes), with `$W shot` to see.
+  'text'`, `key alt+y` (the UAC prompt's Yes), with `$W shot` to see. `vm gui win …` is the
+  same tool with the screen's size and picture taken from VNC (`QDRIVE_VNC=5911`), which adds
+  `click`, `move`, `drag`, `size` and `shot`. Windows takes these keys for a keyboard's: a
+  low-level keyboard hook sees them without the "injected" flag that `SendInput` leaves.
 - **Network**: guest 10.0.2.15, host 10.0.2.2, through a second QEMU that acts as the NAT box.
   Only SSH is forwarded.
 - Logs: `/vmlab/run/win-venus/qemu.log` (QEMU and the render server). `WIN_VENUS_STRACE=FILE`
@@ -319,6 +322,26 @@ layer. What it does:
    ready state in use and checked in its desktop session (`SystemParametersInfo`: client
    area, minimize, menu, combo box and tooltip animation all on); the step inside `setup`
    has not been run.
+
+**Not in `setup`** (in the ready state in use, put there by hand, 2026-11-12; a ready state
+built by `setup` lacks them until these are run again, then `$W commit`):
+
+- The build cache disk and the shared folder: `win/setup-cache.ps1`, `win/setup-share.ps1`,
+  and Rust (`win/install-rust.ps1`).
+- `win/install-web-tools.ps1` (over SSH, as `dev`): pnpm and fnm as single programs in
+  `C:\Program Files`, their and Electron's download caches on `C:\cache`, the name
+  `host.vmlab` for this machine.
+- `win/install-postgres.ps1` (through `run-interactive.ps1`): PostgreSQL 16 as EDB's installer
+  sets it up on a customer's PC, 244 MB, the service `postgresql-x64-16` on port 5432,
+  `postgres`/`postgres`, without pgAdmin and Stack Builder.
+- `win/focus.ps1` and `win/tray.ps1` copied to `C:\vmlab`.
+
+**The shared folder's server** is `../share-smbd.sh`, not QEMU's `smb=`: the same `smbd` with
+leases and oplocks off, reached through `guestfwd` at the same address. With QEMU's own
+settings Samba refused to open a file that had been replaced on the host under the same name
+while Windows still held a lease on the old one (`STATUS_INVALID_PARAMETER`, "The parameter
+is incorrect"); no setting of Windows' SMB client changed that. Measured after the change:
+503 MB/s read, 264 MB/s write.
 
 **Activation**: the ready state in use reports Windows as activated (a digital licence on the
 generic retail key). `win11-base` carries the generic volume key and is not activated, so a

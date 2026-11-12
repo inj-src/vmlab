@@ -6,18 +6,19 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 | Name  | Guest                                                                                                                                                     | Inside it                                                                                                                                                                                                                                    |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
+| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, pnpm 12, fnm, PostgreSQL 16, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
 | `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3.                                                                                   | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc; not Xcode itself), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, Rust 1.99 (clippy, rustfmt), VS Code, Chrome (default browser), Cua Driver.                         |
 
 - Login on both: user `dev`, password `vmlab`. It is an admin account and logs in automatically.
 - Each VM has 6 CPUs and 8 GB, a 1920×1080 screen when it runs without a window, and internet.
+- `win` is set up for testing, not like a customer's PC: Defender, SmartScreen and Windows Update are off. When a result depends on one of them (an installer, a flagged binary, a firewall prompt), say in your report that the VM could not show it.
 - `mac` runs only x64 builds. For arm64 or Apple Silicon checks, use a GitHub Actions `macos-15` runner.
 
 ## Rules
 
 - **One VM at a time.** If `vm status` shows another VM running, leave it alone and ask the user. Another agent, or the user at the VM window, may be in the middle of something.
 - **Start without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
-- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring recitative tasks, find a good balance between them.
+- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them.
 - `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
 - **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there. For some tasks if 25GB is limiting, ask the user for an increase.
@@ -36,6 +37,11 @@ vm push <name> <dir> [dest]  mirror the git work tree at <dir> into the VM
 vm cache [clear <name>]      size of each VM's build cache; empty one
 vm tunnel <name> <port> [lp] forward the VM's 127.0.0.1:<port> to localhost:<lp>
 vm untunnel <lp>             close that forward
+vm forward <name> <port>...  the other way: this machine's localhost:<port> on the VM's localhost
+vm unforward <name>          close that VM's forwards
+vm gui <name> shot <f.png>   the VM's screen as a picture
+vm gui <name> click X Y | type 'text' | key ctrl+s
+                             its real keyboard and pointer, at pixels of that picture
 vm view <name>               boot it in its window for the user (mouse and keyboard)
 vm stop <name>               shut down
 vm reset <name>              back to the clean state
@@ -57,12 +63,27 @@ vm reset <name>              back to the clean state
 ## Running things in a VM
 
 - **Builds, installs, test suites:** `vm ssh win "cd C:\cache\src\app; cargo build"`; on `mac` the same with its paths (`~/cache/src/app`). The shell is PowerShell 7 on `win` and zsh on `mac`.
-- **On the visible Windows desktop:** anything started over SSH runs in an invisible session (Session 0): its screenshots come out black and Vulkan finds no GPU there. To start something on the visible desktop, run `C:\vmlab\run-interactive.ps1 -Command "<ps>" [-NoWait]`. It shows no console window of its own. Use the same wrapper for winget, which only works in the desktop session.
+- **On the visible Windows desktop:** anything started over SSH runs in an invisible session (Session 0): its screenshots come out black and Vulkan finds no GPU there. `C:\vmlab\run-interactive.ps1` runs things on the visible desktop, with no console window of its own. Call it from `vm ssh win` as `Remove-Item Env:PSModulePath; powershell -File C:\vmlab\run-interactive.ps1 …`:
+  - `-Command "<PowerShell>"` waits, prints the command's output and returns its exit code (`-TimeoutSec`, default one hour). Use it for test scripts and for winget, which only works in the desktop session.
+  - `-Start "<command line>" [-Log <file>] [-Dir <folder>]` is for a program that stays (a GUI app, a dev server): it returns in 2 s with the log file and a process id. The program's output goes to the log file itself, so start Electron this way: piped through PowerShell its main process dies with EPIPE. Stop it with `taskkill /T /F /PID <id>`.
 - **On the visible Mac desktop:** `open -a <App>` over SSH starts the app there (auto-login is on); stop it with `pkill -x <App>`. Use these in place of `osascript` AppleEvents (`tell app …`, `quit app …`): each of those puts a privacy (Automation) prompt on the desktop that blocks GUI work until someone answers it.
-- **Electron app internals:** start the app inside the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222`, then connect Playwright or playwright-mcp to `http://localhost:9222`. Run Playwright `_electron` tests inside the VM.
-- **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): the vmlab MCP server, next section.
+- **Electron app internals:** start the app inside the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222 9333`, then connect Playwright or playwright-mcp to `http://localhost:9333`. (The third number is the port on this machine; the user's own Chrome often holds 9222.) Run Playwright `_electron` tests inside the VM.
+- **A service of this machine, from inside the VM:** `vm forward <name> 5800 7000` puts this machine's `localhost:5800` and `:7000` on the VM's own `localhost`, so an app built against `http://localhost:5800` works unchanged. `vm unforward <name>` closes them. Where a forward does not fit, this machine is `host.vmlab` on `win` and `10.0.2.2` on both.
+- **Node and pnpm on `win`:** `node` is 26. For a project on another version: `fnm install 24` once (kept on `C:\cache`), then `fnm use 24` at the start of each `vm ssh` command, or `fnm exec --using=24 -- <command>` in the desktop session. `pnpm` is on the Path and switches to the version in the project's `packageManager` by itself. Downloads of Electron, electron-builder, npm and pnpm are kept on `C:\cache`.
+- **PostgreSQL on `win`:** 16, installed as on a customer's PC: service `postgresql-x64-16`, port 5432, user `postgres`, password `postgres`, tools in `C:\Program Files\PostgreSQL\16\bin` (not on the Path). Its databases are on the system disk: `vm reset` empties it.
+- **A build from GitHub (an installer from Actions, a release):** download it on this machine, where `gh` is signed in, into `/vmlab/share`. The VMs have no `gh` and get no GitHub token.
+- **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): the next two sections.
 
-## Driving a VM's GUI (vmlab-mcp)
+## Seeing and driving the screen (`vm gui`)
+
+`vm gui <name> shot <file.png>` is the VM's screen as it is, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.** It needs no setup.
+
+- `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
+- **Bring a window to the front first:** `run-interactive.ps1 -Command "C:\vmlab\focus.ps1 notepad"` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
+- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `vm ssh win "C:\vmlab\tray.ps1 <part of the program's name>"` puts it beside the clock.
+- **Display scaling on `win`:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
+
+## Finding and reading UI elements (vmlab-mcp)
 
 `~/.local/bin/vmlab-mcp` is a stdio MCP server. It exposes the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs as one tool list. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
 
