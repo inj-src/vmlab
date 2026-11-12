@@ -64,14 +64,6 @@ def button(code, down):
     session('NotifyPointerButton', '(ib)', code, down)
 
 
-def scale():
-    # RemoteDesktop takes the stream's logical coordinates; the steps give screen pixels
-    state = call('org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig',
-                 'org.gnome.Mutter.DisplayConfig', 'GetCurrentState', None).unpack()
-    return state[2][0][2]
-
-
-SCALE = scale()
 LEFT, RIGHT = 272, 273
 # The session's pointer appears with its first event, and a client has to ask for it (the seat's
 # new capability) before it gets any: that first event, and those right after it, are lost.
@@ -83,7 +75,11 @@ while steps:
     step = steps.pop(0)
     if step == 'move':
         x, y = float(steps.pop(0)), float(steps.pop(0))
-        session('NotifyPointerMotionAbsolute', '(sdd)', stream, x / SCALE, y / SCALE)
+        # RemoteDesktop takes the stream's own pixels, the screen's, and mutter divides them by
+        # the screen's scale itself (meta_screen_cast_monitor_stream_transform_position).
+        # Dividing here too put every click at 80% of its place on the 125% screen (found
+        # 2026-11-12: a click meant for the close button landed left of it, on the title bar).
+        session('NotifyPointerMotionAbsolute', '(sdd)', stream, x, y)
     elif step == 'press':
         button(LEFT, True)
     elif step == 'release':
