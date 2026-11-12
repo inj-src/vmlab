@@ -11,15 +11,17 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 - Login on both: user `dev`, password `vmlab`. It is an admin account and logs in automatically.
 - Each VM has 6 CPUs and 8 GB, a 1920×1080 screen when it runs without a window, and internet.
-- `win` is set up for testing, not like a customer's PC: Defender, SmartScreen and Windows Update are off. When a result depends on one of them (an installer, a flagged binary, a firewall prompt), say in your report that the VM could not show it.
+- `win` is set up for testing, not like a customer's PC: Defender antivirus and Windows Update are off. For a test that depends on the antivirus (an installer, a first launch, a flagged binary), use the saved state with Defender on: `vm start win defender`. Its definitions are of 2026-11-12, and real-time protection comes on some seconds after SSH answers (wait for `(Get-MpComputerStatus).RealTimeProtectionEnabled`). When a result depends on Windows Update, say in your report that the VM could not show it.
+- SmartScreen is on in every state of `win`. Its "Windows protected your PC" box appears only for a file that carries the Mark-of-the-Web and is started through Explorer, so a file you built in the VM or copied in with `scp` or `vm push` starts without it. To see what a customer's download does, mark the file first: `Set-Content -Path app.exe -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'`, then `explorer.exe app.exe` through `run-interactive.ps1`.
 - `mac` runs only x64 builds. For arm64 or Apple Silicon checks, use a GitHub Actions `macos-15` runner.
 
 ## Rules
 
 - **One VM at a time.** If `vm status` shows another VM running, leave it alone and ask the user. Another agent, or the user at the VM window, may be in the middle of something.
 - **Start without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
-- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them.
-- `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change.
+- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them: a setup worth keeping across resets is a [saved state](#saved-states).
+- `vm commit` changes the clean state for every agent, and on `win` it ends every saved state. Run it only when the user asks for a permanent change.
+- **A saved state you did not make is not yours:** start it, but do not save over it or delete it. `mine` on `mac` is the user's own session. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started yourself; otherwise ask the user.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
 - **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there. For some tasks if 25GB is limiting, ask the user for an increase.
 
@@ -45,7 +47,22 @@ vm gui <name> click X Y | type 'text' | key ctrl+s
 vm view <name>               boot it in its window for the user (mouse and keyboard)
 vm stop <name>               shut down
 vm reset <name>              back to the clean state
+vm states --plain            the saved states of both VMs (--json for a program)
+vm start <name> <state>      boot a saved state
+vm save <name> <state> "note"  keep the stopped VM as it is under a name
+vm clear <name> <state>      delete a saved state
 ```
+
+## Saved states
+
+A saved state is a VM's whole disk kept under a name beside the clean state: a Windows with a project installed and its database filled, a browser that is logged in. Use one when you would otherwise redo the same setup after every reset.
+
+- **See them:** `vm states --plain` (name, size, when saved, a note, and which one the VM is on). Run in a terminal by the user, `vm states` is a list to work in.
+- **Use one:** `vm start win hq` boots it as it was saved. What your run changes is not in the state until you save again, so every agent starts from the same thing. Clean up with `vm stop win` and `vm reset win --discard`.
+- **Make one:** set the VM up, `vm stop win`, then `vm save win hq "HQ shell installed, database seeded"`. Name it after the project and say in the note what is in it. `--replace` writes over a state of that name. Tell the user about each state you made.
+- **Cost:** a state of `win` is as large as what its run wrote: 0.4 GB after ten minutes, 1 to 2 GB after a long session. Save right after the setup. States of `mac` are inside the Mac's disk file, whose size the list cannot split up.
+- **Remove:** `vm clear win hq`, for states you made.
+- **`defender` on `win` and `mine` on `mac` are the lab's and the user's:** start them, save nothing over them.
 
 ## Getting code and files into a VM
 

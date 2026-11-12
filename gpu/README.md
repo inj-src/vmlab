@@ -295,6 +295,29 @@ is on the crashing thread's stack, with the DLL's name and `dwLastError`; Chrome
 its symbol server (`chrome.dll.pdb`, 5.8 GB) and `llvm-symbolizer-18 --obj=chrome.dll
 --relative-address` names the frames. Not reported upstream yet.
 
+### Saved states (`vm save`, `vm states`)
+
+A saved state is a run's disk kept as it was: `/vmlab/images/states/win/NAME.qcow2`, a copy of
+`win11-venus.qcow2` (the changes since the ready state, so as large as what the run wrote),
+with its firmware variables beside it. `$W state load NAME` copies it back to
+`win11-venus.qcow2`; on this XFS disk a copy shares its blocks with the original (reflink), so
+saving and loading take no time and no room until the two differ. `../states.sh` has what
+Windows and the Mac share: the names, and the marks `.current` and `.changed` that say which
+state the disk is on and whether it ran since. A VM that ran on a named state and was not
+saved since is not reset or loaded over without `--discard`.
+
+The states are changes to this ready state: on another one they are a broken disk. `$W commit`
+therefore refuses while states exist (`--drop-states` deletes them with it), and `$W setup`
+asks for `vm clear win --all` first. Its trial runs (`WIN_VENUS_READY`, `WIN_VENUS_DISK`) keep
+their marks in `/vmlab/run/win-venus/trial-states`, away from the real ones.
+
+The Mac keeps its states as snapshots inside its one disk file, beside `clean`
+(`reims/mac26.sh state …`); each is a whole disk of its own, and a commit leaves them alone.
+
+One state of `win` belongs to the lab: `defender`, the clean state with Defender antivirus
+switched on again (`win/enable-defender.ps1`). A commit with `--drop-states` or a new ready
+state deletes it; `win/README-defender.txt` has the steps that build it again.
+
 ### The ready state (`$W setup`)
 
 `$W reset` returns to `win11-ready.qcow2`, which has everything below, so nothing needs doing
