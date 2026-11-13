@@ -115,12 +115,6 @@ start(){
     sed -i "s|^  -device 'ide-hd,bus=sata.3,drive=disk,rotation_rate=1' \\\\\$|  -object 'iothread,id=io0' \\\\\n  -device 'virtio-blk-pci,drive=disk,iothread=io0,addr=0x8' \\\\|" "$V/run.sh"
     grep -q "virtio-blk-pci,drive=disk" "$V/run.sh" || die "could not make the disk virtio-blk in run.sh"
   fi
-  # The channel to the guest's agent (vmlab-spice-agent: clipboard and dropped files), a
-  # virtio serial port named as SPICE's. Its host end is a socket the window connects to
-  # (VMLAB_AGENT_SOCKET below; our agent.rs in reims' window code).
-  rm -f "$V/agent.sock"
-  sed -i "s|^  -display none \\\\\$|  -device 'virtio-serial-pci,id=vser,addr=0x9' \\\\\n  -chardev 'socket,id=agent,path=$V/agent.sock,server=on,wait=off' \\\\\n  -device 'virtserialport,chardev=agent,name=com.redhat.spice.0' \\\\\n&|" "$V/run.sh"
-  grep -q "virtserialport,chardev=agent" "$V/run.sh" || die "could not add the agent's channel to run.sh"
   # The firmware with a quiet start, as the Windows VM's (../win3d/firmware/make-firmware.py):
   # no TianoCore logo and no "BdsDxe: loading Boot..." lines, so the screen stays black until
   # macOS draws. reims' own OVMF_CODE.fd stays as it is; the quiet one is made from it, and
@@ -170,8 +164,8 @@ start(){
     # As the user asked for both VMs: the window opens maximized (our switch in reims' window
     # code, ../README.md).
     # SDL_APP_ID: the desktop's icon for the window (vmlab-macos26.desktop); _TITLE: its
-    # title (also ours). VMLAB_AGENT_SOCKET: the clipboard (above). VMLAB_DROP_COMMAND: what
-    # the window gives dropped files to (drop, below).
+    # title (also ours). VMLAB_AGENT_SOCKET: the clipboard (agent_link, below).
+    # VMLAB_DROP_COMMAND: what the window gives dropped files to (drop, below).
     env+=(--setenv=REIMS_VGPU_WINDOW_MAXIMIZED=1 --setenv=SDL_APP_ID=vmlab-macos26
       --setenv="REIMS_VGPU_WINDOW_TITLE=macOS 26 Tahoe" --setenv="VMLAB_AGENT_SOCKET=$V/agent.sock"
       --setenv="VMLAB_DROP_COMMAND=$(readlink -f "$0") drop")
@@ -228,6 +222,7 @@ start(){
   st_ran
   systemd-run --user --quiet --collect --unit="$UNIT" "${env[@]}" \
     -p StandardOutput="append:$V/logs/qemu.log" -p StandardError="append:$V/logs/qemu.log" "${thp[@]}" "$V/run.sh"
+  (( window )) && agent_link
   for _ in $(seq 20); do python3 -I "${0%/*}/../pin.py" "$V/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
   for _ in $(seq 90); do
     alive || die "QEMU ended: $(tail -3 "$V/logs/qemu.log")"
@@ -235,6 +230,26 @@ start(){
     sleep 2
   done
   die "no SSH after 3 min (mac26.sh gui shot FILE.png shows the screen)"
+}
+
+# The link to the guest's agent (vmlab-spice-agent, ../../mac/spice-agent: the clipboard). The
+# agent listens on a Unix socket in the guest; SSH carries it to $V/agent.sock, which the window
+# connects to (VMLAB_AGENT_SOCKET; our agent.rs in reims' window code) and tries again every
+# 2 s. A unit of its own that lives and ends with the VM's: SSH ends when macOS restarts, and
+# is started again until it is back. It was a virtio serial port until 2026-11-13: macOS
+# stopped reading that at random, and the clipboard was dead until the guest restarted
+# (../README.md).
+AGENT_SOCK=/Users/dev/Library/Caches/vmlab-spice-agent.sock
+agent_link(){
+  systemctl --user stop "$UNIT-agent" 2>/dev/null || true
+  systemctl --user reset-failed "$UNIT-agent" 2>/dev/null || true
+  rm -f "$V/agent.sock"
+  systemd-run --user --quiet --collect --unit="$UNIT-agent" \
+    -p BindsTo="$UNIT.service" -p After="$UNIT.service" \
+    -p Restart=always -p RestartSec=2 -p StartLimitIntervalSec=0 \
+    -p StandardOutput=null -p StandardError=null \
+    ssh "${SSH_OPTS[@]}" -p "$PORT" -N -T -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L "$V/agent.sock:$AGENT_SOCK" dev@127.0.0.1
 }
 
 stop(){
@@ -261,8 +276,8 @@ closed(){
 # (VMLAB_DROP_COMMAND) with one drag's paths. They go to macOS as a tar stream over SSH into a
 # folder of their own on the desktop's volume, and move onto the desktop once all of them are
 # whole, each under a free name ("name 2.ext", as the Finder numbers them). Not through the
-# SPICE agent: macOS stops reading its serial port some tens of megabytes into a file
-# (../README.md). A drag that takes more than 2 s says so in a desktop notification, which its
+# SPICE agent: that was the way once, and macOS stopped reading the agent's serial port some
+# tens of megabytes into a file (../README.md). A drag that takes more than 2 s says so in a desktop notification, which its
 # end replaces; a failure always does. Its lines go to qemu.log.
 #
 # place.sh: what moves a drag's folder onto the desktop, read by /bin/sh in the guest.

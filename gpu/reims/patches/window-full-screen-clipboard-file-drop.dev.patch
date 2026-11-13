@@ -122,8 +122,9 @@
 +//! vmlab: the host's clipboard (text and pictures) shared with the guest through a SPICE agent
 +//! in the guest, and files dropped on the window handed to a command that carries them there.
 +//!
-+//! QEMU gives the guest a virtio serial port named `com.redhat.spice.0` whose other end is a
-+//! Unix socket QEMU listens on; `VMLAB_AGENT_SOCKET` names it. This module is the "client" a
++//! `VMLAB_AGENT_SOCKET` names a Unix socket that leads to the agent: the lab's launcher has SSH
++//! carry it to the socket the agent listens on in the guest, so a connection made here that
++//! closes at once means the agent is not there yet. This module is the "client" a
 +//! SPICE agent talks to (spice-protocol's `vd_agent.h`): chunks `{u32 port, u32 size}` of at
 +//! most 2048 bytes, whose payloads joined are messages `{u32 protocol, u32 type, u64 opaque,
 +//! u32 size}` and their data, all little-endian. Without the variable no clipboard is shared.
@@ -145,9 +146,8 @@
 +//! **Files.** The files and folders of one drag onto the window (`SDL_EVENT_DROP_FILE` for
 +//! each, then `SDL_EVENT_DROP_COMPLETE`) are given to the command `VMLAB_DROP_COMMAND` names, a
 +//! line for `/bin/sh -c` that gets their paths as its arguments and puts them on the guest's
-+//! desktop its own way (the lab's goes through SSH). They do not go through the agent: macOS
-+//! stops reading its serial port some tens of megabytes into a large file, and the clipboard
-+//! stops with it. Without the variable a drop is only logged.
++//! desktop its own way (the lab's goes through SSH), not through the agent, which so stays free
++//! for the clipboard however large the files. Without the variable a drop is only logged.
 +
 +use std::cell::RefCell;
 +use std::collections::VecDeque;

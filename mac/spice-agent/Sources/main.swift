@@ -1,7 +1,7 @@
 // vmlab-spice-agent: a SPICE guest agent for macOS. Shares the clipboard (UTF-8 text, PNG images)
 // with the SPICE client and saves files dropped on the viewer window to ~/Desktop.
 //
-// Threads: SerialPort reads and reassembles messages on its io queue. File-transfer messages go
+// Threads: Port reads and reassembles messages on its io queue. File-transfer messages go
 // from there straight to FileXfer's own queue; everything else goes to the main queue, where the
 // clipboard state and all NSPasteboard access live.
 
@@ -15,20 +15,21 @@ let dropDir: String = {
     if let i = args.firstIndex(of: "--drop-dir"), args.index(after: i) < args.endIndex { return args[args.index(after: i)] }
     return (NSHomeDirectory() as NSString).appendingPathComponent("Desktop")
 }()
-let devicePath: String = {
+/// The socket the client connects to (Port.swift). The host's launcher names the same path.
+let socketPath: String = {
     var it = args.makeIterator()
     while let a = it.next() {
         if a == "--drop-dir" { _ = it.next(); continue }
         if !a.hasPrefix("-") { return a }
     }
-    return "/dev/cu.com.redhat.spice.0"
+    return (NSHomeDirectory() as NSString).appendingPathComponent("Library/Caches/vmlab-spice-agent.sock")
 }()
 let pollInterval: DispatchTimeInterval = .milliseconds(500)
 /// Largest message we buffer. Bigger ones (well past any sane clipboard) are skipped.
 let maxIncomingMessage = 256 << 20
 
 final class Agent {
-    let port: SerialPort
+    let port: Port
     let reader = ChunkReader(maxMessageSize: maxIncomingMessage)
     let pasteboard = Pasteboard()
     let files: FileXfer
@@ -67,8 +68,8 @@ final class Agent {
     static let replyTimeout = 10.0
 
     init(path: String) {
-        port = SerialPort(path: path)
-        // One staging directory per device, so an agent started by hand on another device (the
+        port = Port(path: path)
+        // One staging directory per socket, so an agent started by hand on another socket (the
         // tests do that) never deletes this one's partial files.
         let stage = "Library/Caches/vmlab-spice-agent/partial/" + (path as NSString).lastPathComponent
         files = FileXfer(directory: dropDir, stageDir: (NSHomeDirectory() as NSString).appendingPathComponent(stage))
@@ -104,7 +105,7 @@ final class Agent {
         port.onClose = { [unowned self] in
             self.reader.reset()
             self.files.abortAll()
-            DispatchQueue.main.async { self.clientGone(reason: "port closed") }
+            DispatchQueue.main.async { self.clientGone(reason: "connection closed") }
         }
     }
 
@@ -380,8 +381,8 @@ final class Agent {
 }
 
 signal(SIGPIPE, SIG_IGN)
-log("vmlab-spice-agent starting on \(devicePath); dropped files go to \(dropDir)")
-let agent = Agent(path: devicePath)
+log("vmlab-spice-agent starting on \(socketPath); dropped files go to \(dropDir)")
+let agent = Agent(path: socketPath)
 agent.start()
 // The main run loop rather than dispatchMain(): AppKit's pasteboard client talks to the
 // pasteboard server through run loop sources, and RunLoop.main.run() also drains the main queue.

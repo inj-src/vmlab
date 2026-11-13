@@ -479,9 +479,8 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   fills the screen, and Ctrl+Alt+F leaves it; macOS takes the screen's pixels and gives them
   back (1920×1008 ↔ 1920×1080 in the test rig, at 100% and at 125%; `Pin` keeps a mode per
   scale and per full screen state). Text and pictures copy both ways: `native/linux/agent.rs`
-  speaks the SPICE agent protocol over `VMLAB_AGENT_SOCKET` to a `virtserialport` named
-  `com.redhat.spice.0`, which the guest's vmlab-spice-agent opens. Checked in the rig: text and
-  a PNG each way byte for byte. The window's side is
+  speaks the SPICE agent protocol over `VMLAB_AGENT_SOCKET` to the guest's vmlab-spice-agent
+  (the link is below). Checked in the rig: text and a PNG each way byte for byte. The window's side is
   `patches/window-full-screen-clipboard-file-drop.dev.patch`.
   - **Files and folders dragged onto the window land on the guest's desktop, over SSH**
     (2026-11-13). The window gives one drag's paths to `VMLAB_DROP_COMMAND` (`mac26.sh drop`,
@@ -499,19 +498,32 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     2026-11-13 with System Settings' "1" (a pending Safari update) and with a test app's
     `dockTile.badgeLabel = "7"`; in the clean state too. System Settings' own sidebar draws
     its "1" right. Reduce transparency changes nothing; cause not found.
-  - **The agent's serial port stalls at random; the clipboard still uses it (not fixed).**
-    macOS stops offering receive buffers on the port's queue (`x-query-virtio-queue-status`,
-    queue 4: last-avail = shadow-avail = used) while the agent sits idle in its run loop and
-    about 200 KB wait unread in QEMU's end of `agent.sock`. Seen 2026-11-13 after 82 MB (a
-    1.4 GB file, when files still went this way), after 8 MB (a 20 MB picture on the
-    clipboard) and after 128 MB (below). From then on nothing copied on the host reaches the
-    guest, and nothing comes back, until the guest restarts; closing and reopening the port
-    let data through again once. Text and ordinary screenshots are far below these sizes, but
-    the bytes add up over a long session. Tried: `CRTS_IFLOW` on the port (the agent opens it
-    with no flow control): a 55 MB, a 20 MB and a 55 MB picture then arrived whole, and the
-    port stalled on the next request, so it is no fix and is not in the agent. A fix would
-    move the agent off the serial port (a TCP connection to the host through the VM's
-    network), which means a new agent in the guest and so a new clean state.
+  - **The clipboard's link is a Unix socket carried by SSH** (2026-11-13). The guest's agent
+    listens on `~/Library/Caches/vmlab-spice-agent.sock`; `mac26.sh start --window` runs
+    `ssh -N -L $V/agent.sock:<that socket>` as the unit `vmlab-mac26d-agent`, bound to the VM's
+    unit (it ends with it) and started again every 2 s when SSH ends (macOS restarting). The
+    window connects to `$V/agent.sock` and tries again every 2 s, as before. No QEMU device
+    takes part, and a closed connection is seen on both ends: the agent watches the
+    pasteboard only while a window is connected.
+    - Checked: `mac/spice-agent/tests/link_test.py 30 60` (its own client, no window): 3.55 GB
+      of text, 60 MB at a time each way, same SHA-256, 2.5 s a round. Through the window in
+      the rig: text both ways, six 50 MB pictures in a row (their exact sizes in the agent's
+      log), and text again after the agent was restarted and after macOS was restarted,
+      with no hand in between.
+    - The agent in a state must match: one saved before 2026-11-13 has the old agent, which
+      waits for a serial port that is no longer there, and its clipboard is dead until
+      `mac/install-spice-agent.sh` has run in it (done for `clean`, `mine`, `pebble`,
+      `office-wip`).
+    - **Why**: the link was a virtio serial port (`com.redhat.spice.0`), and macOS stopped
+      reading it at random. It stops offering receive buffers on the port's queue
+      (`x-query-virtio-queue-status`, queue 4: last-avail = shadow-avail = used) while the
+      agent sits idle in its run loop and about 200 KB wait unread in QEMU's end of the
+      socket. Seen after 82 MB (a 1.4 GB file, when files still went this way), after 8 MB
+      (a 20 MB picture on the clipboard) and after 128 MB. From then on nothing passed
+      either way until the guest restarted. `CRTS_IFLOW` on the port was no fix (three
+      pictures arrived, the next request stalled). A TCP connection from the agent to the
+      host was not tried: macOS's local-network privacy covers login items (Apple TN3179),
+      so it risks a permission prompt in every state.
   - **Keyboard and pointer**: the Windows window's rule ("Keyboard and pointer" there). Every
     key goes to macOS while the window has the keyboard (Super is Command: Cmd+Space, Cmd+Tab),
     the pointer is never held, there is no release chord, and GNOME asks "Allow inhibiting
