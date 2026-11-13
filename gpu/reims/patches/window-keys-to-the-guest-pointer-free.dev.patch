@@ -1,21 +1,8 @@
-window: vmlab: every key goes to macOS while the window has the keyboard; the pointer is free
-
-One rule for the keyboard and the pointer, the same as the Windows window's:
-  - the keyboard is captured from the moment the window gains it until it loses it (upstream:
-    from a click into the picture), the desktop's own shortcuts included (Super is Command);
-  - the pointer is never held in the picture (upstream confines it), so the title bar and
-    the rest of the desktop stay one move away;
-  - no release chord (upstream: Ctrl+Alt+Super): another window takes the keyboard with a
-    click, and GNOME's own Super+Escape gives the desktop its shortcuts back;
-  - the click that gives the window the keyboard is sent to macOS (upstream: swallowed).
-
-Applies after window-full-screen-clipboard-file-drop.dev.patch.
----
 diff --git a/crates/reims-vgpu-window/features.md b/crates/reims-vgpu-window/features.md
-index cc8186c2..f537a6ca 100644
+index 74224548..34eb3f92 100644
 --- a/crates/reims-vgpu-window/features.md
 +++ b/crates/reims-vgpu-window/features.md
-@@ -364,11 +364,11 @@ runtime's own device. The switches above apply, and `resolution=` too.
+@@ -383,11 +383,11 @@ runtime's own device. The switches above apply, and `resolution=` too.
    `test: sdl::shell::the_last_show_or_hide_of_a_batch_decides`,
    `test: native::linux::render::a_hidden_window_takes_no_retry`, `manual`
  - Pointer: absolute, held at the image's nearest edge; five buttons; a
@@ -30,7 +17,7 @@ index cc8186c2..f537a6ca 100644
    `test: native::linux::input::before_the_guest_has_a_mode_the_pointer_sends_nothing`,
    `test: native::linux::input::moves_are_sent_where_the_guest_pixel_changes`
  - Keys by position, as evdev reports them, so the guest's layout applies and
-@@ -393,9 +393,12 @@ runtime's own device. The switches above apply, and `resolution=` too.
+@@ -412,9 +412,12 @@ runtime's own device. The switches above apply, and `resolution=` too.
    releases both; losing the keyboard releases; the window's end releases
    both, and the grab and the hold go with the capture before it hides; the
    title says whether input is captured, as on macOS, with Ctrl+Alt+Super to
@@ -233,7 +220,7 @@ index 7df58762..52e96270 100644
  
      /// The window lost the keyboard: whether capture changed.
 diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
-index 6c3d807c..382f4303 100644
+index 2a303eb3..152043a8 100644
 --- a/crates/reims-vgpu-window/src/sdl/shell.rs
 +++ b/crates/reims-vgpu-window/src/sdl/shell.rs
 @@ -358,8 +358,7 @@ impl Shell {

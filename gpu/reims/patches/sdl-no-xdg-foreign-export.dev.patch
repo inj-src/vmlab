@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 3c6d7a86..97201f82 100644
+index e46b8fd2..19a0a4c3 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -130,3 +130,9 @@ debug-assertions = true
+@@ -131,3 +131,9 @@ debug-assertions = true
  # suite's `checked` pass leaves them off, and release has none at all (D36).
  [profile.checked.package.objc2]
  debug-assertions = false

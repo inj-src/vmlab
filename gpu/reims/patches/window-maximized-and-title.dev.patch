@@ -71,7 +71,7 @@ index fab34c38..daf7951a 100644
      let sdl = unsafe { SDL_CreateWindow(title.as_ptr(), size.0, size.1, flags) };
      if sdl.is_null() {
 diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
-index e5aee08a..e5626810 100644
+index 8e67b845..65554c1e 100644
 --- a/crates/reims-vgpu-window/src/sdl/shell.rs
 +++ b/crates/reims-vgpu-window/src/sdl/shell.rs
 @@ -154,7 +154,7 @@ pub(crate) fn open(window: &Arc<Window>) {

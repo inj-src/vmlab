@@ -1,3 +1,5 @@
+diff --git a/crates/reims-vgpu-window/src/env.rs b/crates/reims-vgpu-window/src/env.rs
+index 32f940e6..54a539e6 100644
 --- a/crates/reims-vgpu-window/src/env.rs
 +++ b/crates/reims-vgpu-window/src/env.rs
 @@ -12,6 +12,7 @@
@@ -8,7 +10,7 @@
  
  /// The borderless switch's variable.
  pub const BORDERLESS_VAR: &str = "REIMS_VGPU_WINDOW_BORDERLESS";
-@@ -21,6 +22,123 @@
+@@ -21,6 +22,123 @@ pub const SCREENS_VAR: &str = "REIMS_VGPU_WINDOW_SCREENS";
  pub const IMPL_VAR: &str = "REIMS_VGPU_WINDOW_IMPL";
  /// The maximized switch's variable (vmlab).
  pub const MAXIMIZED_VAR: &str = "REIMS_VGPU_WINDOW_MAXIMIZED";
@@ -132,7 +134,7 @@
  
  /// What the variables say.
  #[derive(Clone, Debug, Default, PartialEq)]
-@@ -149,6 +267,110 @@
+@@ -149,6 +267,110 @@ mod tests {
          assert_eq!(parse_impl(None), WindowImpl::AppKit);
      }
  
@@ -243,9 +245,11 @@
      /// The settings are read once and kept
      #[test]
      fn the_settings_are_read_once() {
+diff --git a/crates/reims-vgpu-window/src/handle.rs b/crates/reims-vgpu-window/src/handle.rs
+index 4ca1563c..48eca405 100644
 --- a/crates/reims-vgpu-window/src/handle.rs
 +++ b/crates/reims-vgpu-window/src/handle.rs
-@@ -229,6 +229,8 @@
+@@ -229,6 +229,8 @@ pub struct Window {
      guest: Mutex<GuestState>,
      /// The first mode the display offers the guest, once it offers one.
      offered: Mutex<Option<(u16, u16)>>,
@@ -254,7 +258,7 @@
      /// What draws the display's frames, once the display exists.
      sink: Mutex<Option<Arc<dyn FrameSink>>>,
      /// Set at the window's end.
-@@ -280,6 +282,7 @@
+@@ -280,6 +282,7 @@ impl Window {
              callbacks: Mutex::new(Some(config.callbacks)),
              guest: Mutex::new(GuestState::default()),
              offered: Mutex::new(None),
@@ -262,7 +266,7 @@
              sink: Mutex::new(None),
              closed: AtomicBool::new(false),
              attached: AtomicBool::new(false),
-@@ -462,6 +465,17 @@
+@@ -462,6 +465,17 @@ impl Window {
          *self.offered.lock()
      }
  
@@ -280,9 +284,11 @@
      /// Whether the window never resizes for the guest's mode (`WindowConfig::keeps_its_size`).
      pub fn keeps_its_size(&self) -> bool {
          self.keeps_its_size
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index 65554c1e..2cbbc482 100644
 --- a/crates/reims-vgpu-window/src/sdl/shell.rs
 +++ b/crates/reims-vgpu-window/src/sdl/shell.rs
-@@ -370,6 +370,9 @@
+@@ -370,6 +370,9 @@ impl Shell {
              }
              _ => os::input_event(self, kind, event),
          };
@@ -292,7 +298,7 @@
          self.flush();
          if capture_changed {
              self.capture_changed();
-@@ -441,6 +444,32 @@
+@@ -441,6 +444,32 @@ impl Shell {
          unsafe { SDL_SetWindowTitle(self.sdl, title.as_ptr()) };
      }
  
@@ -325,9 +331,11 @@
      /// Lays the image out again over the window's size and scale (the module doc), and tells the
      /// render thread.
      pub(crate) fn relayout(&mut self) {
+diff --git a/crates/reims-vgpu/src/graphics.rs b/crates/reims-vgpu/src/graphics.rs
+index a0fae1fe..9a91f3c1 100644
 --- a/crates/reims-vgpu/src/graphics.rs
 +++ b/crates/reims-vgpu/src/graphics.rs
-@@ -40,6 +40,7 @@
+@@ -40,6 +40,7 @@ use std::marker::PhantomData;
  use std::os::fd::RawFd;
  use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
  use std::sync::{Arc, OnceLock, Weak};
@@ -335,7 +343,7 @@
  
  use parking_lot::lock_api::ArcRwLockReadGuard;
  use parking_lot::{RawRwLock, RwLock};
-@@ -86,6 +87,7 @@
+@@ -87,6 +88,7 @@ use reims_vgpu_vulkan::core::platform::values::TextureDesc;
  use reims_vgpu_vulkan::core::platform::{Handle, Platform};
  use reims_vgpu_vulkan::core::raise::{OnFault, Raise, RaiseResult};
  use reims_vgpu_vulkan::core::sync::Mutex;
@@ -343,7 +351,7 @@
  use reims_vgpu_window::{FrameSink, Window, WindowConfig, geometry};
  use zerocopy::{FromBytes, IntoBytes};
  
-@@ -2390,6 +2392,12 @@
+@@ -2548,6 +2550,12 @@ pub(crate) struct WindowScreen {
      refresh_mhz: u32,
      /// The guest's cursor, as last told.
      cursor: Mutex<CursorState>,
@@ -356,8 +364,8 @@
  }
  
  /// The guest's cursor, as the window shows it: over the image while the guest has an image and
-@@ -2617,6 +2625,10 @@
-                 visible: true,
+@@ -2807,6 +2815,10 @@ impl WindowScreen {
+                 asleep: false,
                  shown: None,
              }),
 +            pinned: Mutex::new(match reims_vgpu_window::env::pinned_mode() {
@@ -367,12 +375,14 @@
          };
          (WindowLink::new(window), screen)
      }
-@@ -2696,7 +2708,41 @@
-     /// The window's size in pixels as last drawn into, else the mode it opened for, its width
+@@ -2888,7 +2900,44 @@ impl Screen for WindowScreen {
      /// rounded down to a multiple of 16 and its height to even ([`geometry::offered_mode`]), at
-     /// its host screen's rate.
+     /// its host screen's rate, with the backing scale it was last drawn at (none before its first
+     /// draw).
 +    ///
-+    /// vmlab: the pinned mode instead, once there is one ([`WindowScreen::pinned`]).
++    /// vmlab: the pinned mode instead, once there is one ([`WindowScreen::pinned`]). A window
++    /// that pins its mode states no scale at all, before the pin too: the scale is part of the
++    /// mode, and a guest told one sets its density by it and is told again when it changes.
      fn mode(&self) -> Mode {
 +        let pinned = {
 +            let mut pin = self.pinned.lock();
@@ -404,12 +414,25 @@
 +                width,
 +                height,
 +                refresh_mhz: self.refresh_mhz,
++                scale_120ths: 0,
 +            };
 +        }
          let drawn = *self.shown.drawable.lock();
-         let (width, height) = geometry::offered_mode(drawn.unwrap_or_else(|| {
-             let (w, h) = self.window.offered().unwrap_or((1920, 1080));
-@@ -2714,6 +2760,10 @@
+         let (width, height) = geometry::offered_mode(drawn.map_or_else(
+             || {
+@@ -2902,7 +2951,10 @@ impl Screen for WindowScreen {
+             width: clamp(width),
+             height: clamp(height),
+             refresh_mhz: self.refresh_mhz,
+-            scale_120ths: drawn.map_or(0, |d| scale_in_120ths(d.scale)),
++            scale_120ths: match reims_vgpu_window::env::pinned_mode() {
++                PinnedMode::Follows => drawn.map_or(0, |d| scale_in_120ths(d.scale)),
++                PinnedMode::First | PinnedMode::Fixed(..) => 0,
++            },
+         }
+     }
+ 
+@@ -2910,6 +2962,10 @@ impl Screen for WindowScreen {
      fn scanout(&self, scanout: Option<Scanout>) {
          *self.shown.scanout.lock() = scanout;
          if let Some(s) = scanout {
@@ -420,9 +443,11 @@
              let mode = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
              self.window.guest_mode(mode(s.width), mode(s.height));
          }
+diff --git a/crates/reims-vgpu/src/graphics/sink.rs b/crates/reims-vgpu/src/graphics/sink.rs
+index 0fa0cadd..bb64d923 100644
 --- a/crates/reims-vgpu/src/graphics/sink.rs
 +++ b/crates/reims-vgpu/src/graphics/sink.rs
-@@ -608,7 +608,13 @@
+@@ -615,7 +615,13 @@ impl<P: ApiPlatform> ScanoutDraw<P> {
              self.presented.seen_format(from, to);
              let drawn = if let Some((changes, color)) = &color {
                  self.encode_colored(*changes, color, &surface, texture, region)

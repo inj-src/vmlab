@@ -1,31 +1,8 @@
-window: vmlab: a close hides the window at once and can shut the guest down
-
-Closing the window told the host, which powers the VM off, and left the window open until
-QEMU's shutdown reached the display: for about 5 s it showed its last frame and took no
-input, which the user took for a hang (2026-11-12), and every close was a power cut to macOS
-("You shut down your computer because of a problem" at the next login, Chrome's "didn't shut
-down correctly").
-
-Now, on Linux:
-
-- the close hides SDL's window at the click and stops drawing into it (`Closing::hide`,
-  `Shell::leaving`); SDL's window still goes at the display's release. A second close of a
-  hidden window asks for nothing.
-- `REIMS_VGPU_WINDOW_CLOSE_COMMAND` (a line for `/bin/sh -c`; `env::close_command`): the close
-  runs it in place of telling the host. A thread waits for it; where it cannot start or ends in
-  a failure the host is told as before (`native::linux::sdl::shut_down_by`). mac26.sh sets it
-  to `mac26.sh closed`, which shuts macOS down over SSH and fails where it cannot or macOS is
-  still up after 30 s.
-
-Tests: sdl::shell::a_close_sends_the_key_ups_and_ends_capture_before_the_host_hears_of_it,
-native::linux::sdl::a_close_command_that_fails_powers_the_vm_off,
-env::the_close_command_is_the_variables_text_or_none. In the rig (gpu/README.md, "A person at
-the screen"): the window gone within 0.3 s, the VM 8 to 10 s later; the failure path with a
-close 3 s into boot.
-
+diff --git a/crates/reims-vgpu-window/features.md b/crates/reims-vgpu-window/features.md
+index 4f58a49d..d7f0135a 100644
 --- a/crates/reims-vgpu-window/features.md
 +++ b/crates/reims-vgpu-window/features.md
-@@ -428,8 +428,17 @@
+@@ -447,8 +447,17 @@ runtime's own device. The switches above apply, and `resolution=` too.
    over the image the pointer is in as it is.
    `test: sdl::shell::a_window_the_pointer_is_not_in_leaves_the_cursor`,
    `manual` (a VM with two displays)
@@ -45,9 +22,11 @@ close 3 s into boot.
  
  Not on Linux: a menu bar, Dock icon or ⌘Tab entry (the compositor's task
  bar shows the window, as `reims-vgpu`), the camera-housing fit, and trackpad
+diff --git a/crates/reims-vgpu-window/src/env.rs b/crates/reims-vgpu-window/src/env.rs
+index bf540b95..a4ff6b21 100644
 --- a/crates/reims-vgpu-window/src/env.rs
 +++ b/crates/reims-vgpu-window/src/env.rs
-@@ -24,6 +24,8 @@
+@@ -24,6 +24,8 @@ pub const IMPL_VAR: &str = "REIMS_VGPU_WINDOW_IMPL";
  pub const MAXIMIZED_VAR: &str = "REIMS_VGPU_WINDOW_MAXIMIZED";
  /// The pinned mode's variable (vmlab).
  pub const MODE_VAR: &str = "REIMS_VGPU_WINDOW_MODE";
@@ -56,7 +35,7 @@ close 3 s into boot.
  
  /// Which mode a window that keeps its size offers the guest (vmlab; `REIMS_VGPU_WINDOW_MODE`).
  /// Pinned, a resize of the window changes nothing for the guest: the window fits the guest's
-@@ -212,6 +214,27 @@
+@@ -212,6 +214,27 @@ pub fn maximized() -> bool {
      *MAXIMIZED.get_or_init(|| std::env::var(MAXIMIZED_VAR).is_ok_and(|value| parse_switch(&value)))
  }
  
@@ -84,7 +63,7 @@ close 3 s into boot.
  /// The process's settings, read from its environment the first time they are asked for. A
  /// value that is not UTF-8 counts as unset.
  pub fn settings() -> &'static Settings {
-@@ -230,6 +253,19 @@
+@@ -230,6 +253,19 @@ pub fn settings() -> &'static Settings {
  mod tests {
      use super::*;
  
@@ -104,9 +83,11 @@ close 3 s into boot.
      /// Unset or unparsable values are the defaults
      #[test]
      fn unset_or_unparsable_values_are_the_defaults() {
+diff --git a/crates/reims-vgpu-window/src/native/linux/sdl.rs b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+index f1df30c7..d5a531f6 100644
 --- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
 +++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
-@@ -417,6 +417,69 @@
+@@ -417,6 +417,69 @@ pub(crate) fn close(shell: &mut Shell) -> bool {
      false
  }
  
@@ -176,7 +157,7 @@ close 3 s into boot.
  /// The window goes: nothing of Linux's stays.
  pub(crate) fn destroy(_shell: Shell) {}
  
-@@ -427,6 +490,31 @@
+@@ -427,6 +490,31 @@ mod tests {
      use crate::geometry::Rect;
      use crate::keys::KeyEvent;
  
@@ -208,6 +189,8 @@ close 3 s into boot.
      /// The person's close lets the input go before the shell tells the host
      /// (`shell::Shell::close_requested`): a held key and button go up, queued for the host, and
      /// capture ends
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index f0dbec2b..7ef9c894 100644
 --- a/crates/reims-vgpu-window/src/sdl/shell.rs
 +++ b/crates/reims-vgpu-window/src/sdl/shell.rs
 @@ -22,8 +22,11 @@
@@ -224,7 +207,7 @@ close 3 s into boot.
  //! releases the input. The window shown, exposed, hidden, minimized, restored or covered tells the
  //! render thread whether to draw ([`shows`]): nothing is presented into a window the person cannot
  //! see. On Wayland a covered window is one the compositor suspends, whose FIFO present would wait
-@@ -91,6 +94,9 @@
+@@ -91,6 +94,9 @@ pub(crate) struct Shell {
      shown: Option<bool>,
      /// Its render thread has let its surface go.
      released: bool,
@@ -234,7 +217,7 @@ close 3 s into boot.
  }
  
  /// What an OS made of a window that opened.
-@@ -165,6 +171,7 @@
+@@ -165,6 +171,7 @@ pub(crate) fn open(window: &Arc<Window>) {
              closed: false,
              shown: None,
              released: false,
@@ -242,7 +225,7 @@ close 3 s into boot.
          });
      });
      with_shell(window.id(), |shell| {
-@@ -273,6 +280,7 @@
+@@ -273,6 +280,7 @@ pub(crate) fn batch_over() {
          for shell in open.borrow_mut().iter_mut() {
              if let Some(shown) = shell.shown.take()
                  && !shell.closed
@@ -250,7 +233,7 @@ close 3 s into boot.
              {
                  shell.window.surface().set_visible(shown);
              }
-@@ -382,10 +390,14 @@
+@@ -382,10 +390,14 @@ impl Shell {
          }
      }
  
@@ -268,7 +251,7 @@ close 3 s into boot.
          log::info!(
              target: "reims_vgpu_window",
              "window {:?}: closed by the person",
-@@ -394,6 +406,13 @@
+@@ -394,6 +406,13 @@ impl Shell {
          close_asked(self);
      }
  
@@ -282,7 +265,7 @@ close 3 s into boot.
      /// Sends what the input queued to the host's callbacks, while the window has them.
      pub(crate) fn flush(&mut self) {
          self.input.flush(&self.window);
-@@ -450,6 +469,9 @@
+@@ -450,6 +469,9 @@ impl Shell {
      /// vmlab: tells the window its pixels, its screen's scale and whether it fills its screen
      /// (`crate::env::Measured`), which a mode pinned from the window is taken from.
      fn measure(&self) {
@@ -292,7 +275,7 @@ close 3 s into boot.
          let (mut width, mut height) = (0, 0);
          // SAFETY: the window is SDL's, on this thread.
          let (scale, flags) = unsafe {
-@@ -630,7 +652,9 @@
+@@ -630,7 +652,9 @@ trait Closing {
      fn capture_changed(&mut self);
      /// The grab, the pointer's hold and the size's hold follow capture.
      fn holds_follow_capture(&mut self);
@@ -303,7 +286,7 @@ close 3 s into boot.
      fn tell_host(&mut self);
  }
  
-@@ -659,17 +683,32 @@
+@@ -659,17 +683,32 @@ impl Closing for Shell {
          Shell::holds_follow_capture(self);
      }
  
@@ -340,7 +323,7 @@ close 3 s into boot.
  fn close_asked(c: &mut impl Closing) {
      let captured = c.is_captured();
      c.let_go();
-@@ -677,6 +716,7 @@
+@@ -677,6 +716,7 @@ fn close_asked(c: &mut impl Closing) {
      if c.is_captured() != captured {
          c.capture_changed();
      }
@@ -348,7 +331,7 @@ close 3 s into boot.
      c.tell_host();
  }
  
-@@ -776,14 +816,18 @@
+@@ -776,14 +816,18 @@ mod tests {
              self.steps.push("holds follow");
          }
  
@@ -369,7 +352,7 @@ close 3 s into boot.
      #[test]
      fn a_close_sends_the_key_ups_and_ends_capture_before_the_host_hears_of_it() {
          let mut captured = Recorded {
-@@ -794,7 +838,7 @@
+@@ -794,7 +838,7 @@ mod tests {
          close_asked(&mut captured);
          assert_eq!(
              captured.steps,
@@ -378,7 +361,7 @@ close 3 s into boot.
          );
          assert!(!captured.captured);
          let mut free = Recorded {
-@@ -803,7 +847,7 @@
+@@ -803,7 +847,7 @@ mod tests {
              steps: Vec::new(),
          };
          close_asked(&mut free);

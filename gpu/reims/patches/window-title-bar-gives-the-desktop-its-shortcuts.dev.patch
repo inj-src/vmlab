@@ -1,31 +1,8 @@
-window: vmlab: a press on the title bar gives the desktop its shortcuts back
-
-The keyboard grab (the compositor's shortcuts inhibitor) covers the whole window, its title
-bar too: with the window active, Super and Alt+Tab went to macOS wherever the pointer was.
-Now, as on the Windows window (../win3d/qemu-patches/0013):
-  - a press on the title bar releases capture: the window keeps the keyboard, and the
-    desktop has its shortcuts;
-  - a click into the picture captures again (upstream's own rule), and so does the window
-    gaining the keyboard, as before;
-  - going to the whole screen, which has no title bar, captures again, so the title bar's
-    full screen button does not leave macOS without Command.
-  - the press makes libdecor start the compositor's window move (xdg_toplevel.move), and
-    mutter takes the keyboard from the window for it and gives it back when the button goes
-    up, at a plain click too. That loss (one within 250 ms of the press) and the gain after
-    it are the press's own and capture nothing; without this the window captured again at
-    once and the desktop never had its shortcuts.
-
-The title bar is libdecor's, not SDL's, and stock SDL drops a press on it. The lab's SDL
-(sdl3-src-3.4.18-title-bar-press.patch) sends SDL_EVENT_WINDOW_HIT_TEST for it, the event
-SDL's other platforms send for a press on a title bar.
-
-Applies after window-keys-to-the-guest-pointer-free.dev.patch.
----
 diff --git a/crates/reims-vgpu-window/features.md b/crates/reims-vgpu-window/features.md
-index f537a6ca..95be5e8e 100644
+index 34eb3f92..4f58a49d 100644
 --- a/crates/reims-vgpu-window/features.md
 +++ b/crates/reims-vgpu-window/features.md
-@@ -395,8 +395,14 @@ runtime's own device. The switches above apply, and `resolution=` too.
+@@ -414,8 +414,14 @@ runtime's own device. The switches above apply, and `resolution=` too.
    title says whether input is captured, as on macOS, with Ctrl+Alt+Super to
    release. vmlab changes this on Linux: the keyboard is captured from the
    moment the window gains it until it loses it, the pointer is never held,
@@ -254,7 +231,7 @@ index 52e96270..f1df30c7 100644
              // SAFETY: a wheel event.
              let w = unsafe { event.wheel };
 diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
-index 382f4303..c347d29e 100644
+index 152043a8..f0dbec2b 100644
 --- a/crates/reims-vgpu-window/src/sdl/shell.rs
 +++ b/crates/reims-vgpu-window/src/sdl/shell.rs
 @@ -342,7 +342,8 @@ impl Shell {

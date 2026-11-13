@@ -509,7 +509,7 @@ There were two lanes, each a VM with its own disk and `clean` snapshot, chosen w
 | | `MAC26_LANE=dev` | `MAC26_LANE=stable` |
 |---|---|---|
 | VM, SSH port | `mac26d`, 2227 | `mac26`, 2226 |
-| reims | upstream `development` (a7761508), in `/vmlab/reims-dev`, checkout `reims-vgpu-dev/` | upstream `master` (1fe0acb) plus the shader patch below, in `/vmlab/reims`, checkout `reims-vgpu/` |
+| reims | upstream `development` (58092712, 2026-11-12), in `/vmlab/reims-dev`, checkout `reims-vgpu-dev/` | upstream `master` (1fe0acb) plus the shader patch below, in `/vmlab/reims`, checkout `reims-vgpu/` |
 | GPU device | `reims-graphics-pci` with reims' own guest driver (ReimsGraphics.kext, from its OpenCore image): Metal 3 | Apple's paravirtual GPU (`apple-gfx-pci`), Apple's x64 driver patched by ReimsVgpu.kext: Metal 2 |
 | Frames later than 25 ms in 20 s of a 60 Hz animation | 0 to 1 | 14 to 38 |
 
@@ -548,10 +548,10 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     SHA-256); by hand also links, a name starting with a dash, two files of one name, an
     `.app` folder and a missing file. Links inside a folder stay links; a dragged link sends
     what it points at.
-  - **Dock badges show their number (local fix, 2026-11-13;
-    `reims/patches/tiled-texture-levels-filled.dev.patch`).** Before it the red dot on a Dock
-    icon was drawn and its digits were missing (System Settings' "1", a test app's
-    `dockTile.badgeLabel`), in the clean state too.
+  - **Dock badges show their number (upstream's fix, in the lab since its base moved to
+    58092712 on 2026-11-13).** Before it the red dot on a Dock icon was drawn and its digits
+    were missing (System Settings' "1", a test app's `dockTile.badgeLabel`), in the clean
+    state too.
     - *Cause.* The Dock's digits are a layer whose image is drawn smaller than it is with
       `minificationFilter = kCAFilterTrilinear` (`ECStatusLabelLayer`), and any layer made so
       showed nothing (`notes/dock-badge/tri.swift trilinear` against `linear`). For such an
@@ -565,20 +565,17 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
       counts on the device for the smaller levels. reims made them zero (the runtime's
       `Buffer::new_tiled_texture`, counted in `shadows_zeroed`), and a layer drawn at half size
       or less sampled transparent texels.
-    - *Fix.* The host fills the levels from the first when the texture is made
-      (`DeviceObject::fill_tiled_levels` in `reims-vgpu-vulkan`, one `generateMipmaps` blit in
-      a command buffer of its own). Nothing in the guest changes, so it holds in every saved
-      state. A guest that writes the levels itself afterwards overwrites them.
-    - *Upstream has it fixed, so nothing was reported.* reims' `development` at 58092712
-      (2026-11-12, runtime 30a5a88e) makes the texture as x86 Macs do, which upstream
-      measured on an AMD and an Intel one on 2026-11-11 (its `docs/graphics-kext/dgpu-oracle.md`,
-      Q11): a copy of the bytes with every level generated from the first, taken at the first
-      GPU use and again after each `didModifyData`. The lab's base is a7761508 (2026-11-10),
-      from before that. The local fix fills once, at creation, and does not follow
-      `didModifyData`; that is enough for a badge. Drop the patch when the lab's base moves to
-      58092712 or later.
+    - *Fix: upstream's.* reims' `development` at 58092712 (runtime 30a5a88e) makes the
+      texture as x86 Macs do, which upstream measured on an AMD and an Intel one on 2026-11-11
+      (its `docs/graphics-kext/dgpu-oracle.md`, Q11): a copy of the bytes with every level
+      generated from the first, taken at the first GPU use and again after each
+      `didModifyData`. Checked here with that build's guest kexts in the boot image ("Moving
+      the dev lane's base", below); not tried with the older kexts.
+    - The lab had a fix of its own for some hours that day (the host filled the levels once,
+      when the texture was made; `tiled-texture-levels-filled.dev.patch`, in this repository's
+      history at 91930bb). It is gone: upstream's also follows `didModifyData`.
     - *Test* (in the guest, `clang -fobjc-arc -framework Metal -framework Foundation tiled.m`):
-      `./tiled none 64` reads `ff` at every level (`00` past the first without the fix);
+      `./tiled none 64` reads `ff` at every level (`00` past the first without a fix);
       `replace`, `blit` and `generate` read what they wrote, as before. By eye: the "1" on
       System Settings' Dock icon while an update waits.
     - *How it was found.* `MAC26_LOG='info,reims_vgpu::work=debug'` prints the runtime's work
@@ -794,15 +791,46 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   `window-full-screen-clipboard-file-drop.dev.patch`,
   `window-keys-to-the-guest-pointer-free.dev.patch`,
   `window-title-bar-gives-the-desktop-its-shortcuts.dev.patch`,
-  `window-close-hides-and-shuts-down.dev.patch` and (not a window change: the Dock's badges,
-  above) `tiled-texture-levels-filled.dev.patch`, are the uncommitted diff in each checkout
-  (checked 2026-11-12 for all but the last: applied in that order to a7761508 they give the
-  built sources; the last was made as the difference from that state). Apply them again after an update, then rebuild. A new SDL
+  `window-close-hides-and-shuts-down.dev.patch`, are the uncommitted diff in each checkout
+  (checked 2026-11-13: applied in that order to 58092712 they give the built sources).
+  After an update of upstream: "Moving the dev lane's base", below. A new SDL
   version needs a new copy of its crate with `sdl3-src-3.4.18-no-xdg-foreign-export.patch` and
   `sdl3-src-3.4.18-title-bar-press.patch`;
   the installed QEMU has the change if `strings` finds `VMLAB_SDL_XDG_EXPORT` in it. Tests:
   `cargo test -p reims-vgpu-window --lib env::` with `RUSTUP_HOME=/vmlab/reims/rustup
   CARGO_HOME=/vmlab/reims/cargo`.
+- **Moving the dev lane's base** (done 2026-11-13, a7761508 to 58092712). With the Mac stopped:
+  1. In `reims-vgpu-dev/`: `git fetch origin development`, set the lab's diff aside
+     (`git stash`), `git checkout --detach FETCH_HEAD`, `git stash pop`, and settle what
+     conflicts. `git apply --3way` of the patch files does not work on a new base (the later
+     ones stand on the earlier ones). For new patch files: commit the old ones in order on the
+     old base in a scratch worktree, cherry-pick those commits onto the new base, and write
+     each commit out again.
+  2. `reims/build-dev.sh` as a `systemd-run --user` unit (5 minutes). It installs over the
+     build in use: keep `bin/reims-ctl`, `config/reims-ctl/install.toml` and the old folder
+     under `data/reims-ctl/qemu/` until the test has passed (`qemu/current` is a link).
+  3. **`/vmlab/reims-dev/bin/reims update-opencore mac26d`.** The guest's kexts (Graft,
+     ReimsGraphics, RgfxGate) are in the VM's boot image, `opencore.qcow2`, and only `reims
+     start` renews it. The lab starts QEMU from `reims command`, so without this step the
+     guest keeps the kexts of the day the VM was made (found 2026-11-13: still 11 Nov's, one
+     base move later). The image is one for all saved states; RgfxGate puts the guest's Metal
+     bundle (`/Library/GPUBundles`) in again at each state's next boot. Keep a copy of the
+     old image until the test has passed. The `reims-util` of 11 Nov (84e5c98) made the new
+     image without complaint.
+  4. Test on the clean state, then load the state that was there (`mac26.sh state load NAME
+     --discard`): `kmutil showloaded | grep -i -E "graft|reims|rgfx"` has new UUIDs;
+     `notes/dock-badge/tiled.m`; `mac/spice-agent/tests/link_test.py 1 5`; in the rig, the
+     window (`cmp.py`: 100.00%), typed keys, text through the clipboard both ways (copy in the
+     guest inside a `nested.sh do` run: without the rig's keyboard the window cannot set the
+     selection), and the close button (the guest shuts down). A new rig home asks once to
+     "Allow inhibiting shortcuts": click Allow first. All passed on 58092712.
+  - What upstream added there that touches the lab's patches: the host's screen scale told to
+    the guest (`DISPLAY_SCALE`, a `scale_120ths` in each mode). With
+    `window-pinned-mode.dev.patch` a window that pins its mode (`REIMS_VGPU_WINDOW_MODE=first`,
+    the lab's setting, or a fixed size) reports 0, "none", so the guest sets its density as
+    before; only a window that follows its size passes upstream's scale on. Upstream's `reims
+    start` now runs QEMU under `systemd-run --scope`; the lab starts QEMU in its own unit and
+    is not touched by that.
 - **Testing the windows** (both VMs): the desktop is Wayland, where no tool can measure or
   resize another program's window. `WIN_VENUS_WINDOW_X11=1` / `MAC26_WINDOW_X11=1` open the
   window under XWayland for one run: `xwininfo -root -tree | grep vmlab` gives its id and

@@ -1,6 +1,8 @@
+diff --git a/crates/reims-vgpu-window/src/env.rs b/crates/reims-vgpu-window/src/env.rs
+index 54a539e6..bf540b95 100644
 --- a/crates/reims-vgpu-window/src/env.rs
 +++ b/crates/reims-vgpu-window/src/env.rs
-@@ -69,6 +69,8 @@
+@@ -69,6 +69,8 @@ pub struct Measured {
      pub scale: f64,
      /// Whether it is maximized or full screen: the size it was opened to have.
      pub fills: bool,
@@ -9,7 +11,7 @@
  }
  
  /// How long a window's measures stay the same before a mode is pinned from them: a move between
-@@ -78,14 +80,18 @@
+@@ -78,14 +80,18 @@ pub const PIN_SETTLE: Duration = Duration::from_millis(400);
  /// The mode a display is pinned at (vmlab; [`PinnedMode`]). For [`PinnedMode::First`] it is the
  /// pixels of the window while it fills its screen, taken once per screen scale: on a screen of
  /// another scale the guest's pixels would be stretched, so the mode is taken again there, once
@@ -30,7 +32,7 @@
      /// Measures that would change the mode, and when they were first seen.
      steady: Option<(Measured, Instant)>,
  }
-@@ -118,12 +124,15 @@
+@@ -118,12 +124,15 @@ impl Pin {
          now: Instant,
          rounded: impl FnOnce((u32, u32)) -> (u32, u32),
      ) -> Option<(u32, u32)> {
@@ -47,7 +49,7 @@
                      self.steady = None;
                  }
              }
-@@ -307,6 +316,7 @@
+@@ -307,6 +316,7 @@ mod tests {
                  pixels,
                  scale,
                  fills,
@@ -55,7 +57,7 @@
              })
          };
          let start = Instant::now();
-@@ -359,6 +369,50 @@
+@@ -359,6 +369,50 @@ mod tests {
          );
      }
  
@@ -106,6 +108,8 @@
      /// A fixed mode stays, and the guest's own first mode is pinned only where none was
      #[test]
      fn a_fixed_mode_and_the_guest_s_first() {
+diff --git a/crates/reims-vgpu-window/src/native/linux.rs b/crates/reims-vgpu-window/src/native/linux.rs
+index 15c371ea..daded316 100644
 --- a/crates/reims-vgpu-window/src/native/linux.rs
 +++ b/crates/reims-vgpu-window/src/native/linux.rs
 @@ -7,6 +7,7 @@
@@ -116,7 +120,10 @@
  mod input;
  mod keymap;
  mod render;
---- a/crates/reims-vgpu-window/src/native/linux/agent.rs
+diff --git a/crates/reims-vgpu-window/src/native/linux/agent.rs b/crates/reims-vgpu-window/src/native/linux/agent.rs
+new file mode 100644
+index 00000000..a1dec2b5
+--- /dev/null
 +++ b/crates/reims-vgpu-window/src/native/linux/agent.rs
 @@ -0,0 +1,587 @@
 +//! vmlab: the host's clipboard (text and pictures) shared with the guest through a SPICE agent
@@ -706,9 +713,11 @@
 +        bytes[offset + 3],
 +    ])
 +}
+diff --git a/crates/reims-vgpu-window/src/native/linux/sdl.rs b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+index daf7951a..7df58762 100644
 --- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
 +++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
-@@ -101,9 +101,11 @@
+@@ -101,9 +101,11 @@ impl Input {
          self.0.pointer_confinement(image)
      }
  
@@ -722,7 +731,7 @@
      }
  
      /// Sends what the input queued to `window`'s callbacks, while the window lives
-@@ -282,6 +284,9 @@
+@@ -282,6 +284,9 @@ pub(crate) fn input_event(shell: &mut Shell, kind: u32, event: &SDL_Event) -> bo
          k if k == SDL_EVENT_KEY_DOWN.0 || k == SDL_EVENT_KEY_UP.0 => {
              // SAFETY: a key event.
              let key = unsafe { event.key };
@@ -732,7 +741,7 @@
              keymap::usb_usage(key.scancode.0).is_some_and(|usage| {
                  shell
                      .input
-@@ -294,6 +299,50 @@
+@@ -294,6 +299,50 @@ pub(crate) fn input_event(shell: &mut Shell, kind: u32, event: &SDL_Event) -> bo
      }
  }
  
@@ -783,9 +792,11 @@
  /// Grabs the keyboard while captured, and lets it go (the module doc), logging what that left.
  pub(crate) fn grab_keyboard(shell: &Shell, captured: bool) {
      // SAFETY: the window is SDL's, on this thread.
+diff --git a/crates/reims-vgpu-window/src/native/linux/ui.rs b/crates/reims-vgpu-window/src/native/linux/ui.rs
+index 40fc1ec7..df4720bb 100644
 --- a/crates/reims-vgpu-window/src/native/linux/ui.rs
 +++ b/crates/reims-vgpu-window/src/native/linux/ui.rs
-@@ -218,6 +218,7 @@
+@@ -218,6 +218,7 @@ fn run() {
      }
      snapshot_screens();
      QUEUE.lock().phase = Phase::Running;
@@ -793,7 +804,7 @@
      loop {
          run_jobs();
          // SAFETY: an all-zero event is a valid one for SDL to fill.
-@@ -257,6 +258,9 @@
+@@ -257,6 +258,9 @@ fn dispatch(event: &SDL_Event) {
          crate::sdl::shell::screens_changed();
          return;
      }
@@ -803,9 +814,11 @@
      crate::sdl::shell::event(event);
  }
  
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index 2cbbc482..2a303eb3 100644
 --- a/crates/reims-vgpu-window/src/sdl/shell.rs
 +++ b/crates/reims-vgpu-window/src/sdl/shell.rs
-@@ -467,6 +467,7 @@
+@@ -467,6 +467,7 @@ impl Shell {
              pixels: (width, height),
              scale: f64::from(scale),
              fills,

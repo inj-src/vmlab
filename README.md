@@ -44,7 +44,7 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 | The lab's QEMU for Windows | `gpu/win3d/opt/qemu-ui/`; source in `/vmlab/tmp/win-qemu/` | `gpu/win3d/build-qemu.sh`: VMLabDev/qemu at `d8a6048aae11c5e26168e173a7c1b1a4335d6a23` plus `qemu-patches/`. |
 | The lab's guest drivers | `gpu/win3d/guest-umd/x64`, `x86`, `guest-kmd/viogpu3d.sys` | `build-guest-umd.sh`, `build-guest-kmd.sh` (podman; the pins are in each `BUILDINFO`). |
 | The boot firmware copy | `gpu/win3d/firmware/OVMF_CODE_4M.vmlab.fd` | Made at the VM's start from the system's OVMF (`make-firmware.py`). |
-| reims-vgpu, dev lane | `gpu/reims-vgpu-dev/`, installed in `/vmlab/reims-dev` | github.com/steelbrain/reims-vgpu at `a7761508c0e7fca7a49385e0b62b3c92f06b0ca0`, the `.dev.patch` files of `gpu/reims/patches/` in the order `gpu/README.md` gives, then `gpu/reims/build-dev.sh`. |
+| reims-vgpu, dev lane | `gpu/reims-vgpu-dev/`, installed in `/vmlab/reims-dev` | github.com/steelbrain/reims-vgpu at `580927122da6f3b0ba66efae882742e0afd3cac8`, the `.dev.patch` files of `gpu/reims/patches/` in the order `gpu/README.md` gives, then `gpu/reims/build-dev.sh` and `reims update-opencore mac26d` (`gpu/README.md`, "Moving the dev lane's base"). |
 | SDL with the lab's change | `gpu/reims/sdl3-src-3.4.18-vmlab/` | The `sdl3-src` 3.4.18 crate with `patches/sdl3-src-3.4.18-no-xdg-foreign-export.patch`. |
 | reims-util | `gpu/reims-util/` | github.com/steelbrain/reims-util at `ed7398997f83f9d004477e6eab8eaf46a462a47a`, unchanged. |
 | The Mac window's title bar plugin | `gpu/reims/libdecor-cairo/libdecor-cairo.so` | `gpu/reims/libdecor-vmlab/build.sh install` (the tarball and the patch are tracked). |
