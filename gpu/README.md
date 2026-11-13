@@ -764,6 +764,11 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   `reims/build-dev.sh` as a `systemd-run --user` unit (about 10 minutes): `scripts/install-ctl.sh`
   in `reims-vgpu-dev/` with the wrapper's environment and without `--yes` (with it the script
   stops at an optional `sudo` step for USB devices).
+- **A bug in the Mac VM: read upstream's new commits first** (the user's rule, 2026-11-13).
+  `git fetch origin development` in `reims-vgpu-dev/`, then `git log HEAD..FETCH_HEAD`, and
+  `--grep` or `-S` for the symptom; each commit says what the guest sees change. The Dock
+  badge fault (below) took hours to find here and was fixed there two days before. If
+  upstream has the fix, move the lab's base instead of patching.
 - **Local window changes** (both lanes): `reims/patches/window-maximized-and-title.{dev,stable}.patch`
   and, on top of it in the dev lane, `window-pinned-mode.dev.patch`,
   `sdl-no-xdg-foreign-export.dev.patch` (`Cargo.toml`; `Cargo.lock` follows at the build),
