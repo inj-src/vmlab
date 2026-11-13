@@ -21,7 +21,7 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 - **Start without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
 - **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them: a setup worth keeping across resets is a [saved state](#saved-states).
 - `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change. On `win` the saved states stand on the clean state: `vm commit win --keep-states` keeps each as it was (a state does not get the commit's change: make it inside the state too, and save it again), `--drop-states` deletes them.
-- **A saved state you did not make is not yours:** start it, but do not save over it or delete it. `mine` on `mac` is the user's own session. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started yourself; otherwise ask the user.
+- **A saved state you did not make is not yours:** start it, but do not save over it or delete it. `pebble` on each VM is the user's own setup. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started yourself; otherwise ask the user.
 - **GUI work goes through vmlab-mcp.** For anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer), use [its tools](#driving-the-gui-vmlab-mcp); every Claude Code and Codex session has them.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
 - **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there. For some tasks if 25GB is limiting, ask the user for an increase.
@@ -63,7 +63,7 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
 - **Make one:** set the VM up, `vm stop win`, then `vm save win hq "HQ shell installed, database seeded"`. Name it after the project and say in the note what is in it. `--replace` writes over a state of that name. Tell the user about each state you made.
 - **Cost:** a state of `win` is as large as what its run wrote: 0.4 GB after ten minutes, 1 to 2 GB after a long session. Save right after the setup. States of `mac` are inside the Mac's disk file, whose size the list cannot split up.
 - **Remove:** `vm clear win hq`, for states you made.
-- **`defender` on `win` and `mine` on `mac` are the lab's and the user's:** start them, save nothing over them.
+- **`defender` on `win` is the lab's and `pebble` on each VM is the user's:** start them, save nothing over them.
 
 ## Getting code and files into a VM
 
