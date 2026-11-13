@@ -527,11 +527,40 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     SHA-256); by hand also links, a name starting with a dash, two files of one name, an
     `.app` folder and a missing file. Links inside a folder stay links; a dragged link sends
     what it points at.
-  - **Dock badges show no number (not fixed).** The red dot on a Dock icon is drawn, its
-    digits are almost the same red (stretching the contrast of a picture shows them). Seen
-    2026-11-13 with System Settings' "1" (a pending Safari update) and with a test app's
-    `dockTile.badgeLabel = "7"`; in the clean state too. System Settings' own sidebar draws
-    its "1" right. Reduce transparency changes nothing; cause not found.
+  - **Dock badges show their number (local fix, 2026-11-13;
+    `reims/patches/tiled-texture-levels-filled.dev.patch`).** Before it the red dot on a Dock
+    icon was drawn and its digits were missing (System Settings' "1", a test app's
+    `dockTile.badgeLabel`), in the clean state too.
+    - *Cause.* The Dock's digits are a layer whose image is drawn smaller than it is with
+      `minificationFilter = kCAFilterTrilinear` (`ECStatusLabelLayer`), and any layer made so
+      showed nothing (`notes/dock-badge/tri.swift trilinear` against `linear`). For such an
+      image WindowServer makes a texture with a full chain of mipmap levels whose first level
+      lies over the image's bytes (Metal's private
+      `newTiledTextureWithBytesNoCopy:length:descriptor:offset:bytesPerRow:`), samples it with
+      a mipmap filter, and fills no level itself: in QuartzCore's
+      `CA::OGL::MetalContext::update_image` (macOS 26.7) the one call of
+      `generate_mipmaps_for_texture` is on the path that uploads with `replaceRegion:`, and the
+      function returns before it where `copy_image_to_texture` made the tiled texture. So it
+      counts on the device for the smaller levels. reims made them zero (the runtime's
+      `Buffer::new_tiled_texture`, counted in `shadows_zeroed`), and a layer drawn at half size
+      or less sampled transparent texels.
+    - *Fix.* The host fills the levels from the first when the texture is made
+      (`DeviceObject::fill_tiled_levels` in `reims-vgpu-vulkan`, one `generateMipmaps` blit in
+      a command buffer of its own). Nothing in the guest changes, so it holds in every saved
+      state. A guest that writes the levels itself afterwards overwrites them.
+    - *Not known.* What an x86 Mac's driver does at this call (none is on hand), and so
+      whether it also follows a later change of the image's bytes (`didModifyData`); the fix
+      fills once, at creation, which is what a new badge or image needs. Not reported upstream
+      yet.
+    - *Test* (in the guest, `clang -fobjc-arc -framework Metal -framework Foundation tiled.m`):
+      `./tiled none 64` reads `ff` at every level (`00` past the first without the fix);
+      `replace`, `blit` and `generate` read what they wrote, as before. By eye: the "1" on
+      System Settings' Dock icon while an update waits.
+    - *How it was found.* `MAC26_LOG='info,reims_vgpu::work=debug'` prints the runtime's work
+      counters each second; only the trilinear layer moved `shadows_zeroed`.
+      `notes/dock-badge/seldis.py` is an lldb command that disassembles a function of a
+      library in the dyld shared cache without a process (lldb cannot start one over SSH) and
+      names the selectors its calls load.
   - **The clipboard's link is a Unix socket carried by SSH** (2026-11-13). The guest's agent
     listens on `~/Library/Caches/vmlab-spice-agent.sock`; `mac26.sh start --window` runs
     `ssh -N -L $V/agent.sock:<that socket>` as the unit `vmlab-mac26d-agent`, bound to the VM's
@@ -734,8 +763,9 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   `sdl-no-xdg-foreign-export.dev.patch` (`Cargo.toml`; `Cargo.lock` follows at the build),
   `window-full-screen-clipboard-file-drop.dev.patch`,
   `window-keys-to-the-guest-pointer-free.dev.patch`,
-  `window-title-bar-gives-the-desktop-its-shortcuts.dev.patch` and
-  `window-close-hides-and-shuts-down.dev.patch`, are the uncommitted diff in each checkout
+  `window-title-bar-gives-the-desktop-its-shortcuts.dev.patch`,
+  `window-close-hides-and-shuts-down.dev.patch` and (not a window change: the Dock's badges,
+  above) `tiled-texture-levels-filled.dev.patch`, are the uncommitted diff in each checkout
   (checked 2026-11-12 for all but the last: applied in that order to a7761508 they give the
   built sources; the last was made as the difference from that state). Apply them again after an update, then rebuild. A new SDL
   version needs a new copy of its crate with `sdl3-src-3.4.18-no-xdg-foreign-export.patch` and
