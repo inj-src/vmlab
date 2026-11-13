@@ -307,14 +307,23 @@ The driver's options are environment variables (`D3D10UMD_YTTRIUM_…`) or lines
 logs are `yttrium-user.log` and `yttrium-errors.log` in that folder; a line `forced-sample draw
 WINWORD.EXE … coverage=passes` says the patched path drew.
 
-### Direct3D 12: Microsoft's `d3d12.dll`, not the package's (`$W d3d12`)
+### Direct3D 12: the package's `d3d12.dll`, and Microsoft's for Chromium (`$W d3d12`, `guest-patches/9004`)
+
+> **Where this is (2026-11-13):** in this repo and in the builds in `guest-umd/` and `guest-kmd/`,
+> tested on a run of the clean state. The clean state and the saved states still have the builds
+> and the `native` mode from before, so there a native Direct3D 12 program finds no device. To
+> bring it over: start the state, `build-guest-umd.sh install`, `build-guest-kmd.sh install`,
+> `$W d3d12 bridge`, restart Windows, then `vm commit win --keep-states` (or `vm save` for a
+> state). `AGENTS.md` and `home/.config/vmlab/README.md` change with that.
 
 The driver package replaces Windows' `d3d12.dll` with an unsigned bridge (Direct3D 12 through
-vkd3d-proton) and a boot task, `vmlab-win3d-repair`, puts it back at every boot. **With the
-bridge, Chrome loses WebGL**, and so would an Electron app:
+vkd3d-proton) and a boot task, `vmlab-win3d-repair`, puts it back at every boot. On its own that
+bridge **takes WebGL from Chrome**, from Edge, from an Electron app and from Windows' own WebView2
+programs:
 
-- Chrome's GPU process takes only Microsoft-signed DLLs once it is running (`Get-ProcessMitigation
-  -Id <pid>`: `MicrosoftSignedOnly: ON`). The driver's own DLLs are loaded before that.
+- A Chromium GPU process takes only Microsoft-signed DLLs once it is running
+  (`Get-ProcessMitigation -Id <pid>`: `MicrosoftSignedOnly: ON`). The driver's own DLLs are loaded
+  before that.
 - When a page makes Chrome look for GPU video encoders (anything with WebRTC or WebCodecs; with
   Chrome's normal profile, not with a new one), the GPU process loads `d3d12.dll` then. Windows
   refuses (error 577, invalid image hash) and Chrome ends the GPU process on purpose
@@ -324,28 +333,56 @@ bridge, Chrome loses WebGL**, and so would an Electron app:
   Seen 2026-11-11 at 10:18 and 19:06; the dumps are in
   `%LOCALAPPDATA%\Google\Chrome\User Data\Crashpad\reports`.
 
-So the lab's guest has Microsoft's file: `$W d3d12 native` (`guest-scripts/d3d12-mode.ps1`:
-it copies the package's `vmlab-win3d\d3d12-native.dll` back, x64 and x86, with the owner it had,
-and disables the boot task), then restart Windows. Chrome then loads Microsoft's `d3d12.dll`,
-finds no Direct3D 12 on this GPU (the driver has none) and carries on. `$W d3d12 bridge` runs the
-package's task to put the bridge back, for a native Direct3D 12 program; `$W d3d12` says which
-is there. WebGPU has no adapter either way.
+The lab keeps the bridge and gives that one kind of process Microsoft's file:
 
-Test, in the guest's desktop session with Chrome's normal profile: `guest-tests/venc.html`
-(asks for a hardware H.264 encoder, then tries WebGL for 20 s). With the bridge, each run adds a
-dump; with Microsoft's file, none in three runs, and the GPU process has `d3d12.dll (Microsoft
-Corporation)` loaded. Reading such a dump: the failed load's record (`DelayLoadInfo`, 72 bytes)
-is on the crashing thread's stack, with the DLL's name and `dwLastError`; Chrome's symbols are on
-its symbol server (`chrome.dll.pdb`, 5.8 GB) and `llvm-symbolizer-18 --obj=chrome.dll
---relative-address` names the frames. Not reported upstream yet.
+- `$W d3d12 bridge` (`guest-scripts/d3d12-mode.ps1`, the default) runs the package's task and
+  copies the package's `vmlab-win3d\d3d12-native.dll` (Microsoft's file) to
+  `vmlab-win3d\native\d3d12.dll`, in System32 and in SysWOW64.
+- The lab's Direct3D driver loads that copy when it opens the adapter in a process whose command
+  line has `--type=gpu-process` (`PreloadNativeD3D12ForChromiumGpuProcess` in `Adapter.cpp`). A
+  Chromium GPU process opens the adapter before its restriction starts.
+- The later load asks for `d3d12.dll` by name, and the loader gives a module of that name that is
+  already in the process before it looks in System32. That is why the copy has to be named
+  `d3d12.dll`. `guest-tests/ldtest.cpp` shows it in a process with the restriction on: both
+  `LoadLibraryExA("d3d12.dll", …)` forms fail with 577 alone, and return the preloaded module
+  after a load of the copy by its path.
+- Every other program gets the bridge: `guest-tests/d12.cpp` prints `D3D12CreateDevice 00000000`
+  for the VirtIO adapter and creates a command queue.
+- Switch the preload off for one test with `D3D10UMD_YTTRIUM_NATIVE_D3D12_PRELOAD=0` in
+  `C:\ProgramData\Yttrium\yttrium.ini`. A GPU process is sandboxed and writes nothing to
+  `yttrium-user.log`; look at its modules instead (`(Get-Process -Id <pid>).Modules`:
+  `…\vmlab-win3d\native\d3d12.dll`).
+- `$W d3d12 native` puts Microsoft's file into System32 and turns the boot task off (no Direct3D
+  12 at all, as the lab had until 2026-11-13); `$W d3d12` says which is there. Restart Windows
+  after a change. WebGPU has no adapter either way: Chrome's own Direct3D 12 use goes to
+  Microsoft's file, and this driver has no Direct3D 12 for it.
+
+Test, in the guest's desktop session with Chrome's normal profile: `guest-tests/venc.html` (asks
+for a hardware H.264 encoder, then tries WebGL for 20 s). 2026-11-13, bridge in System32:
+
+| | crash dumps | WebGL after 20 s |
+|---|---|---|
+| Chrome, three runs | none | yes |
+| Chrome, preload off (the control) | one more | — |
+| Chrome `--disable-gpu`, `--use-angle=swiftshader` | none (the process loads neither file) | — |
+| Edge | none | yes |
+
+Limits: a Chromium GPU process that loads `d3d12.dll` without ever opening this adapter gets no
+preload (none found: the two software modes above do not load it). A 32-bit Chromium takes the
+same path through SysWOW64 and was not tried. After a Windows update that brings a new
+`d3d12.dll`, run `$W d3d12 bridge` again: it renews a copy that differs.
+
+Reading a GPU process dump: the failed load's record (`DelayLoadInfo`, 72 bytes) is on the
+crashing thread's stack, with the DLL's name and `dwLastError`; Chrome's symbols are on its
+symbol server (`chrome.dll.pdb`, 5.8 GB) and `llvm-symbolizer-18 --obj=chrome.dll
+--relative-address` names the frames. Upstream's bridge README (vmlab-win3d `build/d3d12/`) says
+nothing of the restriction, and VMLabDev/vmlab has no commit on it (all branches, 2026-11-13). Not
+reported upstream yet.
 
 ### Desktop Duplication (`kmd-patches/0004`, `guest-patches/9003`)
 
-> **Where this is (2026-11-13):** in this repo and in the builds in `guest-umd/` and `guest-kmd/`,
-> tested on a run of the clean state; not yet in the clean state or the saved states, where
-> `AcquireNextFrame` still fails. To bring it over: start the state, `build-guest-umd.sh install`,
-> `build-guest-kmd.sh install`, restart Windows, then `vm commit win --keep-states` (or `vm save`
-> for a state).
+> **Where this is (2026-11-13):** as for Direct3D 12 above: in the builds here, not yet in the
+> clean state or the saved states, where `AcquireNextFrame` still fails.
 
 A program that captures the screen with DXGI Desktop Duplication (`IDXGIOutput1::DuplicateOutput`)
 got no picture from the guest: every `AcquireNextFrame` returned `887a0026`
@@ -444,7 +481,8 @@ layer. What it does:
 1. The driver package from the CD (`D:\Install.cmd`, `win3d-guest.iso`). It restarts Windows
    twice; its state is `C:\ProgramData\vmlab-win3d\state.json`, its log `journal.log` there.
 2. `build-guest-umd.sh install`, `build-guest-kmd.sh install` (the pointer; it sets
-   `HWCursor=1`) and `$W d3d12 native` (Chrome's WebGL, above), then a restart.
+   `HWCursor=1`) and `$W d3d12 bridge` (Direct3D 12, and Chromium's own copy, above), then a
+   restart.
 3. `net accounts /lockoutthreshold:0`. **Chrome locks the account otherwise**: every Chrome
    start with a new profile tries a logon with an empty password (Security event 4625), and
    Windows 11 locks `dev` for 10 minutes after 10 failures, SSH key included ("Permission

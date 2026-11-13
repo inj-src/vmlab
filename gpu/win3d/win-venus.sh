@@ -34,12 +34,12 @@
 #   win-venus.sh scale [PERCENT]        Windows' display scaling now, or set it (100, 125, 150...).
 #                                       With a window it follows the screen by itself (the
 #                                       vmlab-win-venus-scale unit, log /vmlab/run/win-venus/scale.log)
-#   win-venus.sh d3d12 [native|bridge|status]
-#                                       which d3d12.dll the guest has. native (the lab's default):
-#                                       Microsoft's, and Chrome and Electron work. bridge: the
-#                                       driver package's, for a native Direct3D 12 program; with it
-#                                       Chrome's GPU process crashes (guest-scripts/d3d12-mode.ps1).
-#                                       Restart Windows after a change
+#   win-venus.sh d3d12 [bridge|native|status]
+#                                       which d3d12.dll the guest has. bridge (the lab's default):
+#                                       the driver package's, so a native Direct3D 12 program gets
+#                                       a device, and Microsoft's beside it for Chromium's GPU
+#                                       process. native: Microsoft's alone, no Direct3D 12
+#                                       (guest-scripts/d3d12-mode.ps1). Restart Windows after a change
 #   win-venus.sh reset [--discard]      drop this run's changes: the next start is the ready state
 #   win-venus.sh commit [--keep-states|--drop-states]
 #                                       make the stopped VM's disk the ready state (reset's
@@ -329,7 +329,7 @@ case ${1:-} in
   view) exec remote-viewer "vnc://127.0.0.1:$((5900 + VNC_DISPLAY))" ;;
   # over VNC: QMP's screendump has no picture of a guest that draws through the GPU ("no surface")
   shot) [[ -n ${2:-} ]] || die "usage: win-venus.sh shot <file.png>"; python3 -I "$HERE/vncshot.py" $((5900 + VNC_DISPLAY)) "$2" ;;
-  d3d12) [[ ${2:-status} =~ ^(native|bridge|status)$ ]] || die "usage: win-venus.sh d3d12 [native|bridge|status]"
+  d3d12) [[ ${2:-status} =~ ^(native|bridge|status)$ ]] || die "usage: win-venus.sh d3d12 [bridge|native|status]"
     "$0" scp "$HERE/guest-scripts/d3d12-mode.ps1" dev@127.0.0.1:C:/vmlab/
     ssh_guest "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\d3d12-mode.ps1 ${2:-status}" ;;
   reset) alive qemu && die "stop it first"; st_guard "${2:-}"

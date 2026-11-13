@@ -1,18 +1,24 @@
-# d3d12-mode.ps1 [native|bridge|status]: which d3d12.dll Windows has. Run it elevated in Windows
+# d3d12-mode.ps1 [bridge|native|status]: which d3d12.dll Windows has. Run it elevated in Windows
 # PowerShell (win-venus.sh d3d12 ... does), then restart Windows.
 #
-#   native   Microsoft's own: the lab's default. No Direct3D 12 on this GPU (the driver has none),
-#            and Chrome and Electron work.
-#   bridge   the driver package's (Direct3D 12 through vkd3d-proton), for a native D3D12 program.
-#            Unsigned, and Chrome's GPU process takes only Microsoft-signed DLLs once it runs: a page
-#            that makes it look for video encoders makes it load d3d12.dll, Windows refuses
-#            (error 577), Chrome ends its GPU process on purpose, and after three of those it has
-#            no WebGL until it is started again (../README.md).
+#   bridge   the driver package's (Direct3D 12 through vkd3d-proton) in System32, and Microsoft's
+#            own as vmlab-win3d\native\d3d12.dll beside it: the lab's default. A native D3D12
+#            program gets a device on this GPU, and Chrome and Electron work.
+#   native   Microsoft's own in System32. No Direct3D 12 on this GPU (the driver has none).
 #   status   which one is there now
+#
+# Why the second copy: the bridge is unsigned, and a Chromium GPU process takes only
+# Microsoft-signed DLLs once it runs. A page that makes it look for video encoders makes it load
+# d3d12.dll; Windows refuses the bridge (error 577), Chrome ends its GPU process on purpose, and
+# after three of those it has no WebGL until it is started again. The lab's Direct3D driver
+# (guest-patches/9004), which that process loads before the restriction starts, loads the copy
+# first: the later load by name then finds a d3d12.dll already in the process and takes it
+# (../README.md). The copy must be named d3d12.dll for that, so the package's own
+# vmlab-win3d\d3d12-native.dll does not do.
 #
 # The package's boot task, vmlab-win3d-repair, puts the bridge back at every boot: native turns
 # the task off, bridge turns it on and runs it (its own way of installing the bridge).
-param([ValidateSet('native', 'bridge', 'status')][string]$Mode = 'status')
+param([ValidateSet('bridge', 'native', 'status')][string]$Mode = 'status')
 $ErrorActionPreference = 'Stop'
 $root = 'C:\ProgramData\vmlab-win3d'
 $task = 'vmlab-win3d-repair'
@@ -54,11 +60,24 @@ if ($Mode -eq 'bridge') {
     Start-ScheduledTask -TaskName $task
     $deadline = (Get-Date).AddSeconds(90)
     do { Start-Sleep 1 } while ((Get-ScheduledTask -TaskName $task).State -eq 'Running' -and (Get-Date) -lt $deadline)
+    foreach ($a in $arches) {
+        if ((Get-Kind $a) -ne 'bridge') { throw "$($a.Dir)\d3d12.dll is not the bridge after the boot task ran" }
+        $native = Join-Path $a.Dir 'vmlab-win3d\d3d12-native.dll'      # the package's copy of Microsoft's file
+        if ((Get-AuthenticodeSignature $native).Status -ne 'Valid') { throw "$native is not a signed file" }
+        $copy = Join-Path $a.Dir 'vmlab-win3d\native\d3d12.dll'
+        if ((Test-Path $copy) -and (Get-FileHash $copy).Hash -eq (Get-FileHash $native).Hash) { continue }
+        New-Item -ItemType Directory -Force (Split-Path $copy) | Out-Null
+        # Windows' own WebView2 programs (Search, Widgets) have it loaded: renamed, not overwritten
+        if (Test-Path $copy) { Move-Item $copy "$root\trash\d3d12-copy-$($a.Name)-$(Get-Date -Format yyyyMMddHHmmss).dll" }
+        Copy-Item $native $copy
+    }
 }
 
 foreach ($a in $arches) {
     $sys = Join-Path $a.Dir 'd3d12.dll'
     "{0}: {1}, {2}, owner {3}" -f $sys, (Get-Kind $a), (Get-AuthenticodeSignature $sys).Status, (Get-Acl $sys).Owner
+    $copy = Join-Path $a.Dir 'vmlab-win3d\native\d3d12.dll'
+    "{0}: {1}" -f $copy, $(if (Test-Path $copy) { "Microsoft's for Chromium, $((Get-AuthenticodeSignature $copy).Status)" } else { 'not there' })
 }
 "boot task ${task}: $((Get-ScheduledTask -TaskName $task).State)"
 if ($Mode -ne 'status') { 'restart Windows for every program to have it' }

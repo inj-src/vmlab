@@ -10,8 +10,10 @@
 # What the ready state is, on top of win11-base (README.md, "After a reset", says why for each):
 #   1. the driver package from the CD (D:\Install.cmd): test signing on, the virtio GPU driver
 #   2. the lab's builds of the Direct3D driver (guest-umd/) and of the kernel driver (guest-kmd/,
-#      HWCursor=1): Chrome's static vertex buffers, and a pointer drawn by the host
-#   3. Microsoft's d3d12.dll back in place of the package's bridge: Chrome's GPU process
+#      HWCursor=1): Chrome's static vertex buffers, a pointer drawn by the host, Desktop
+#      Duplication
+#   3. Microsoft's d3d12.dll beside the package's bridge, for Chromium's GPU process
+#      (guest-scripts/d3d12-mode.ps1, bridge)
 #   4. no account lockout: Chrome's empty-password logons locked dev out of SSH
 #   5. the lab's helper for the desktop session (win/run-interactive.ps1) and Cua Driver's
 #      logon task, both started with no console window (the helper on win11-base shows one)
@@ -82,8 +84,8 @@ sleep 20; wait_up                           # its last restart
 say "2. the lab's Direct3D and kernel drivers"
 "$HERE/build-guest-umd.sh" install > /dev/null
 "$HERE/build-guest-kmd.sh" install > /dev/null
-say "3. Microsoft's d3d12.dll, and Windows' own visual effects"
-"$W" d3d12 native > /dev/null
+say "3. Microsoft's d3d12.dll for Chromium, and Windows' own visual effects"
+"$W" d3d12 bridge > /dev/null
 "$W" scp "$HERE/guest-scripts/default-ui.ps1" dev@127.0.0.1:C:/vmlab/
 gssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\vmlab\default-ui.ps1' > /dev/null
 restart
@@ -109,7 +111,7 @@ checks=$(gssh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\vmlab\read
 echo "$checks" | sed 's/^/   /'
 want_umd=$(sha256sum "$HERE/guest-umd/x64/viogpu_d3d10.dll" | cut -d' ' -f1)
 want_kmd=$(sha256sum "$HERE/guest-kmd/viogpu3d.sys" | cut -d' ' -f1)
-for line in gpu=OK hwcursor=1 "umd=$want_umd" "kmd=$want_kmd" d3d12=Valid lockout=Never; do
+for line in gpu=OK hwcursor=1 "umd=$want_umd" "kmd=$want_kmd" d3d12=NotSigned d3d12chromium=Valid,Valid lockout=Never; do
   grep -qx "$line" <<< "$checks" || die "check failed: wanted $line"
 done
 grep -qx 'licence=1' <<< "$checks" || echo "   (Windows is not activated in this state: it activates by itself online, or not at all)"
