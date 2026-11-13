@@ -339,6 +339,25 @@ is on the crashing thread's stack, with the DLL's name and `dwLastError`; Chrome
 its symbol server (`chrome.dll.pdb`, 5.8 GB) and `llvm-symbolizer-18 --obj=chrome.dll
 --relative-address` names the frames. Not reported upstream yet.
 
+### Desktop Duplication gives no frames (not fixed)
+
+A program that captures the screen with DXGI Desktop Duplication (`IDXGIOutput1::DuplicateOutput`)
+gets no picture from the guest: remote-desktop and screen-recording tools show black. Found
+2026-11-13 by an agent testing voxl 0.3.4 (`src/win/capture.rs`), which reopens the duplication
+for ever and sends black.
+
+- Test: `guest-tests/dd.cpp`. Build it in the guest (`vcvars64.bat`, then `cl /EHsc /O2 dd.cpp`)
+  and run it in the desktop session (`run-interactive.ps1`), not over SSH alone. On the clean
+  state, four runs out of four: `D3D11CreateDevice` and `DuplicateOutput` succeed (feature level
+  11.0, 1920x1080, format 87), then the first `AcquireNextFrame` returns `887a0026`
+  (`DXGI_ERROR_ACCESS_LOST`). A working driver prints `lit N of M` for each frame.
+- What works instead: GDI capture (`ffmpeg -f gdigrab -i desktop`), the host's picture
+  (`$W shot`, `vm gui win shot`) and Cua Driver's screenshots.
+- ffmpeg's `ddagrab` fails earlier and for another reason ("Failed to create D3D11VA device":
+  it asks for a device with video support, which the driver has not).
+- Cause not looked for. Upstream's `docs/known-limits.md` and commit messages (vmlab-win3d
+  `main`, b7e5451) say nothing of it; VMLabDev/vmlab's branches were not searched. Not reported.
+
 ### Saved states (`vm save`, `vm states`)
 
 A saved state is a run's disk kept as it was: `/vmlab/images/states/win/NAME.qcow2`, a copy of

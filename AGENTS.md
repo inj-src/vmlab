@@ -6,7 +6,7 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 | Name  | Guest                                                                                                                                                     | Inside it                                                                                                                                                                                                                                    |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, pnpm 12, fnm, PostgreSQL 16, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
+| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); no Direct3D 12 or WebGPU, and no Desktop Duplication (a screen-capture or remote-desktop tool gets no picture). | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, pnpm 12, fnm, PostgreSQL 16, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
 | `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3.                                                                                   | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc; not Xcode itself), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, Rust 1.99 (clippy, rustfmt), VS Code, Chrome (default browser), Cua Driver.                         |
 
 - Login on both: user `dev`, password `vmlab`. It is an admin account and logs in automatically.
@@ -124,7 +124,7 @@ Using it:
 `~/.config/vmlab/README.md`, by section:
 
 - **Gotchas:** something fails or behaves oddly in a VM. Read it before debugging: Windows PowerShell 5.1, `Path` over SSH and Windows features; Electron's postinstall and its output through a pipe; Node versions with fnm; macOS packages and privacy permissions; killing processes by command line; GPU limits; browsers; the VM window; clock drift.
-- **When a VM lacks something you need:** a capability is missing (Direct3D 12 on `win` is the known case). You may work around it yourself; the section has the terms, the sources and what to tell the user.
+- **When a VM lacks something you need:** a capability is missing (Direct3D 12 and Desktop Duplication on `win` are the known cases). You may work around it yourself; the section has the terms, the sources and what to tell the user.
 - **Smoke-test app:** a ready Electron app in both VMs for checking the lab itself.
 - **Where things live** and **Freeing disk space on /vmlab:** the disk images, the caches, what is safe to delete.
 
