@@ -22,7 +22,7 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 - **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them: a setup worth keeping across resets is a [saved state](#saved-states).
 - `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change. On `win` the saved states stand on the clean state: `vm commit win --keep-states` keeps each as it was (a state does not get the commit's change: make it inside the state too, and save it again), `--drop-states` deletes them.
 - **A saved state you did not make is not yours:** start it, but do not save over it or delete it. `mine` on `mac` is the user's own session. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started yourself; otherwise ask the user.
-- **GUI work goes through vmlab-mcp.** A task that will look at or act on a VM's screen (an app's UI, a tray icon, a menu, a dialog, an installer) starts with [getting its tools](#driving-the-gui-vmlab-mcp), before anything else in the task: a session loads them only when it starts.
+- **GUI work goes through vmlab-mcp.** For anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer), use [its tools](#driving-the-gui-vmlab-mcp); every Claude Code and Codex session has them.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
 - **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there. For some tasks if 25GB is limiting, ask the user for an increase.
 
@@ -96,24 +96,9 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
 
 `~/.local/bin/vmlab-mcp` is a stdio MCP server with the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs in one tool list: elements found by name, clicks and right-clicks on them, hotkeys, window state, the accessibility tree, screenshots. **It is how you test or check anything a VM shows**; confirm the result over `vm ssh`. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
 
-**Get the tools first, as the task's first step.** A session loads its MCP servers when it starts, so a server added in the middle of the work is not there until a restart.
+**Every session has the tools:** the server is installed for all Claude Code sessions (`mcp__vmlab__*`; a tool search for `vmlab` finds them) and all Codex sessions (`codex mcp list` shows `vmlab`), since 2026-11-13. A session started before that gets them at its next start; if a later one lacks them, tell the user.
 
-1. Look for them: the tools are `mcp__vmlab__*` in Claude Code (a tool search for `vmlab` finds them), and `codex mcp list` shows `vmlab` in Codex. There: go on.
-2. Not there: add the server to the project with the command below, then look again.
-3. Still not there: tell the user at once, in one line, that the VM's GUI tools need a session restart, and name the command you ran. Work on with `vm gui` until they restart, and say in your report which steps you did without the tools.
-
-- **Claude Code:** `claude mcp add -s local vmlab -- ~/.local/bin/vmlab-mcp`; `claude mcp list` then shows `vmlab … Connected`. Remove with `claude mcp remove -s local vmlab`.
-- **Codex:** `codex mcp add` writes the global config, so don't use it. Put this in `.codex/config.toml` at the project root:
-
-  ```toml
-  [mcp_servers.vmlab]
-  command = "/home/inj-src/.local/bin/vmlab-mcp"
-  tool_timeout_sec = 180
-  ```
-
-  - Codex reads a project's `.codex/config.toml` only if that project is trusted (`trust_level = "trusted"` under `[projects."<path>"]` in `~/.codex/config.toml`). Otherwise it ignores the file without a message. Check with `codex mcp list` from the project directory.
-  - If the file should not be committed, add `.codex/config.toml` to `.git/info/exclude`.
-  - The timeout matters: the first call after `vm start` can wait up to 90 s for the desktop.
+- Installed with `claude mcp add -s user vmlab -- ~/.local/bin/vmlab-mcp` and `codex mcp add vmlab -- ~/.local/bin/vmlab-mcp`, the latter with `tool_timeout_sec = 180` added under `[mcp_servers.vmlab]` in `~/.codex/config.toml`: the first call after `vm start` can wait up to 90 s for the desktop.
 
 Using it:
 
