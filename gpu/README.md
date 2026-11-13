@@ -298,7 +298,9 @@ were clean. Any Direct2D program on feature level 11.1 can show it.
   interlock path back.
 - Test: Word's ribbon in three starts is the same to the pixel, and 5 pixels differ from
   feature level 11.0. Not measured: what 16 draws for one cost (nothing felt slower).
-- Not reported upstream yet.
+- Reported upstream 2026-11-13, with the patch: https://github.com/VMLabDev/vmlab/issues/236.
+  The interlock path was the same then in the base's newest (`arehnman/virtio-win-mesa`
+  76c095bb) and in VMLabDev's `main`, `next` and `feat/kmd-dedicated-vram`.
 
 The driver's options are environment variables (`D3D10UMD_YTTRIUM_…`) or lines `KEY=VALUE` in
 `C:\ProgramData\Yttrium\yttrium.ini` (the prefix may be left off), read once per process. Its
@@ -548,10 +550,14 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
       (`DeviceObject::fill_tiled_levels` in `reims-vgpu-vulkan`, one `generateMipmaps` blit in
       a command buffer of its own). Nothing in the guest changes, so it holds in every saved
       state. A guest that writes the levels itself afterwards overwrites them.
-    - *Not known.* What an x86 Mac's driver does at this call (none is on hand), and so
-      whether it also follows a later change of the image's bytes (`didModifyData`); the fix
-      fills once, at creation, which is what a new badge or image needs. Not reported upstream
-      yet.
+    - *Upstream has it fixed, so nothing was reported.* reims' `development` at 58092712
+      (2026-11-12, runtime 30a5a88e) makes the texture as x86 Macs do, which upstream
+      measured on an AMD and an Intel one on 2026-11-11 (its `docs/graphics-kext/dgpu-oracle.md`,
+      Q11): a copy of the bytes with every level generated from the first, taken at the first
+      GPU use and again after each `didModifyData`. The lab's base is a7761508 (2026-11-10),
+      from before that. The local fix fills once, at creation, and does not follow
+      `didModifyData`; that is enough for a badge. Drop the patch when the lab's base moves to
+      58092712 or later.
     - *Test* (in the guest, `clang -fobjc-arc -framework Metal -framework Foundation tiled.m`):
       `./tiled none 64` reads `ff` at every level (`00` past the first without the fix);
       `replace`, `blit` and `generate` read what they wrote, as before. By eye: the "1" on
