@@ -463,6 +463,17 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   over `VMLAB_AGENT_SOCKET` to a `virtserialport` named `com.redhat.spice.0`, which the guest's
   vmlab-spice-agent opens. Checked in the rig: text and a PNG each way byte for byte, two files
   dropped (37 bytes and 3 MB). All of it is `patches/window-full-screen-clipboard-file-drop.dev.patch`.
+  - **Large files do not arrive (seen 2026-11-13, not fixed):** an 83 KB drop landed, a 1.4 GB
+    one stalled after at most 5 s and the agent discarded the partial file ("no data for 20 s"
+    in `~/Library/Logs/vmlab-spice-agent.log`). Evidence from that run: the agent was idle in
+    its run loop (`sample`), QEMU had used every receive buffer the guest offered on the
+    port's queue (`x-query-virtio-queue-status`, queue 4: last-avail = used = 40026) and
+    199072 bytes sat unread in QEMU's end of `agent.sock`. So macOS' serial path
+    (AppleVirtIO, IOSerialFamily, the tty) stopped taking data; why is not known. A flush of
+    that tty's input queue gave the same stall before (comment in the agent's `Port.swift`).
+    The window's writer then blocks in the middle of the file, and with it the host-to-guest
+    clipboard until the VM restarts. Nothing larger than 3 MB was ever tested. Until this is
+    fixed, large files go through `/vmlab/share` (`~/share` in the guest).
   - **Keyboard and pointer**: the Windows window's rule ("Keyboard and pointer" there). Every
     key goes to macOS while the window has the keyboard (Super is Command: Cmd+Space, Cmd+Tab),
     the pointer is never held, there is no release chord, and GNOME asks "Allow inhibiting
