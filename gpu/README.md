@@ -252,7 +252,13 @@ were right, which is why dynamic buffers, index buffers and `gl_VertexID` draws 
   place of docker, everything under `/vmlab/tmp`) plus `guest-patches/`, into `guest-umd/`; run
   it as a `systemd-run --user` unit (about 6 minutes once the toolchain image exists).
   `build-guest-umd.sh install` copies `viogpu_d3d10.dll` (x64 and x86) into the running VM and
-  keeps the release's as `viogpu_d3d10.dll.release` beside it; then restart Windows.
+  keeps the release's as `viogpu_d3d10.dll.release` beside it; then restart Windows. It replaces
+  the copy in the driver store too: when Windows installs the device anew it links System32's
+  file to that copy again. That happened on 2026-11-12 (the build cache disk moved the card
+  from PCI slot 4 to 5) and brought the release DLL back unnoticed. **The ready state made that
+  day, and every state saved from it, still has the release DLL** until the install is run in
+  them again (`Get-FileHash C:\Windows\System32\viogpu_d3d10.dll` against
+  `sha256sum guest-umd/x64/viogpu_d3d10.dll`).
 - Tests, in the guest: `node page-shot.mjs file:///C:/Users/dev/gl-vertex.html out.png 6` (18
   ways to feed vertices; the static-buffer ones fail on the release DLL) and `gl-features.html`
   (72 cases). Both pass with the fix. The first Chrome start after swapping the DLL once failed
@@ -264,6 +270,18 @@ were right, which is why dynamic buffers, index buffers and `gl_VertexID` draws 
   September (374c3022). When a win3d release moves that pin, take its `viogpu_d3d10.dll` and
   drop patch 9001. The memory fault below (host layer) is
   https://github.com/VMLabDev/vmlab/issues/234.
+
+### Open: thin slivers in Word's ribbon (not fixed)
+
+Seen 2026-11-13 in Microsoft Word 16.0.20527 (the user's state): short pale streaks in the
+ribbon's rounded boxes (the search box, the Styles gallery), still and the same in two pictures
+3 s apart; the page and its text are clean.
+
+- With the display device disabled (`Disable-PnpDevice`, restart: Word and dwm on
+  `d3d10warp.dll`) the ribbon is clean, so it is this driver's drawing.
+- Not avoided by Word's `DisableHardwareAcceleration=1` (dwm still composes through the driver),
+  and the same with the release DLL and with patch 9001.
+- Not narrowed down further (which Direct2D draw state goes wrong), not reported upstream.
 
 ### Direct3D 12: Microsoft's `d3d12.dll`, not the package's (`$W d3d12`)
 
@@ -476,6 +494,11 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     SHA-256); by hand also links, a name starting with a dash, two files of one name, an
     `.app` folder and a missing file. Links inside a folder stay links; a dragged link sends
     what it points at.
+  - **Dock badges show no number (not fixed).** The red dot on a Dock icon is drawn, its
+    digits are almost the same red (stretching the contrast of a picture shows them). Seen
+    2026-11-13 with System Settings' "1" (a pending Safari update) and with a test app's
+    `dockTile.badgeLabel = "7"`; in the clean state too. System Settings' own sidebar draws
+    its "1" right. Reduce transparency changes nothing; cause not found.
   - **The agent's serial port stalls at random; the clipboard still uses it (not fixed).**
     macOS stops offering receive buffers on the port's queue (`x-query-virtio-queue-status`,
     queue 4: last-avail = shadow-avail = used) while the agent sits idle in its run loop and

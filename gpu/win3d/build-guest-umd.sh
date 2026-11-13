@@ -25,14 +25,22 @@ if [[ ${1:-} == install ]]; then
   "$W" scp "$OUT/x86/viogpu_d3d10.dll" dev@127.0.0.1:viogpu_d3d10.x86.dll
   # A loaded DLL can be renamed but not overwritten: move the old one aside, then copy. Programs
   # started from now on load the new one; dwm and the rest do after a restart of Windows.
+  # The same goes into the package's folder in the driver store (SYSTEM's: take it first). Windows
+  # links System32's file to that copy again whenever it installs the device anew, and did so
+  # once (the card had moved to another PCI slot), which silently brought the release DLL back.
   "$W" ssh '
+    $ErrorActionPreference = "Stop"
+    $store = Split-Path (Get-CimInstance Win32_SystemDriver | Where-Object Name -eq VioGpu3D).PathName
+    takeown /f $store /r /d y | Out-Null; icacls $store /grant "Administrators:(OI)(CI)F" /t /q | Out-Null
     foreach ($p in @(@("x64", "$env:WINDIR\System32"), @("x86", "$env:WINDIR\SysWOW64"))) {
-      $new = "$HOME\viogpu_d3d10.$($p[0]).dll"; $dst = "$($p[1])\viogpu_d3d10.dll"
-      if (-not (Test-Path "$dst.release")) { Copy-Item $dst "$dst.release" }      # the release DLL, kept once
-      $old = "$dst.old-$(Get-Date -Format yyyyMMddHHmmss)"
-      Move-Item $dst $old; Copy-Item $new $dst; Remove-Item $new
-      Remove-Item "$($p[1])\viogpu_d3d10.dll.old-*" -ErrorAction SilentlyContinue  # fails while loaded: fine
-      "{0} {1}" -f $p[0], (Get-FileHash $dst -Algorithm SHA256).Hash.ToLower()
+      $new = "$HOME\viogpu_d3d10.$($p[0]).dll"
+      foreach ($dst in @("$($p[1])\viogpu_d3d10.dll", "$store\$($p[0])\viogpu_d3d10_$($p[0]).dll")) {
+        if (-not (Test-Path "$dst.release")) { Copy-Item $dst "$dst.release" }    # the release DLL, kept once
+        Move-Item $dst "$dst.old-$(Get-Date -Format yyyyMMddHHmmss)"; Copy-Item $new $dst
+        Remove-Item "$dst.old-*" -ErrorAction SilentlyContinue                    # fails while loaded: fine
+        "{0} {1} {2}" -f $p[0], (Get-FileHash $dst -Algorithm SHA256).Hash.ToLower(), $dst
+      }
+      Remove-Item $new
     }'
   sha256sum "$OUT"/x64/viogpu_d3d10.dll "$OUT"/x86/viogpu_d3d10.dll
   exit
