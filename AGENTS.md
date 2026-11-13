@@ -22,6 +22,7 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 - **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them: a setup worth keeping across resets is a [saved state](#saved-states).
 - `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change. On `win` the saved states stand on the clean state: `vm commit win --keep-states` keeps each as it was (a state does not get the commit's change: make it inside the state too, and save it again), `--drop-states` deletes them.
 - **A saved state you did not make is not yours:** start it, but do not save over it or delete it. `mine` on `mac` is the user's own session. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started yourself; otherwise ask the user.
+- **GUI work goes through vmlab-mcp.** A task that will look at or act on a VM's screen (an app's UI, a tray icon, a menu, a dialog, an installer) starts with [getting its tools](#driving-the-gui-vmlab-mcp), before anything else in the task: a session loads them only when it starts.
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
 - **Disk:** VM data belongs on `/vmlab`. The user's 500 GB system disk holds only the two build caches (`~/.local/share/vmlab/cache`, 25 GB each at most); put nothing else of the VMs there. For some tasks if 25GB is limiting, ask the user for an increase.
 
@@ -89,24 +90,19 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
 - **Node and pnpm on `win`:** `node` is 26. For a project on another version: `fnm install 24` once (kept on `C:\cache`), then `fnm use 24` at the start of each `vm ssh` command, or `fnm exec --using=24 -- <command>` in the desktop session. `pnpm` is on the Path and switches to the version in the project's `packageManager` by itself. Downloads of Electron, electron-builder, npm and pnpm are kept on `C:\cache`.
 - **PostgreSQL on `win`:** 16, installed as on a customer's PC: service `postgresql-x64-16`, port 5432, user `postgres`, password `postgres`, tools in `C:\Program Files\PostgreSQL\16\bin` (not on the Path). Its databases are on the system disk: `vm reset` empties it.
 - **A build from GitHub (an installer from Actions, a release):** download it on this machine, where `gh` is signed in, into `/vmlab/share`. The VMs have no `gh` and get no GitHub token.
-- **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): the next two sections.
+- **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): vmlab-mcp, the next section.
 
-## Seeing and driving the screen (`vm gui`)
+## Driving the GUI (vmlab-mcp)
 
-`vm gui <name> shot <file.png>` is the VM's screen as it is, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.** It needs no setup. To find an element by its name and act on it, use vmlab-mcp (next section); `vm gui` is for the picture and for input that has to be real.
+`~/.local/bin/vmlab-mcp` is a stdio MCP server with the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs in one tool list: elements found by name, clicks and right-clicks on them, hotkeys, window state, the accessibility tree, screenshots. **It is how you test or check anything a VM shows**; confirm the result over `vm ssh`. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
 
-- `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
-- **Bring a window to the front first:** `run-interactive.ps1 -Command "C:\vmlab\focus.ps1 notepad"` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
-- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `vm ssh win "C:\vmlab\tray.ps1 <part of the program's name>"` puts it beside the clock.
-- **Display scaling on `win`:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
+**Get the tools first, as the task's first step.** A session loads its MCP servers when it starts, so a server added in the middle of the work is not there until a restart.
 
-## Finding and reading UI elements (vmlab-mcp)
+1. Look for them: the tools are `mcp__vmlab__*` in Claude Code (a tool search for `vmlab` finds them), and `codex mcp list` shows `vmlab` in Codex. There: go on.
+2. Not there: add the server to the project with the command below, then look again.
+3. Still not there: tell the user at once, in one line, that the VM's GUI tools need a session restart, and name the command you ran. Work on with `vm gui` until they restart, and say in your report which steps you did without the tools.
 
-`~/.local/bin/vmlab-mcp` is a stdio MCP server. It exposes the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs as one tool list. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
-
-**Use it whenever work touches what a VM shows:** testing or checking an app's UI, its tray icon, menus, windows, focus, installers or dialogs. Add it to the project you are in when that work starts, before the first test (a running session needs a restart to see it), and look at the screen and click it, with `vm ssh` to confirm the result. Add it per project, with the commands below.
-
-- **Claude Code:** `claude mcp add -s local vmlab -- ~/.local/bin/vmlab-mcp`. The tools are `mcp__vmlab__*`. A session that is already running may need a restart before it sees them. Remove with `claude mcp remove -s local vmlab`.
+- **Claude Code:** `claude mcp add -s local vmlab -- ~/.local/bin/vmlab-mcp`; `claude mcp list` then shows `vmlab … Connected`. Remove with `claude mcp remove -s local vmlab`.
 - **Codex:** `codex mcp add` writes the global config, so don't use it. Put this in `.codex/config.toml` at the project root:
 
   ```toml
@@ -127,6 +123,16 @@ Using it:
 - Cua runs in the desktop session, so its screenshots work on win too (unlike apps started over SSH; see [Running things in a VM](#running-things-in-a-vm)).
 - Don't call `install_extension`, `install_ffmpeg` or `check_for_update`. They change the VM's Cua install.
 - Check outcomes over `vm ssh` (files written, app state). Don't trust a screenshot alone.
+
+## The plain picture and real input (`vm gui`)
+
+`vm gui` needs no setup and knows nothing of what is on the screen: it works in pixels. Two uses beside vmlab-mcp:
+
+- **The screen as it is:** `vm gui <name> shot <file.png>`, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.**
+- **Input that has to be real:** `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
+- **Bring a window to the front first:** `run-interactive.ps1 -Command "C:\vmlab\focus.ps1 notepad"` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
+- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `vm ssh win "C:\vmlab\tray.ps1 <part of the program's name>"` puts it beside the clock.
+- **Display scaling on `win`:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
 
 ## When to open the reference
 

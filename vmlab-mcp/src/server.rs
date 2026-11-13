@@ -16,11 +16,16 @@ use crate::catalog::{self, Catalog, DiskCache, Machine};
 use crate::upstream::{Config, Handle, Slot};
 
 const INSTRUCTIONS: &str = "\
-Drives the desktops of the vmlab test VMs through Cua Driver. Every tool takes a required \
+Drives the desktops of the vmlab test VMs through Cua Driver. Use these tools for everything \
+a VM shows: an app's UI, a tray icon, a menu, a dialog, an installer. They find elements by \
+name, click and right-click them, send hotkeys, and read window state and the accessibility \
+tree. The `vm gui` command works in bare pixels: keep it for a plain screenshot and for input \
+the guest must take for a person's (a keyboard hook or hotkey under test; Cua's keys carry \
+Windows' injected mark). Every tool takes a required \
 `machine` argument: \"win\" (Windows 11) or \"mac\" (macOS). The VM must already be running: \
-start it with `vm start <name>` (one VM at a time; see the vmlab README). Each session keeps \
-its own Cua connection per VM, so element refs and Cua sessions persist between calls until \
-the VM reboots. Check outcomes yourself over `vm ssh` when it matters.";
+start it with `vm start <name>` (one VM at a time; see /vmlab/tools/vmlab/AGENTS.md). Each \
+session keeps its own Cua connection per VM, so element refs and Cua sessions persist between \
+calls until the VM reboots. Check outcomes yourself over `vm ssh` when it matters.";
 
 pub struct Proxy {
     cfg: Arc<Config>,

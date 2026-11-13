@@ -102,6 +102,8 @@ cmd_start(){
   # macOS keeps the clock of its last run until it reaches a time server
   [[ $n == mac ]] && { guest mac "sudo -n date -u $(date -u +%m%d%H%M%Y.%S)" >/dev/null 2>&1 || true; }
   echo "$n running at 127.0.0.1 port ${PORT[$n]}"
+  # For an agent (no terminal): where the GUI tools are, at the moment it has a VM to drive.
+  [[ -t 1 ]] || echo "GUI work on $n: the vmlab MCP tools (mcp__vmlab__*), not vm gui. Not in your session? /vmlab/tools/vmlab/AGENTS.md, \"Driving the GUI\"." >&2
 }
 
 cmd_stop(){
