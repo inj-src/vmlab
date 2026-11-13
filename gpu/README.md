@@ -95,7 +95,9 @@ pointer" below). Closing it shuts Windows down. Names the desktop shows carry no
   overview, or after a click in the picture, it opens Start again.
 - **Clipboard and files**: text and pictures copied on either side paste on the other, and
   files dragged onto the window land on Windows' desktop (`-chardev qemu-vdagent`, the SPICE
-  agent in the guest; `qemu-patches/0009` to `0011`). The window's clipboard was off before
+  agent in the guest; `qemu-patches/0009` to `0011`). Large files too: checked 2026-11-13 in
+  the rig with 40 MB, 1.5 GB (15 s) and 4.5 GB (30 s), each with the same SHA-256, two files
+  in one drag, and a name already there (it gets `(1)`). The window's clipboard was off before
   `0011`, GTK's default for it: nothing was shared until then, whatever this file said.
 
 Changing the icon: give the new picture a new file name and change `Icon=` (GNOME Shell keeps a
