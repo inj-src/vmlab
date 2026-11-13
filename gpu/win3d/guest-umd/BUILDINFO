@@ -1,2 +1,3 @@
 vmlab-win3d 45ec46ca73a5d64b8e0cd956fe7748da2d0c0e17 (release 0.1.2-alpha) plus:
 9001-yttrium-publish-buffer-copies-into-stream-output-buffers.patch
+9002-yttrium-forced-sample-coverage-one-draw-per-sample.patch

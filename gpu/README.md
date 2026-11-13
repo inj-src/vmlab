@@ -271,17 +271,34 @@ were right, which is why dynamic buffers, index buffers and `gl_VertexID` draws 
   drop patch 9001. The memory fault below (host layer) is
   https://github.com/VMLabDev/vmlab/issues/234.
 
-### Open: thin slivers in Word's ribbon (not fixed)
+### Local fix: gaps in Direct2D shapes (`guest-patches/9002`)
 
-Seen 2026-11-13 in Microsoft Word 16.0.20527 (the user's state): short pale streaks in the
-ribbon's rounded boxes (the search box, the Styles gallery), still and the same in two pictures
-3 s apart; the page and its text are clean.
+Seen 2026-11-13 in Microsoft Word 16.0.20527: short pale gaps in the ribbon's rounded boxes (the
+search box, the Styles gallery), in other places at every start of Word; the page and its text
+were clean. Any Direct2D program on feature level 11.1 can show it.
 
-- With the display device disabled (`Disable-PnpDevice`, restart: Word and dwm on
-  `d3d10warp.dll`) the ribbon is clean, so it is this driver's drawing.
-- Not avoided by Word's `DisableHardwareAcceleration=1` (dwm still composes through the driver),
-  and the same with the release DLL and with patch 9001.
-- Not narrowed down further (which Direct2D draw state goes wrong), not reported upstream.
+- Direct2D antialiases shapes with target-independent rasterization: triangle fans drawn with
+  ForcedSampleCount 16 into a single-sampled R16_UINT texture, the pixel shader writing
+  SV_Coverage, the output merger XORing. The driver drew that as one 16-sample draw whose
+  fragment shader XORs under a pixel interlock (`VK_EXT_fragment_shader_interlock`). On this
+  host (NVIDIA 595.99 through Venus) two fragments of one pixel with disjoint coverage, which
+  is every pixel on an edge two triangles share, lose one of their XORs.
+- Evidence: clean with `ENABLE_FL11_1=0` (Direct2D then does not use the path) and with
+  `FORCED_SAMPLE_COUNT_MAX=1` (no antialiasing there); the same gaps with ordered interlock;
+  far worse with no interlock; three starts with one setting differ in 260 to 370 pixels.
+  Whether NVIDIA's driver or the Venus renderer loses the lock was not looked into.
+- `guest-patches/9002-…patch` sends such a draw as one single-sampled draw per sample, with
+  the texture as a colour attachment and the blender's logic op XOR: no lock. The patch's
+  header has how one pipeline serves all 16 draws. `FORCED_SAMPLE_PASSES=0` brings the
+  interlock path back.
+- Test: Word's ribbon in three starts is the same to the pixel, and 5 pixels differ from
+  feature level 11.0. Not measured: what 16 draws for one cost (nothing felt slower).
+- Not reported upstream yet.
+
+The driver's options are environment variables (`D3D10UMD_YTTRIUM_…`) or lines `KEY=VALUE` in
+`C:\ProgramData\Yttrium\yttrium.ini` (the prefix may be left off), read once per process. Its
+logs are `yttrium-user.log` and `yttrium-errors.log` in that folder; a line `forced-sample draw
+WINWORD.EXE … coverage=passes` says the patched path drew.
 
 ### Direct3D 12: Microsoft's `d3d12.dll`, not the package's (`$W d3d12`)
 
