@@ -255,10 +255,15 @@ were right, which is why dynamic buffers, index buffers and `gl_VertexID` draws 
   keeps the release's as `viogpu_d3d10.dll.release` beside it; then restart Windows. It replaces
   the copy in the driver store too: when Windows installs the device anew it links System32's
   file to that copy again. That happened on 2026-11-12 (the build cache disk moved the card
-  from PCI slot 4 to 5) and brought the release DLL back unnoticed. **The ready state made that
-  day, and every state saved from it, still has the release DLL** until the install is run in
-  them again (`Get-FileHash C:\Windows\System32\viogpu_d3d10.dll` against
-  `sha256sum guest-umd/x64/viogpu_d3d10.dll`).
+  from PCI slot 4 to 5) and brought the release DLL back unnoticed; the ready state made that
+  day and the states saved from it had it until 2026-11-13. To check a state:
+  `Get-FileHash C:\Windows\System32\viogpu_d3d10.dll` against
+  `sha256sum guest-umd/x64/viogpu_d3d10.dll`.
+- **A new build goes into the ready state and into every saved state**, since a state does not
+  get what a commit changes: in the ready state `install`, restart Windows, stop,
+  `vm commit win --keep-states`; then for each state `vm start win NAME`, `install`, restart
+  Windows, stop, `vm save win NAME --replace "<its note>"`. Done so on 2026-11-13 with
+  patches 9001 and 9002 (`defender`, `pebble`, `office-wip`); about 2 minutes a state.
 - Tests, in the guest: `node page-shot.mjs file:///C:/Users/dev/gl-vertex.html out.png 6` (18
   ways to feed vertices; the static-buffer ones fail on the release DLL) and `gl-features.html`
   (72 cases). Both pass with the fix. The first Chrome start after swapping the DLL once failed
@@ -350,7 +355,13 @@ a reflink), the commit runs, and `qemu-img rebase` moves each state to the new r
 copying into it whatever the commit changed underneath. A state then reads as before the
 commit, without the commit's change, and has grown by about the commit's size; with the two
 states of 2026-11-13 it took 2 minutes. A state that could not be moved stays whole on the
-copy and the next `commit --keep-states` moves it. `--drop-states` deletes the states. `$W setup`
+copy and the next `commit --keep-states` moves it. A state can grow by far more than the run
+wrote: where the committed run trimmed free space, the state gets the old content of that
+space (`defender` went from 1.5 to 7.3 GiB of data after a run of 0.3 GiB that had trimmed
+6 GiB). It was back at 1.5 GiB after the state's next run. A retrim by hand is not what did
+it: `defrag C: /L` and `Optimize-Volume -ReTrim` end with "Data error (cyclic redundancy
+check)" on this virtio disk, in the ready state of 2026-11-12 too, while QEMU counts no failed
+request (`query-blockstats`); not looked into. `--drop-states` deletes the states. `$W setup`
 asks for `vm clear win --all` first. Its trial runs (`WIN_VENUS_READY`, `WIN_VENUS_DISK`) keep
 their marks in `/vmlab/run/win-venus/trial-states`, away from the real ones.
 
