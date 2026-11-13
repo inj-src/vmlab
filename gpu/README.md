@@ -309,12 +309,12 @@ WINWORD.EXE … coverage=passes` says the patched path drew.
 
 ### Direct3D 12: the package's `d3d12.dll`, and Microsoft's for Chromium (`$W d3d12`, `guest-patches/9004`)
 
-> **Where this is (2026-11-13):** in this repo and in the builds in `guest-umd/` and `guest-kmd/`,
-> tested on a run of the clean state. The clean state and the saved states still have the builds
-> and the `native` mode from before, so there a native Direct3D 12 program finds no device. To
-> bring it over: start the state, `build-guest-umd.sh install`, `build-guest-kmd.sh install`,
-> `$W d3d12 bridge`, restart Windows, then `vm commit win --keep-states` (or `vm save` for a
-> state). `AGENTS.md` and `home/.config/vmlab/README.md` change with that.
+> **Where this is (2026-11-14):** in the clean state and in both saved states (`pebble`,
+> `defender`), installed and tested in each: `ready-checks.ps1` says `d3d12=NotSigned
+> d3d12chromium=Valid,Valid`. Defender, on with tamper protection in `defender`, blocked nothing.
+> A new driver build goes the same way: start the state, `build-guest-umd.sh install`,
+> `build-guest-kmd.sh install`, `$W d3d12 bridge`, restart Windows, then `vm commit win
+> --keep-states` for the clean state or `vm save … --replace` for a saved one.
 
 The driver package replaces Windows' `d3d12.dll` with an unsigned bridge (Direct3D 12 through
 vkd3d-proton) and a boot task, `vmlab-win3d-repair`, puts it back at every boot. On its own that
@@ -367,10 +367,30 @@ for a hardware H.264 encoder, then tries WebGL for 20 s). 2026-11-13, bridge in 
 | Chrome `--disable-gpu`, `--use-angle=swiftshader` | none (the process loads neither file) | — |
 | Edge | none | yes |
 
+Electron, 2026-11-14 (`guest-tests/electron/`: `main.js` loads `venc.html` and logs
+`child-process-gone`; `etest.ps1 x64|ia32 [plain|venc|webgpu|on12]` runs an Electron unpacked to
+`C:\share\etest\<arch>` and prints the GPU process's modules). A plain Electron never loads
+`d3d12.dll` on this page, with the preload or without, so the test that tells is `venc`:
+`--enable-features=D3D12VideoEncodeAccelerator,D3D12VideoDecoder`, which Chrome gets from its
+field trials.
+
+| | GPU process crashes | WebGL after 20 s |
+|---|---|---|
+| Electron 45.3.2 x64 (Chromium 156), plain and `venc` | none | yes, VirtIO adapter |
+| Electron 42.11.18 ia32 (Chromium 148; the 32-bit path, SysWOW64), plain and `venc` | none | yes, VirtIO adapter |
+| either, `venc`, preload off (the control) | two, `reason=crashed exitCode=-2147483645` | yes, after the restarts |
+| x64 `--enable-unsafe-webgpu` | none, preload on or off | yes; WebGPU is SwiftShader (CPU) |
+| x64 `--use-angle=d3d11on12` | none, preload on or off | on Microsoft Basic Render Driver (CPU) |
+
+In the plain, `venc` and WebGPU runs with the preload on, the GPU process had
+`MicrosoftSignedOnly: ON` and `…\vmlab-win3d\native\d3d12.dll` loaded.
+
 Limits: a Chromium GPU process that loads `d3d12.dll` without ever opening this adapter gets no
-preload (none found: the two software modes above do not load it). A 32-bit Chromium takes the
-same path through SysWOW64 and was not tried. After a Windows update that brings a new
-`d3d12.dll`, run `$W d3d12 bridge` again: it renews a copy that differs.
+preload. `--use-angle=d3d11on12` is that case: it draws on the CPU, as it would with Microsoft's
+file in System32 (this driver has no Direct3D 12 for it); the two software modes above load
+neither file. A hardware video encoder is not offered (`hardware H.264 encoder supported:
+false`). After a Windows update that brings a new `d3d12.dll`, run `$W d3d12 bridge` again: it
+renews a copy that differs.
 
 Reading a GPU process dump: the failed load's record (`DelayLoadInfo`, 72 bytes) is on the
 crashing thread's stack, with the DLL's name and `dwLastError`; Chrome's symbols are on its
@@ -381,8 +401,8 @@ reported upstream yet.
 
 ### Desktop Duplication (`kmd-patches/0004`, `guest-patches/9003`)
 
-> **Where this is (2026-11-13):** as for Direct3D 12 above: in the builds here, not yet in the
-> clean state or the saved states, where `AcquireNextFrame` still fails.
+> **Where this is (2026-11-14):** as for Direct3D 12 above: in the clean state and in both saved
+> states; `dd.exe` gave `frames 8, fully lit 8` and `shr.exe` passed in each.
 
 A program that captures the screen with DXGI Desktop Duplication (`IDXGIOutput1::DuplicateOutput`)
 got no picture from the guest: every `AcquireNextFrame` returned `887a0026`
