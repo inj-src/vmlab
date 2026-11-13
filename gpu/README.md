@@ -339,24 +339,64 @@ is on the crashing thread's stack, with the DLL's name and `dwLastError`; Chrome
 its symbol server (`chrome.dll.pdb`, 5.8 GB) and `llvm-symbolizer-18 --obj=chrome.dll
 --relative-address` names the frames. Not reported upstream yet.
 
-### Desktop Duplication gives no frames (not fixed)
+### Desktop Duplication (`kmd-patches/0004`, `guest-patches/9003`)
+
+> **Where this is (2026-11-13):** in this repo and in the builds in `guest-umd/` and `guest-kmd/`,
+> tested on a run of the clean state; not yet in the clean state or the saved states, where
+> `AcquireNextFrame` still fails. To bring it over: start the state, `build-guest-umd.sh install`,
+> `build-guest-kmd.sh install`, restart Windows, then `vm commit win --keep-states` (or `vm save`
+> for a state).
 
 A program that captures the screen with DXGI Desktop Duplication (`IDXGIOutput1::DuplicateOutput`)
-gets no picture from the guest: remote-desktop and screen-recording tools show black. Found
+got no picture from the guest: every `AcquireNextFrame` returned `887a0026`
+(`DXGI_ERROR_ACCESS_LOST`), and remote-desktop and screen-recording tools showed black. Found
 2026-11-13 by an agent testing voxl 0.3.4 (`src/win/capture.rs`), which reopens the duplication
-for ever and sends black.
+for ever and sends black. Upstream knows it and has no fix (`guest/win3d/docs/present.md`: "fails
+with `DXGI_ERROR_ACCESS_LOST` on this display stack").
 
-- Test: `guest-tests/dd.cpp`. Build it in the guest (`vcvars64.bat`, then `cl /EHsc /O2 dd.cpp`)
-  and run it in the desktop session (`run-interactive.ps1`), not over SSH alone. On the clean
-  state, four runs out of four: `D3D11CreateDevice` and `DuplicateOutput` succeed (feature level
-  11.0, 1920x1080, format 87), then the first `AcquireNextFrame` returns `887a0026`
-  (`DXGI_ERROR_ACCESS_LOST`). A working driver prints `lit N of M` for each frame.
-- What works instead: GDI capture (`ffmpeg -f gdigrab -i desktop`), the host's picture
-  (`$W shot`, `vm gui win shot`) and Cua Driver's screenshots.
-- ffmpeg's `ddagrab` fails earlier and for another reason ("Failed to create D3D11VA device":
-  it asks for a device with video support, which the driver has not).
-- Cause not looked for. Upstream's `docs/known-limits.md` and commit messages (vmlab-win3d
-  `main`, b7e5451) say nothing of it; VMLabDev/vmlab's branches were not searched. Not reported.
+How a frame gets there, and the three things that were in the way:
+
+- dxgi creates the duplication surface in the capturing program. For each frame DWM's context has
+  dxgkrnl copy the desktop into it through the kernel driver's `DxgkDdiPresent` with `Blt`. A
+  trace of `Microsoft-Windows-DxgKrnl` shows it: `OutputDuplicationBlit … Status=0xC00000BB`
+  (`STATUS_NOT_SUPPORTED`) from dwm.exe, then `Dxgk_Diag_OutputDupl_Destroy`.
+- **The kernel driver refused the copy.** In a Venus context it does a present copy on the CPU
+  and only from a Venus image into a GDI surface (`SetCpuCopyBlt`: `!src->IsBlob() ||
+  dst->IsBlob()`). `kmd-patches/0004` lets it copy into a blob that can be mapped, at the image's
+  offset in the blob, and maps such a destination in `Present`, where a refusal fails the call
+  (in `Patch` it would be a bugcheck).
+- **The surface could not be mapped.** A shared render target is a Venus image in device-local
+  memory. `guest-patches/9003` creates it as a display image, as a swap chain's buffer is:
+  host-visible memory, a mappable blob, a row pitch the kernel driver is told. The driver is not
+  told which texture is a duplication surface (it sees `format=87 bind=0x28 misc=0x2`; the keyed
+  mutex and NT handle flags stay in the runtime), so every shared BGRA texture that is a render
+  target and a shader resource with one level and one sample takes this path.
+  `guest-tests/shr.cpp` checks the ordinary use of such a texture, between two devices.
+- **The first frame was thrown away.** The driver clears an image nothing was drawn to at its
+  first use, and the kernel's first copy, the only one of the whole desktop, comes before that:
+  later frames carried only what had changed, on black. The image is now created
+  `VK_IMAGE_LAYOUT_PREINITIALIZED` and counts as written (`YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN`),
+  as an imported display image already did.
+
+Tests and tools:
+
+- `guest-tests/dd.cpp`: build it in the guest (`vcvars64.bat`, then `cl /EHsc /O2 dd.cpp`) and
+  run it in the desktop session (`run-interactive.ps1`), not over SSH alone. It takes eight
+  frames while a window of its own changes colour. Fixed: `lit 2073596 of 2073600` on every
+  frame and `window pixel` following the colour; `dd.exe frame.bmp` writes frame 1, which matched
+  the host's picture of the guest (`vm gui win shot`) but for one taskbar icon.
+- The trace: `logman start t -p Microsoft-Windows-DxgKrnl 0xFFFFFFFFFFFFFFFF 5 -o t.etl -ets`,
+  run the program, `logman stop t -ets`, `tracerpt t.etl -o t.xml -of XML`; the event names are
+  in each event's `RenderingInfo`.
+- The release build of the kernel driver has no tracing (`DbgPrint` compiles to nothing). The
+  Direct3D driver's `yttrium-user.log` gets `d3d10umd: kernel blt target …` for the first such
+  texture of a process.
+- ffmpeg's `ddagrab` still fails, earlier and for another reason ("Failed to create D3D11VA
+  device": it asks for a device with video support, which the driver has not). GDI capture
+  (`ffmpeg -f gdigrab -i desktop`), the host's picture and Cua Driver's screenshots work as
+  before.
+- Not tried: a rotated or a second output, a capture while a full-screen game flips, voxl itself.
+  Not reported upstream yet.
 
 ### Saved states (`vm save`, `vm states`)
 

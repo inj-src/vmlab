@@ -1,0 +1,235 @@
+vmlab (this lab), 2026-11-13: d3d10umd: a Desktop Duplication surface is a display image
+
+DXGI Desktop Duplication gave no frames: every AcquireNextFrame returned
+DXGI_ERROR_ACCESS_LOST. dxgi creates the duplication surface in the capturing
+program, and for each frame dxgkrnl has the kernel driver copy DWM's desktop
+into it (DxgkDdiPresent with Blt; ETW event OutputDuplicationBlit). The kernel
+driver copies on the CPU and so needs memory it can map. A shared render
+target here is a Venus image in device-local memory behind a blob that is not
+mappable, and the kernel driver answered STATUS_NOT_SUPPORTED.
+
+Such a texture is now created as a display target (as a swap chain's buffer
+is): the display image path gives it host-visible memory, a mappable blob and
+a row pitch the kernel driver is told. The driver is not told which texture is
+a duplication surface (it sees format=87 bind=0x28 misc=0x2: the keyed mutex
+and NT handle flags stay in the runtime), so every shared BGRA texture that is
+a render target and a shader resource with one level and one sample takes this
+path. The first such texture of a process gets a line in yttrium-user.log.
+
+The kernel's first copy, the only one that carries the whole desktop, arrives
+before the program's first use of the texture, and a first use clears an image
+nothing was drawn to. So the image is created PREINITIALIZED and marked as
+written (YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN), as an imported display
+image already is.
+
+The kernel half is kmd-patches/0004. Test: guest-tests/dd.cpp.
+
+Applies after patches/mesa of vmlab-win3d 45ec46ca (release 0.1.2-alpha) and
+guest-patches/9002.
+
+diff --git a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+index 629388d..0cd81fd 100644
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -639,6 +639,42 @@ sanitize_d3d11_resource_misc_flags(UINT flags)
+    return sanitized;
+ }
+ 
++/*
++ * A Desktop Duplication surface: dxgi creates it in the capturing program,
++ * and for each frame dxgkrnl has the KMD copy DWM's desktop into it
++ * (DxgkDdiPresent, Blt).  The KMD does that copy on the CPU, so the surface
++ * needs memory it can map: the display image path gives that, and a row pitch
++ * the KMD knows.  An ordinary shared render target has device-local memory,
++ * the KMD refuses the copy, and every AcquireNextFrame returns
++ * DXGI_ERROR_ACCESS_LOST.
++ *
++ * Nothing in the arguments names the surface as a duplication one (the
++ * runtime keeps the keyed mutex and NT handle flags to itself), so this is
++ * the shape dxgi asks for: a shared BGRA texture, render target and shader
++ * resource, one level, one sample.  Other shared textures of that shape get
++ * a display image too, which is the kind every swap chain buffer already is.
++ *
++ * The first copy arrives before the program's first use of the texture, so
++ * the image also starts as written (YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN):
++ * without that the first use clears it and the first frame, the only one that
++ * carries the whole desktop, is lost.
++ */
++static bool
++is_kernel_blt_target(const D3D11DDIARG_CREATERESOURCE *create)
++{
++   const UINT bind = D3D10_DDI_BIND_RENDER_TARGET |
++                     D3D10_DDI_BIND_SHADER_RESOURCE;
++
++   return create->ResourceDimension == D3D10DDIRESOURCE_TEXTURE2D &&
++          (create->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) &&
++          create->BindFlags == bind &&
++          (create->Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
++           create->Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) &&
++          create->Usage == D3D10_DDI_USAGE_DEFAULT &&
++          create->MipLevels == 1 && create->ArraySize == 1 &&
++          create->SampleDesc.Count == 1 && !create->pPrimaryDesc;
++}
++
+ static UINT
+ translate_d3d11_resource_array_size(const D3D11DDIARG_CREATERESOURCE *create)
+ {
+@@ -837,11 +873,12 @@ subResourceBox(struct pipe_resource *resource, // IN
+  * ----------------------------------------------------------------------
+  */
+ 
+-void APIENTRY
+-CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
+-               __in const D3D10DDIARG_CREATERESOURCE *pCreateResource,  // IN
+-               D3D10DDI_HRESOURCE hResource,                            // IN
+-               D3D10DDI_HRTRESOURCE hRTResource)                        // IN
++static void
++create_resource(D3D10DDI_HDEVICE hDevice,
++                const D3D10DDIARG_CREATERESOURCE *pCreateResource,
++                D3D10DDI_HRESOURCE hResource,
++                D3D10DDI_HRTRESOURCE hRTResource,
++                bool kernel_blt_target)
+ {
+    LOG_ENTRYPOINT();
+ 
+@@ -983,6 +1020,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
+       templat.flags |= YTTRIUM_GDI_RESOURCE_FLAG_CPU_READBACK;
+    if (yttrium && has_primary_desc)
+       templat.flags |= PIPE_RESOURCE_FLAG_FRONTEND_PRIV;
++   if (yttrium && kernel_blt_target)
++      templat.flags |= YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN;
+ 
+    if (templat.bind == 0 && templat.usage != PIPE_USAGE_STAGING) {
+       templat.bind = PIPE_BIND_SAMPLER_VIEW;
+@@ -1094,6 +1133,15 @@ unlock:
+    mtx_unlock(&device->CreateResourceMtx);
+ }
+ 
++void APIENTRY
++CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
++               __in const D3D10DDIARG_CREATERESOURCE *pCreateResource,  // IN
++               D3D10DDI_HRESOURCE hResource,                            // IN
++               D3D10DDI_HRTRESOURCE hRTResource)                        // IN
++{
++   create_resource(hDevice, pCreateResource, hResource, hRTResource, false);
++}
++
+ void APIENTRY
+ CreateResource11(D3D10DDI_HDEVICE hDevice,
+                  __in const D3D11DDIARG_CREATERESOURCE *pCreateResource,
+@@ -1116,8 +1164,24 @@ CreateResource11(D3D10DDI_HDEVICE hDevice,
+    create10.MipLevels = pCreateResource->MipLevels;
+    create10.ArraySize = translate_d3d11_resource_array_size(pCreateResource);
+    create10.pPrimaryDesc = pCreateResource->pPrimaryDesc;
++   const bool kernel_blt_target =
++      is_kernel_blt_target(pCreateResource) &&
++      is_yttrium_screen(CastPipeContext(hDevice)->screen);
++   if (kernel_blt_target) {
++      static LONG logged;
++
++      create10.BindFlags |= D3D10_DDI_BIND_PRESENT;
++      if (!InterlockedExchange(&logged, 1))
++         yttrium_gdi_user_logf("d3d10umd: kernel blt target %ux%u format=%u bind=0x%x misc=0x%x (first in this process)\n",
++                               pCreateResource->pMipInfoList[0].TexelWidth,
++                               pCreateResource->pMipInfoList[0].TexelHeight,
++                               (unsigned)pCreateResource->Format,
++                               pCreateResource->BindFlags,
++                               pCreateResource->MiscFlags);
++   }
+ 
+-   CreateResource(hDevice, &create10, hResource, hRTResource);
++   create_resource(hDevice, &create10, hResource, hRTResource,
++                   kernel_blt_target);
+ 
+    Resource *resource = CastResource(hResource);
+    if (resource) {
+diff --git a/src/gallium/winsys/yttrium/gdi/yttrium_gdi_public.h b/src/gallium/winsys/yttrium/gdi/yttrium_gdi_public.h
+index 48b1894..1457e1a 100644
+--- a/src/gallium/winsys/yttrium/gdi/yttrium_gdi_public.h
++++ b/src/gallium/winsys/yttrium/gdi/yttrium_gdi_public.h
+@@ -20,6 +20,12 @@
+  * an aligned byte offset in a buffer by CopyStructureCount. */
+ #define YTTRIUM_GDI_RESOURCE_FLAG_UAV_COUNTER (PIPE_RESOURCE_FLAG_DRV_PRIV << 1)
+ 
++/* The KMD writes this display image through its CPU mapping before the
++ * program's first use of it (the destination of a blt Present, as for Desktop
++ * Duplication): the image starts PREINITIALIZED and counts as written, so the
++ * first use keeps what is there. */
++#define YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN (PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+diff --git a/src/gallium/winsys/yttrium/gdi/yttrium_resource.c b/src/gallium/winsys/yttrium/gdi/yttrium_resource.c
+index 82b8268..bfa8186 100644
+--- a/src/gallium/winsys/yttrium/gdi/yttrium_resource.c
++++ b/src/gallium/winsys/yttrium/gdi/yttrium_resource.c
+@@ -1469,8 +1469,11 @@ yttrium_resource_create(struct pipe_screen *pscreen,
+    res->primary_target = (templ->flags & PIPE_RESOURCE_FLAG_FRONTEND_PRIV) != 0;
+    res->venus.cpu_readback =
+       (templ->flags & YTTRIUM_GDI_RESOURCE_FLAG_CPU_READBACK) != 0;
++   res->venus.kernel_written =
++      (templ->flags & YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN) != 0;
+    res->base.flags &= ~(PIPE_RESOURCE_FLAG_FRONTEND_PRIV |
+-                        YTTRIUM_GDI_RESOURCE_FLAG_CPU_READBACK);
++                        YTTRIUM_GDI_RESOURCE_FLAG_CPU_READBACK |
++                        YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN);
+    pipe_reference_init(&res->base.reference, 1);
+    yttrium_resource_init_threaded(res);
+    res->venus.owner = &res->base;
+diff --git a/src/gallium/winsys/yttrium/gdi/yttrium_venus.h b/src/gallium/winsys/yttrium/gdi/yttrium_venus.h
+index 76c6a52..4c8393d 100644
+--- a/src/gallium/winsys/yttrium/gdi/yttrium_venus.h
++++ b/src/gallium/winsys/yttrium/gdi/yttrium_venus.h
+@@ -372,6 +372,7 @@ struct yttrium_venus_resource {
+    uint32_t layers;
+    VkSampleCountFlagBits samples;
+    bool cpu_readback;
++   bool kernel_written;
+    bool initialized;
+    bool buffer_backed;
+    bool contents_initialized;
+diff --git a/src/gallium/winsys/yttrium/gdi/yttrium_venus2_resource.c b/src/gallium/winsys/yttrium/gdi/yttrium_venus2_resource.c
+index 87970d4..aa06bef 100644
+--- a/src/gallium/winsys/yttrium/gdi/yttrium_venus2_resource.c
++++ b/src/gallium/winsys/yttrium/gdi/yttrium_venus2_resource.c
+@@ -557,11 +557,24 @@ yttrium_venus2_create_display_image(struct yttrium_venus *venus,
+                               VK_IMAGE_USAGE_SAMPLED_BIT |
+                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    usage = yttrium_venus_feedback_loop_usage(venus, usage);
+-   if (!yttrium_venus_create_image(venus, resource, vk_format, width, height,
+-                                    usage)) {
++   /* What the KMD wrote through the mapping must survive the first
++    * transition; see YTTRIUM_GDI_RESOURCE_FLAG_KERNEL_WRITTEN. */
++   const bool kernel_written = resource->kernel_written;
++   const VkImageLayout initial_layout =
++      kernel_written ? VK_IMAGE_LAYOUT_PREINITIALIZED :
++                       VK_IMAGE_LAYOUT_UNDEFINED;
++   if (!yttrium_venus_create_image_tiled(venus, resource, VK_IMAGE_TYPE_2D,
++                                          vk_format, width, height, 1, 1, 1,
++                                          0, usage, VK_SAMPLE_COUNT_1_BIT,
++                                          VK_IMAGE_TILING_LINEAR,
++                                          initial_layout)) {
+       usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+-      if (!yttrium_venus_create_image(venus, resource, vk_format, width,
+-                                      height, usage))
++      if (!yttrium_venus_create_image_tiled(venus, resource,
++                                            VK_IMAGE_TYPE_2D, vk_format,
++                                            width, height, 1, 1, 1, 0, usage,
++                                            VK_SAMPLE_COUNT_1_BIT,
++                                            VK_IMAGE_TILING_LINEAR,
++                                            initial_layout))
+          return false;
+    }
+ 
+@@ -644,7 +657,9 @@ yttrium_venus2_create_display_image(struct yttrium_venus *venus,
+       return false;
+    }
+ 
+-   resource->layout = VK_IMAGE_LAYOUT_UNDEFINED;
++   resource->layout = initial_layout;
++   if (kernel_written)
++      resource->contents_initialized = true;
+    resource->allocation_size = memory_info.allocationSize;
+    resource->image_offset = layout.offset;
+    resource->image_size = layout.size;

@@ -1,0 +1,106 @@
+vmlab (this lab), 2026-11-13: kmd: present blt into a mappable blob (Desktop Duplication)
+
+DXGI Desktop Duplication gave no frames: every AcquireNextFrame returned
+DXGI_ERROR_ACCESS_LOST. For each frame dxgkrnl has DWM's context copy the
+desktop into a shared surface that the capturing program created
+(DxgkDdiPresent with Blt; the ETW event is OutputDuplicationBlit). In a Venus
+context this driver does a present blt on the CPU, and only from a blob (a
+Venus image) into a GDI surface: with a blob as destination it returned
+STATUS_NOT_SUPPORTED, and dxgkrnl then ends the duplication.
+
+A blob destination is now taken when both blobs are mappable. It is mapped in
+Present, where a refusal only fails that Present (a blob's mapping does not
+depend on residency, so the later mapping in Patch, whose failure is a
+bugcheck, cannot fail). The image's offset in its memory is honoured.
+
+The user-mode half is guest-patches/9003: it gives a duplication surface
+mappable memory. Test: guest-tests/dd.cpp.
+
+diff --git a/viogpu/viogpu3d/viogpu_command.cpp b/viogpu/viogpu3d/viogpu_command.cpp
+index 3ed4ca3..b717295 100644
+--- a/viogpu/viogpu3d/viogpu_command.cpp
++++ b/viogpu/viogpu3d/viogpu_command.cpp
+@@ -310,6 +310,28 @@ void VioGpuCommand::ClearCpuCopyBlt()
+     RtlZeroMemory(m_cpuCopySubRects, sizeof(m_cpuCopySubRects));
+ }
+ 
++// Which surfaces the CPU blt takes. The source is a blob (a Venus image);
++// the destination is a GDI surface or, for Desktop Duplication, another
++// blob: dxgkrnl has DWM's context copy the desktop into a shared surface
++// that the capturing program made. Both blobs must then be mappable, so
++// that the mapping can be made in Present and cannot fail in Patch.
++static BOOLEAN VioGpuCpuCopyBltSupported(VioGpuAllocation *src,
++                                         VioGpuAllocation *dst)
++{
++    if (!src->IsBlob())
++    {
++        return FALSE;
++    }
++
++    if (!dst->IsBlob())
++    {
++        return TRUE;
++    }
++
++    return (src->GetBlobFlags() & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) &&
++           (dst->GetBlobFlags() & VIRTGPU_BLOB_FLAG_USE_MAPPABLE);
++}
++
+ NTSTATUS VioGpuCommand::SetCpuCopyBlt(VioGpuAllocation *src,
+                                       VioGpuAllocation *dst,
+                                       const RECT *srcRect,
+@@ -324,7 +346,7 @@ NTSTATUS VioGpuCommand::SetCpuCopyBlt(VioGpuAllocation *src,
+         return STATUS_INVALID_PARAMETER;
+     }
+ 
+-    if (!src->IsBlob() || dst->IsBlob())
++    if (!VioGpuCpuCopyBltSupported(src, dst))
+     {
+         return STATUS_NOT_SUPPORTED;
+     }
+@@ -583,7 +605,7 @@ static NTSTATUS VioGpuCpuCopyBltPresent(VioGpuCommand *cmd,
+         return STATUS_INVALID_PARAMETER;
+     }
+ 
+-    if (!src->IsBlob() || dst->IsBlob())
++    if (!VioGpuCpuCopyBltSupported(src, dst))
+     {
+         return STATUS_NOT_SUPPORTED;
+     }
+@@ -608,6 +630,17 @@ static NTSTATUS VioGpuCpuCopyBltPresent(VioGpuCommand *cmd,
+     const LONG dx = srcRect->left - dstRect->left;
+     const LONG dy = srcRect->top - dstRect->top;
+ 
++    if (dst->IsBlob())
++    {
++        const ULONGLONG image_offset = dst->GetScanoutOffset();
++        if (image_offset >= dst_map_size)
++        {
++            return STATUS_INVALID_PARAMETER;
++        }
++        dst_va = (PUCHAR)dst_va + image_offset;
++        dst_map_size -= image_offset;
++    }
++
+     if (copy_mode == VIOGPU_BLT_COPY_UNSUPPORTED)
+     {
+         DbgPrint(TRACE_LEVEL_WARNING,
+diff --git a/viogpu/viogpu3d/viogpu_device.cpp b/viogpu/viogpu3d/viogpu_device.cpp
+index e06d494..3e3f902 100644
+--- a/viogpu/viogpu3d/viogpu_device.cpp
++++ b/viogpu/viogpu3d/viogpu_device.cpp
+@@ -402,9 +402,13 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
+                 return stageStatus;
+             }
+             else if (src && dst &&
+-                     ((dxgk_src->SegmentId != 0 && dxgk_dst->SegmentId != 0) ||
++                     (dst->IsBlob() ||
++                      (dxgk_src->SegmentId != 0 && dxgk_dst->SegmentId != 0) ||
+                       (src->HasCpuCopyBacking() && dst->HasCpuCopyBacking())))
+             {
++                // A blob destination (Desktop Duplication) is always mapped
++                // here: a blob's mapping does not depend on residency, and a
++                // refusal must fail this Present, never the Patch.
+                 // Nonzero SegmentId is VidMm's pre-patched residency
+                 // contract: Patch may be skipped even if the blob's CPU
+                 // mapping has not been established by an earlier Present.
