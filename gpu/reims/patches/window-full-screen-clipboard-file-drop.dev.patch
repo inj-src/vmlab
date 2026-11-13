@@ -118,15 +118,15 @@
  mod render;
 --- a/crates/reims-vgpu-window/src/native/linux/agent.rs
 +++ b/crates/reims-vgpu-window/src/native/linux/agent.rs
-@@ -0,0 +1,694 @@
-+//! vmlab: the host's clipboard (text and pictures) shared with the guest, and files dropped on
-+//! the window sent to it, through a SPICE agent in the guest.
+@@ -0,0 +1,587 @@
++//! vmlab: the host's clipboard (text and pictures) shared with the guest through a SPICE agent
++//! in the guest, and files dropped on the window handed to a command that carries them there.
 +//!
 +//! QEMU gives the guest a virtio serial port named `com.redhat.spice.0` whose other end is a
 +//! Unix socket QEMU listens on; `VMLAB_AGENT_SOCKET` names it. This module is the "client" a
 +//! SPICE agent talks to (spice-protocol's `vd_agent.h`): chunks `{u32 port, u32 size}` of at
 +//! most 2048 bytes, whose payloads joined are messages `{u32 protocol, u32 type, u64 opaque,
-+//! u32 size}` and their data, all little-endian. Without the variable the module does nothing.
++//! u32 size}` and their data, all little-endian. Without the variable no clipboard is shared.
 +//!
 +//! **Threads.** A reader thread connects, reads messages and posts each to the UI thread; a
 +//! writer thread writes what the UI thread queues, so a guest that reads nothing stalls only
@@ -142,9 +142,12 @@
 +//! **Guest to host.** On the guest's `GRAB` its text and PNG are requested, one at a time (a
 +//! reply names no request), and given to SDL when all are in.
 +//!
-+//! **Files.** A file dropped on the window (`SDL_EVENT_DROP_FILE`) is announced
-+//! (`FILE_XFER_START`), sent when the agent says it can take it, and the next one starts when
-+//! the agent says how that one ended. The agent chooses where it lands (the desktop).
++//! **Files.** The files and folders of one drag onto the window (`SDL_EVENT_DROP_FILE` for
++//! each, then `SDL_EVENT_DROP_COMPLETE`) are given to the command `VMLAB_DROP_COMMAND` names, a
++//! line for `/bin/sh -c` that gets their paths as its arguments and puts them on the guest's
++//! desktop its own way (the lab's goes through SSH). They do not go through the agent: macOS
++//! stops reading its serial port some tens of megabytes into a large file, and the clipboard
++//! stops with it. Without the variable a drop is only logged.
 +
 +use std::cell::RefCell;
 +use std::collections::VecDeque;
@@ -153,8 +156,7 @@
 +use std::io::{Read, Write};
 +use std::os::unix::net::UnixStream;
 +use std::path::PathBuf;
-+use std::sync::Arc;
-+use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::OnceLock;
 +use std::sync::mpsc::{self, Receiver, Sender};
 +use std::time::{Duration, Instant};
 +
@@ -170,8 +172,6 @@
 +const CHUNK: usize = 2048;
 +/// The largest message taken or sent: a larger clipboard is not shared.
 +const MAX_MESSAGE: usize = 64 << 20;
-+/// How much of a file one message carries.
-+const PIECE: usize = 64 * 1024;
 +/// How long a clipboard request may go unanswered before a newer offer replaces it.
 +const REPLY_WAIT: Duration = Duration::from_secs(10);
 +/// How long before the socket is tried again.
@@ -182,9 +182,6 @@
 +const MSG_GRAB: u32 = 7;
 +const MSG_REQUEST: u32 = 8;
 +const MSG_RELEASE: u32 = 9;
-+const MSG_XFER_START: u32 = 10;
-+const MSG_XFER_STATUS: u32 = 11;
-+const MSG_XFER_DATA: u32 = 12;
 +const MSG_MAX_CLIPBOARD: u32 = 14;
 +
 +const TYPE_TEXT: u32 = 1;
@@ -193,10 +190,6 @@
 +/// What this side can do: clipboard by demand (5), a clipboard size limit (10), no release
 +/// before a new offer (16).
 +const CAPS: u32 = 1 << 5 | 1 << 10 | 1 << 16;
-+
-+const XFER_CAN_SEND: u32 = 0;
-+const XFER_CANCELLED: u32 = 1;
-+const XFER_SUCCESS: u32 = 3;
 +
 +const PNG_MIME: &CStr = c"image/png";
 +/// The names text is offered under, the first being the one asked of others.
@@ -208,17 +201,8 @@
 +    c"TEXT",
 +];
 +
-+/// What the writer thread writes.
-+enum Out {
-+    /// A message of this type with this data.
-+    Message(u32, Vec<u8>),
-+    /// The transfer's file, in pieces, until `cancel` is set.
-+    File {
-+        id: u32,
-+        path: PathBuf,
-+        cancel: Arc<AtomicBool>,
-+    },
-+}
++/// What the writer thread writes: a message's type and its data.
++type Out = (u32, Vec<u8>);
 +
 +/// A clipboard's content in the two forms shared.
 +#[derive(Default, Hash)]
@@ -258,14 +242,6 @@
 +    }
 +}
 +
-+/// A file on its way to the guest.
-+struct Xfer {
-+    id: u32,
-+    path: PathBuf,
-+    size: u64,
-+    cancel: Arc<AtomicBool>,
-+}
-+
 +/// The UI thread's side of the link, while the socket is connected.
 +struct Link {
 +    out: Sender<Out>,
@@ -284,26 +260,44 @@
 +    /// The request awaiting its reply: its type, whether the reply is for the current offer, and
 +    /// when it was sent.
 +    asked: Option<(u32, bool, Instant)>,
-+    /// The files to send, the first being the one in progress.
-+    xfers: VecDeque<Xfer>,
-+    next_id: u32,
 +}
 +
 +thread_local! {
 +    /// The link, on the UI thread.
 +    static LINK: RefCell<Option<Link>> = const { RefCell::new(None) };
++    /// The paths of the drag being dropped, until its `SDL_EVENT_DROP_COMPLETE`.
++    static DROPPED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
 +}
 +
-+/// Starts the link where `VMLAB_AGENT_SOCKET` names its socket. Called once, on the UI thread.
++/// The command dropped files are given to: `VMLAB_DROP_COMMAND`, a line for `/bin/sh -c`. Read
++/// once per process; none where it is unset or blank.
++fn drop_command() -> Option<&'static str> {
++    static COMMAND: OnceLock<Option<String>> = OnceLock::new();
++    COMMAND
++        .get_or_init(|| {
++            std::env::var("VMLAB_DROP_COMMAND")
++                .ok()
++                .map(|line| line.trim().to_owned())
++                .filter(|line| !line.is_empty())
++        })
++        .as_deref()
++}
++
++/// Takes dropped files where `VMLAB_DROP_COMMAND` names their command, and starts the link where
++/// `VMLAB_AGENT_SOCKET` names its socket. Called once, on the UI thread.
 +pub(crate) fn start() {
++    if drop_command().is_some() {
++        // SAFETY: SDL's video runs on this thread.
++        unsafe {
++            SDL_SetEventEnabled(SDL_EVENT_DROP_FILE.into(), true);
++            SDL_SetEventEnabled(SDL_EVENT_DROP_COMPLETE.into(), true);
++        }
++    }
 +    let Some(path) = std::env::var_os("VMLAB_AGENT_SOCKET").filter(|path| !path.is_empty()) else {
 +        return;
 +    };
-+    // SAFETY: SDL's video runs on this thread.
-+    unsafe {
-+        SDL_SetEventEnabled(SDL_EVENT_DROP_FILE.into(), true);
-+        SDL_SetEventEnabled(SDL_EVENT_CLIPBOARD_UPDATE.into(), true);
-+    }
++    // SAFETY: as above.
++    unsafe { SDL_SetEventEnabled(SDL_EVENT_CLIPBOARD_UPDATE.into(), true) };
 +    let path = PathBuf::from(path);
 +    let spawned = std::thread::Builder::new()
 +        .name("vmlab.agent-read".into())
@@ -335,7 +329,13 @@
 +            // SAFETY: as above.
 +            let path = unsafe { CStr::from_ptr(data) };
 +            let path = PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path.to_bytes()));
-+            with_link(|link| dropped(link, path));
++            DROPPED.with(|dropped| dropped.borrow_mut().push(path));
++        }
++        true
++    } else if kind == SDL_EVENT_DROP_COMPLETE.0 {
++        let paths = DROPPED.with(|dropped| std::mem::take(&mut *dropped.borrow_mut()));
++        if !paths.is_empty() {
++            dropped(paths);
 +        }
 +        true
 +    } else {
@@ -370,7 +370,7 @@
 +    ui::post(move || {
 +        // The greeting asks the agent for its own: an agent already running answers it, and
 +        // one that starts later sends its own first.
-+        let _ = out.send(Out::Message(MSG_ANNOUNCE, words(&[1, CAPS])));
++        let _ = out.send((MSG_ANNOUNCE, words(&[1, CAPS])));
 +        LINK.with(|link| {
 +            *link.borrow_mut() = Some(Link {
 +                out,
@@ -381,8 +381,6 @@
 +                wanted: VecDeque::new(),
 +                fetched: None,
 +                asked: None,
-+                xfers: VecDeque::new(),
-+                next_id: 1,
 +            });
 +        });
 +    });
@@ -434,12 +432,8 @@
 +
 +/// The writer thread's work: what is queued, in order, until the socket or the queue ends.
 +fn write_all(mut stream: UnixStream, queue: &Receiver<Out>) {
-+    while let Ok(out) = queue.recv() {
-+        let done = match out {
-+            Out::Message(kind, data) => write_message(&mut stream, kind, &data),
-+            Out::File { id, path, cancel } => write_file(&mut stream, id, &path, &cancel),
-+        };
-+        if done.is_err() {
++    while let Ok((kind, data)) = queue.recv() {
++        if write_message(&mut stream, kind, &data).is_err() {
 +            let _ = stream.shutdown(std::net::Shutdown::Both);
 +            return;
 +        }
@@ -463,48 +457,6 @@
 +    stream.write_all(&wire)
 +}
 +
-+/// Sends a file's bytes; one that cannot be read to its end is cancelled, which the agent
-+/// answers by dropping what it has.
-+fn write_file(
-+    stream: &mut UnixStream,
-+    id: u32,
-+    path: &std::path::Path,
-+    cancel: &AtomicBool,
-+) -> std::io::Result<()> {
-+    let mut piece = vec![0u8; PIECE];
-+    let read = (|| -> std::io::Result<()> {
-+        let mut file = std::fs::File::open(path)?;
-+        loop {
-+            if cancel.load(Ordering::Relaxed) {
-+                return Ok(());
-+            }
-+            let count = file.read(&mut piece)?;
-+            if count == 0 {
-+                return Ok(());
-+            }
-+            let mut data = Vec::with_capacity(12 + count);
-+            data.extend_from_slice(&id.to_le_bytes());
-+            data.extend_from_slice(&(count as u64).to_le_bytes());
-+            data.extend_from_slice(&piece[..count]);
-+            if write_message(stream, MSG_XFER_DATA, &data).is_err() {
-+                return Err(std::io::ErrorKind::BrokenPipe.into());
-+            }
-+        }
-+    })();
-+    match read {
-+        Ok(()) => Ok(()),
-+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Err(error),
-+        Err(error) => {
-+            log::warn!(
-+                target: "reims_vgpu_window",
-+                "vmlab file drop: {} could not be read: {error}",
-+                path.display()
-+            );
-+            write_message(stream, MSG_XFER_STATUS, &words(&[id, XFER_CANCELLED]))
-+        }
-+    }
-+}
-+
 +/// A message from the agent, on the UI thread.
 +fn message(link: &mut Link, kind: u32, data: &[u8]) {
 +    match kind {
@@ -514,9 +466,6 @@
 +            link.wanted.clear();
 +            link.fetched = None;
 +            link.asked = None;
-+            for xfer in link.xfers.drain(..) {
-+                xfer.cancel.store(true, Ordering::Relaxed);
-+            }
 +            if data.len() >= 4 && u32_at(data, 0) != 0 {
 +                send(link, MSG_ANNOUNCE, words(&[0, CAPS]));
 +            }
@@ -564,7 +513,6 @@
 +            }
 +            send(link, MSG_CLIPBOARD, reply);
 +        }
-+        MSG_XFER_STATUS if data.len() >= 8 => xfer_status(link, u32_at(data, 0), u32_at(data, 4)),
 +        _ => {}
 +    }
 +}
@@ -699,104 +647,49 @@
 +    clip
 +}
 +
-+/// A file was dropped on the window.
-+fn dropped(link: &mut Link, path: PathBuf) {
-+    if !link.agent {
++/// A drag's files were dropped on the window: the drop command takes them from here, with its
++/// own output (QEMU's log) and a thread that waits for it. What becomes of the files is the
++/// command's to tell the person; here it is only logged.
++fn dropped(paths: Vec<PathBuf>) {
++    let Some(command) = drop_command() else {
++        return;
++    };
++    let count = paths.len();
++    let spawned = std::process::Command::new("/bin/sh")
++        .arg("-c")
++        .arg(format!("{command} \"$@\""))
++        .arg("vmlab-drop")
++        .args(&paths)
++        .stdin(std::process::Stdio::null())
++        .spawn()
++        .and_then(|mut child| {
++            std::thread::Builder::new()
++                .name("vmlab.drop".into())
++                .spawn(move || match child.wait() {
++                    Ok(status) if status.success() => {
++                        log::info!(target: "reims_vgpu_window", "vmlab file drop: {count} taken by the drop command");
++                    }
++                    Ok(status) => {
++                        log::warn!(target: "reims_vgpu_window", "vmlab file drop: the drop command failed ({status})");
++                    }
++                    Err(error) => {
++                        log::warn!(target: "reims_vgpu_window", "vmlab file drop: the drop command was lost ({error})");
++                    }
++                })
++        });
++    if let Err(error) = spawned {
 +        log::warn!(
 +            target: "reims_vgpu_window",
-+            "vmlab file drop: {} not sent: the guest's agent is not running",
-+            path.display()
-+        );
-+        return;
-+    }
-+    let size = match std::fs::metadata(&path) {
-+        Ok(meta) if meta.is_file() => meta.len(),
-+        _ => {
-+            log::warn!(
-+                target: "reims_vgpu_window",
-+                "vmlab file drop: {} is not a file: not sent",
-+                path.display()
-+            );
-+            return;
-+        }
-+    };
-+    let id = link.next_id;
-+    link.next_id = link.next_id.wrapping_add(1).max(1);
-+    link.xfers.push_back(Xfer {
-+        id,
-+        path,
-+        size,
-+        cancel: Arc::new(AtomicBool::new(false)),
-+    });
-+    if link.xfers.len() == 1 {
-+        xfer_start(link);
-+    }
-+}
-+
-+/// Announces the first file waiting.
-+fn xfer_start(link: &mut Link) {
-+    let Some(xfer) = link.xfers.front() else {
-+        return;
-+    };
-+    let name = xfer
-+        .path
-+        .file_name()
-+        .map(|name| name.to_string_lossy().into_owned())
-+        .unwrap_or_default();
-+    // A GLib key file: its value's escapes.
-+    let mut escaped = String::new();
-+    for (index, c) in name.chars().enumerate() {
-+        match c {
-+            '\\' => escaped.push_str("\\\\"),
-+            '\n' => escaped.push_str("\\n"),
-+            '\r' => escaped.push_str("\\r"),
-+            '\t' => escaped.push_str("\\t"),
-+            ' ' if index == 0 => escaped.push_str("\\s"),
-+            c => escaped.push(c),
-+        }
-+    }
-+    let mut data = xfer.id.to_le_bytes().to_vec();
-+    data.extend_from_slice(
-+        format!("[vdagent-file-xfer]\nname={escaped}\nsize={}\n\0", xfer.size).as_bytes(),
-+    );
-+    send(link, MSG_XFER_START, data);
-+}
-+
-+/// The agent's word on the transfer `id`.
-+fn xfer_status(link: &mut Link, id: u32, result: u32) {
-+    let Some(xfer) = link.xfers.front().filter(|xfer| xfer.id == id) else {
-+        return;
-+    };
-+    if result == XFER_CAN_SEND {
-+        let out = Out::File {
-+            id,
-+            path: xfer.path.clone(),
-+            cancel: xfer.cancel.clone(),
-+        };
-+        let _ = link.out.send(out);
-+        return;
-+    }
-+    xfer.cancel.store(true, Ordering::Relaxed);
-+    if result == XFER_SUCCESS {
-+        log::info!(
-+            target: "reims_vgpu_window",
-+            "vmlab file drop: {} is on the guest's desktop",
-+            xfer.path.display()
-+        );
-+    } else {
-+        log::warn!(
-+            target: "reims_vgpu_window",
-+            "vmlab file drop: {} was not taken by the guest (status {result})",
-+            xfer.path.display()
++            "vmlab file drop: {} and {} more not sent: the drop command did not start ({error})",
++            paths[0].display(),
++            count - 1
 +        );
 +    }
-+    link.xfers.pop_front();
-+    xfer_start(link);
 +}
 +
 +/// Queues a message for the writer thread.
 +fn send(link: &Link, kind: u32, data: Vec<u8>) {
-+    let _ = link.out.send(Out::Message(kind, data));
++    let _ = link.out.send((kind, data));
 +}
 +
 +/// `values` as little-endian bytes.

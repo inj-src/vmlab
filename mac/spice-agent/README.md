@@ -11,7 +11,7 @@ A SPICE guest agent for the vmlab macOS VM (`mac`). It shares the clipboard with
 |---|---|
 | host → guest | UTF-8 text; PNG (BMP, JPEG and TIFF are converted to PNG). Text and an image offered together are both put on the pasteboard. macOS serves TIFF to apps that ask for it. |
 | guest → host | UTF-8 text; images as PNG (any pasteboard image type ImageIO reads: TIFF, JPEG, HEIC, GIF, BMP…, plus PDF, is converted, with EXIF orientation applied). A Finder file copy goes over as its text (the file name), not its icon. |
-| file drop | `FILE_XFER_*`: each file lands in `~/Desktop` once complete. Existing files are never overwritten (`name (1).ext`). Cancelled or failed transfers leave nothing behind. |
+| file drop | `FILE_XFER_*`: each file lands in `~/Desktop` once complete. Existing files are never overwritten (`name (1).ext`). Cancelled or failed transfers leave nothing behind. The lab's Mac window does not use this since 2026-11-13: its drops go over SSH (`gpu/reims/mac26.sh drop`), because the serial port stalls on large transfers (`gpu/README.md`). |
 
 Not handled: display resize (fixed framebuffer), mouse (the domain uses `<mouse mode='server'/>`, so
 spice-server never routes the mouse through the agent), audio, multiple monitors.

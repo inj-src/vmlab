@@ -15,15 +15,18 @@
 #                                             The title bar's round button, or Ctrl+Alt+F,
 #                                             fills the screen; Ctrl+Alt+F leaves it. Text and
 #                                             pictures copied on either side paste on the
-#                                             other; files dragged onto the window land on the
-#                                             guest's desktop (the guest's vmlab-spice-agent,
-#                                             ../../mac/spice-agent).
+#                                             other (the guest's vmlab-spice-agent,
+#                                             ../../mac/spice-agent); files and folders
+#                                             dragged onto the window land on the guest's
+#                                             desktop (drop, below)
 #                                           Without a window, 1920x1080
 #   mac26.sh stop                         shut macOS down
 #   mac26.sh kill                         power off now
 #   mac26.sh status                       running or not, and why QEMU ended if reims ended it
 #   mac26.sh ssh [command...]             dev@127.0.0.1 (password vmlab, passwordless sudo)
 #   mac26.sh scp SRC... DEST              copy files; the guest is dev@127.0.0.1:PATH
+#   mac26.sh drop PATH...                 files and folders onto the guest's desktop, as a drag
+#                                         onto the window does it
 #   mac26.sh gui shot FILE.png | click X Y | type 'text' | key cmd+q ...   (qdrive.py)
 #   mac26.sh reset [--discard]            back to the clean snapshot
 #   mac26.sh commit                       make the disk as it is the clean snapshot
@@ -163,13 +166,15 @@ start(){
   [[ -n ${MAC26_TRACE:-} ]] && sed -i "s|^export REIMS_VGPU_LOG=|export REIMS_VGPU_TRACE=$MAC26_TRACE\n&|" "$V/run.sh"
   local env=()
   if (( window )); then
-    for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
+    for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
     # As the user asked for both VMs: the window opens maximized (our switch in reims' window
     # code, ../README.md).
     # SDL_APP_ID: the desktop's icon for the window (vmlab-macos26.desktop); _TITLE: its
-    # title (also ours). VMLAB_AGENT_SOCKET: the clipboard and file drop (above).
+    # title (also ours). VMLAB_AGENT_SOCKET: the clipboard (above). VMLAB_DROP_COMMAND: what
+    # the window gives dropped files to (drop, below).
     env+=(--setenv=REIMS_VGPU_WINDOW_MAXIMIZED=1 --setenv=SDL_APP_ID=vmlab-macos26
-      --setenv="REIMS_VGPU_WINDOW_TITLE=macOS 26 Tahoe" --setenv="VMLAB_AGENT_SOCKET=$V/agent.sock")
+      --setenv="REIMS_VGPU_WINDOW_TITLE=macOS 26 Tahoe" --setenv="VMLAB_AGENT_SOCKET=$V/agent.sock"
+      --setenv="VMLAB_DROP_COMMAND=$(readlink -f "$0") drop")
     # The guest keeps the resolution it starts with (our switch too, ../README.md): reims' own
     # window makes every resize a new macOS resolution.
     env+=(--setenv="REIMS_VGPU_WINDOW_MODE=${MAC26_WINDOW_SIZE:-first}")
@@ -252,10 +257,107 @@ closed(){
   echo "mac26 $(date +%T): macOS still up after 30 s: powering off"; exit 1
 }
 
+# Files and folders dragged onto the window: run by reims' window code inside QEMU's unit
+# (VMLAB_DROP_COMMAND) with one drag's paths. They go to macOS as a tar stream over SSH into a
+# folder of their own on the desktop's volume, and move onto the desktop once all of them are
+# whole, each under a free name ("name 2.ext", as the Finder numbers them). Not through the
+# SPICE agent: macOS stops reading its serial port some tens of megabytes into a file
+# (../README.md). A drag that takes more than 2 s says so in a desktop notification, which its
+# end replaces; a failure always does. Its lines go to qemu.log.
+#
+# place.sh: what moves a drag's folder onto the desktop, read by /bin/sh in the guest.
+drop_place='
+s="$HOME/Library/Caches/vmlab-drop/$1"; d="$HOME/Desktop"
+cd "$s" || exit 1
+left=0
+for n in * .[!.]* ..?*; do
+  [ -e "$n" ] || [ -L "$n" ] || continue
+  case $n in ?*.?*) stem=${n%.*} ext=.${n##*.} ;; *) stem=$n ext= ;; esac
+  # a folder keeps its whole name before the number, but for an app
+  if [ -d "$n" ] && [ ! -L "$n" ]; then case $n in *.app) ;; *) stem=$n ext= ;; esac; fi
+  t=$n; i=2
+  while [ -e "$d/$t" ] || [ -L "$d/$t" ]; do t="$stem $i$ext"; i=$((i + 1)); done
+  if mv -n -- "./$n" "$d/$t"; then printf "%s\\n" "$t"; else left=1; fi
+done
+cd / && rmdir "$s" && exit $left'
+# gv TEXT: TEXT as a GVariant string, for gdbus
+gv(){ local t=${1//\\/\\\\}; t=${t//\"/\\\"}; t=${t//$'\n'/ }; printf '"%s"' "$t"; }
+# drop_note ID SUMMARY BODY [transient]: a desktop notification in the VM's name, in place of
+# the one with that id (0: a new one). Prints its id. Silent where the desktop has none.
+drop_note(){
+  local hints="{'desktop-entry': <'vmlab-macos26'>"
+  [[ -n ${4:-} ]] && hints+=", 'transient': <true>"
+  gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+    --method org.freedesktop.Notifications.Notify '"macOS 26 Tahoe"' "uint32 $1" '""' "$(gv "$2")" "$(gv "$3")" \
+    '[]' "$hints}" 'int32 -1' 2>/dev/null | sed -n 's/^(uint32 \([0-9]*\),)$/\1/p' || true
+}
+# drop_send ID [-h] PATH...: the paths into the drag's folder in the guest. -h: what a link
+# points at, not the link. tar's 1 (a file changed while it was read) passes.
+drop_send(){
+  local id=$1 f; shift
+  local -a tar=(tar -cf - --format=posix) st
+  [[ $1 == -h ]] && { tar+=(-h); shift; }
+  # ./NAME: a name may start with a dash, and "--" would end tar's options, -C among them
+  for f in "$@"; do tar+=(-C "$(dirname -- "$f")" "./$(basename -- "$f")"); done
+  # folders a drag left behind (the VM powered off in the middle) go after a day
+  "${tar[@]}" | guest "mkdir -p Library/Caches/vmlab-drop/$id && cd Library/Caches/vmlab-drop &&
+    find . -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + && tar -xf - -C $id"
+  st=("${PIPESTATUS[@]}"); (( st[0] <= 1 && st[1] == 0 ))
+}
+# drop_land ID: the drag's folder onto the desktop; the names they got are added to `landed`.
+drop_land(){
+  local names st=0
+  names=$(guest /bin/sh -s -- "$1" <<< "$drop_place") || st=1
+  landed+=$names$'\n'; return $st
+}
+drop(){
+  (( $# )) || die "usage: mac26.sh drop PATH..."
+  local f b what id t timer nid=0 why="" landed="" ok=1
+  local -a main=() alone=(); local -A seen=()
+  [[ $# == 1 ]] && what=$(basename -- "$1") || what="$# items"
+  for f in "$@"; do
+    f=$(realpath -s -- "$f"); b=${f##*/}
+    # one tar for the drag, but for a link (followed) and a name the drag has twice
+    if [[ -L $f || -n ${seen[$b]:-} ]]; then alone+=("$f"); else main+=("$f"); seen[$b]=1; fi
+  done
+  id=$(date +%s)-$$
+  t=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/vmlab-drop.XXXXXX")
+  # the notification that it is under way, unless the end comes first (the lock says which)
+  ( sleep 2; mkdir "$t/lock" 2>/dev/null || exit 0; drop_note 0 "Copying to the Mac" "$what" > "$t/id" ) &
+  timer=$!
+  if ! alive; then why="the Mac is not running"
+  elif ! guest true 2>/dev/null; then why="macOS does not answer yet"
+  else
+    if (( ${#main[@]} )); then { drop_send "$id" "${main[@]}" && drop_land "$id"; } 2> "$t/err" || ok=0; fi
+    # each of these lands by itself, so that two of one name both do
+    for f in "${alone[@]}"; do
+      (( ok )) || break
+      if [[ -L $f ]]; then drop_send "$id" -h "$f"; else drop_send "$id" "$f"; fi 2>> "$t/err" &&
+        drop_land "$id" 2>> "$t/err" || ok=0
+    done
+    if (( ! ok )); then
+      why=$(grep -v -e '^$' -e 'due to previous errors' -e 'from previous errors' "$t/err" | tail -1 | cut -c1-200) || true
+      why=${why#tar: }; why=${why#"./$what: "}; why=${why:-it did not get there}
+      guest "rm -rf Library/Caches/vmlab-drop/$id" 2>/dev/null || true
+    fi
+  fi
+  if mkdir "$t/lock" 2>/dev/null; then kill "$timer" 2>/dev/null || true
+  else wait "$timer" || true; nid=$(< "$t/id"); fi
+  rm -f "$t/id" "$t/err"; rmdir "$t/lock" "$t"
+  landed=$(grep -v '^$' <<< "$landed" | paste -sd'|' | sed 's/|/, /g') || true
+  if [[ -n $why ]]; then
+    drop_note "${nid:-0}" "Not copied to the Mac" "$what: $why${landed:+ (on the desktop: $landed)}" > /dev/null
+    echo "mac26 $(date +%T): drop: $what not copied: $why${landed:+ (on the desktop: $landed)}"; exit 1
+  fi
+  (( ${nid:-0} )) && drop_note "$nid" "On the Mac's desktop" "$landed" transient > /dev/null
+  echo "mac26 $(date +%T): drop: on the desktop: $landed"
+}
+
 case ${1:-} in
   start) shift; start "$@" ;;
   stop) stop ;;
   closed) closed ;;
+  drop) shift; drop "$@" ;;
   kill) systemctl --user stop "$UNIT" 2>/dev/null || true; echo killed ;;
   status) alive && echo running || { echo "not running"
     # QEMU ends itself where reims cannot do what the guest asked; say so (../README.md)

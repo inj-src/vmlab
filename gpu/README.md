@@ -458,22 +458,35 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
 - **Full screen, clipboard, files** (2026-11-12): the title bar's round button or Ctrl+Alt+F
   fills the screen, and Ctrl+Alt+F leaves it; macOS takes the screen's pixels and gives them
   back (1920×1008 ↔ 1920×1080 in the test rig, at 100% and at 125%; `Pin` keeps a mode per
-  scale and per full screen state). Text and pictures copy both ways and files dragged onto the
-  window land on the guest's desktop: `native/linux/agent.rs` speaks the SPICE agent protocol
-  over `VMLAB_AGENT_SOCKET` to a `virtserialport` named `com.redhat.spice.0`, which the guest's
-  vmlab-spice-agent opens. Checked in the rig: text and a PNG each way byte for byte, two files
-  dropped (37 bytes and 3 MB). All of it is `patches/window-full-screen-clipboard-file-drop.dev.patch`.
-  - **Large files do not arrive (seen 2026-11-13, not fixed):** an 83 KB drop landed, a 1.4 GB
-    one stalled after at most 5 s and the agent discarded the partial file ("no data for 20 s"
-    in `~/Library/Logs/vmlab-spice-agent.log`). Evidence from that run: the agent was idle in
-    its run loop (`sample`), QEMU had used every receive buffer the guest offered on the
-    port's queue (`x-query-virtio-queue-status`, queue 4: last-avail = used = 40026) and
-    199072 bytes sat unread in QEMU's end of `agent.sock`. So macOS' serial path
-    (AppleVirtIO, IOSerialFamily, the tty) stopped taking data; why is not known. A flush of
-    that tty's input queue gave the same stall before (comment in the agent's `Port.swift`).
-    The window's writer then blocks in the middle of the file, and with it the host-to-guest
-    clipboard until the VM restarts. Nothing larger than 3 MB was ever tested. Until this is
-    fixed, large files go through `/vmlab/share` (`~/share` in the guest).
+  scale and per full screen state). Text and pictures copy both ways: `native/linux/agent.rs`
+  speaks the SPICE agent protocol over `VMLAB_AGENT_SOCKET` to a `virtserialport` named
+  `com.redhat.spice.0`, which the guest's vmlab-spice-agent opens. Checked in the rig: text and
+  a PNG each way byte for byte. The window's side is
+  `patches/window-full-screen-clipboard-file-drop.dev.patch`.
+  - **Files and folders dragged onto the window land on the guest's desktop, over SSH**
+    (2026-11-13). The window gives one drag's paths to `VMLAB_DROP_COMMAND` (`mac26.sh drop`,
+    which also works by hand): a tar stream over SSH into `~/Library/Caches/vmlab-drop/` in
+    the guest, then a move onto `~/Desktop` under a free name (`name 2.ext`, as the Finder
+    numbers them; nothing is overwritten). Nothing in the guest takes part but sshd, so it
+    works in every saved state. A drag longer than 2 s shows a desktop notification
+    ("Copying to the Mac", then "On the Mac's desktop"); a failure always shows one. Checked
+    in the rig through the window: 11 bytes, 40 MB, a folder, and 1.5 GB (about 10 s, same
+    SHA-256); by hand also links, a name starting with a dash, two files of one name, an
+    `.app` folder and a missing file. Links inside a folder stay links; a dragged link sends
+    what it points at.
+  - **The agent's serial port stalls at random; the clipboard still uses it (not fixed).**
+    macOS stops offering receive buffers on the port's queue (`x-query-virtio-queue-status`,
+    queue 4: last-avail = shadow-avail = used) while the agent sits idle in its run loop and
+    about 200 KB wait unread in QEMU's end of `agent.sock`. Seen 2026-11-13 after 82 MB (a
+    1.4 GB file, when files still went this way), after 8 MB (a 20 MB picture on the
+    clipboard) and after 128 MB (below). From then on nothing copied on the host reaches the
+    guest, and nothing comes back, until the guest restarts; closing and reopening the port
+    let data through again once. Text and ordinary screenshots are far below these sizes, but
+    the bytes add up over a long session. Tried: `CRTS_IFLOW` on the port (the agent opens it
+    with no flow control): a 55 MB, a 20 MB and a 55 MB picture then arrived whole, and the
+    port stalled on the next request, so it is no fix and is not in the agent. A fix would
+    move the agent off the serial port (a TCP connection to the host through the VM's
+    network), which means a new agent in the guest and so a new clean state.
   - **Keyboard and pointer**: the Windows window's rule ("Keyboard and pointer" there). Every
     key goes to macOS while the window has the keyboard (Super is Command: Cmd+Space, Cmd+Tab),
     the pointer is never held, there is no release chord, and GNOME asks "Allow inhibiting
