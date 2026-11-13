@@ -41,7 +41,12 @@
 #                                       Chrome's GPU process crashes (guest-scripts/d3d12-mode.ps1).
 #                                       Restart Windows after a change
 #   win-venus.sh reset [--discard]      drop this run's changes: the next start is the ready state
-#   win-venus.sh commit [--drop-states] make the stopped VM's disk the ready state (reset's target)
+#   win-venus.sh commit [--keep-states|--drop-states]
+#                                       make the stopped VM's disk the ready state (reset's
+#                                       target). Named states stand on the ready state:
+#                                       --keep-states moves them to the new one, each as it was
+#                                       (it grows by what the commit changed); --drop-states
+#                                       deletes them
 #   win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list
 #                                       named states (`vm save`, `vm states`; ../states.sh): the
 #                                       stopped VM's disk kept under a name, and put back
@@ -64,7 +69,8 @@ S=/vmlab/run/win-venus            # sockets, pid files, logs, firmware variables
 # Named states: NAME.qcow2 is a run's disk kept as it was (the changes since READY, so each is
 # as large as what its run wrote) and NAME.vars.fd its firmware variables. Loading one copies
 # it to DISK: on this XFS disk a copy shares its blocks (reflink), so it takes no time or room.
-# They are written on READY: whatever changes READY (commit, setup) makes them unusable.
+# They are written on READY: whatever changes READY (commit, setup) makes them unusable,
+# unless they are moved with it (commit --keep-states).
 STATES=/vmlab/images/states/win ST_VM=win
 # A trial on other files (setup-ready.sh) has nothing to do with them, or with their marks
 [[ -z ${WIN_VENUS_READY:-}${WIN_VENUS_DISK:-} ]] || STATES=$S/trial-states
@@ -259,6 +265,28 @@ guest_scale(){
 guest_mode(){
   ssh_guest "Remove-Item Env:PSModulePath; powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\run-interactive.ps1 -TimeoutSec 30 -Command 'C:\\vmlab\\set-mode.ps1 $1'; exit \$LASTEXITCODE"; }
 
+# commit --keep-states. A state is its changes to READY, so READY may not change under it:
+# before the commit each state is pointed at a copy of READY as it is (states_hold: the same
+# content under another name, and a reflink copy takes no room), and after it each is moved to
+# the new READY (states_release: qemu-img copies into the state what the commit changed
+# underneath it, so the state reads as before). A state not moved yet stays whole on the copy,
+# and the next commit moves it.
+READY_HELD=${READY%.qcow2}.held.qcow2
+states_hold(){ local f
+  [[ -e $READY_HELD ]] || cp --reflink=always "$READY" "$READY_HELD" || die "no copy of the ready state: nothing was changed"
+  for f in "$STATES"/*.qcow2; do
+    [[ $(backing_of "$f") == "$READY" ]] || continue
+    qemu-img rebase -u -q -f qcow2 -F qcow2 -b "$READY_HELD" "$f"
+  done; }
+states_release(){ local f
+  [[ -e $READY_HELD ]] || return 0
+  for f in "$STATES"/*.qcow2; do
+    [[ -f $f && $(backing_of "$f") == "$READY_HELD" ]] || continue
+    qemu-img rebase -q -f qcow2 -F qcow2 -b "$READY" "$f" ||
+      die "state $(basename "$f" .qcow2) was not moved to the new ready state (disk full?). It is whole, on $READY_HELD; 'win-venus.sh commit --keep-states' tries again"
+  done
+  rm -f "$READY_HELD"; }
+backing_of(){ qemu-img info --output=json "$1" | python3 -I -c 'import json, sys; print(json.load(sys.stdin).get("backing-filename", ""))'; }
 state_names(){ local f n=(); for f in "$STATES"/*.qcow2; do [[ -f $f ]] && n+=("$(basename "$f" .qcow2)"); done; echo "${n[*]:-none}"; }
 
 case ${1:-} in
@@ -308,16 +336,21 @@ case ${1:-} in
     rm -f "$DISK" "$S/OVMF_VARS.fd"; st_mark clean
     echo "this run's changes dropped: the next start is the ready state" ;;
   commit) alive qemu && die "stop it first"
+    [[ ${2:-} =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: win-venus.sh commit [--keep-states|--drop-states]"
+    [[ ${2:-} != --keep-states ]] || states_release   # what an earlier commit left unmoved
     [[ -f $DISK && -f $READY ]] || die "nothing to commit"
     # The named states are changes to READY as it is now: on another READY they are a broken disk
     if compgen -G "$STATES/*.qcow2" > /dev/null; then
-      [[ ${2:-} == --drop-states ]] ||
-        die "the ready state has named states on it, which a commit makes unusable: $(state_names). Save again what is needed afterwards and commit with --drop-states"
-      rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note
+      case ${2:-} in
+        --keep-states) states_hold ;;
+        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$READY_HELD" ;;
+        *) die "the ready state has named states on it, which a commit alone makes unusable: $(state_names). Commit with --keep-states (they stay as they are and grow by what the commit changed) or --drop-states (they are deleted)" ;;
+      esac
     fi
     qemu-img commit -q "$DISK"; rm -f "$DISK"
     [[ -f $S/OVMF_VARS.fd ]] && cp "$S/OVMF_VARS.fd" "$READY_VARS"
     st_mark clean
+    [[ ${2:-} != --keep-states ]] || states_release
     echo "committed: $READY is the ready state" ;;
   state) alive qemu && [[ ${2:-} != list && ${2:-} != rm ]] && die "stop it first"
     case ${2:-} in

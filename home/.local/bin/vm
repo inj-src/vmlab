@@ -124,7 +124,7 @@ cmd_reset(){
 cmd_commit(){
   # Make the stopped VM's disk as it is now the clean state that reset returns to.
   local n=$1 flag=${2:-}; need "$n"
-  [[ -z $flag || $flag == --drop-states ]] || die "usage: vm commit <name> [--drop-states]"
+  [[ $flag =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: vm commit <name> [--keep-states|--drop-states]"
   [[ $(state_of "$n") != running ]] || die "stop $n first"
   "${RUN[$n]}" commit $flag >/dev/null || exit 1
   echo "$n: its disk as it is now is the clean state"
@@ -465,8 +465,9 @@ vm reset <name> [--discard]    discard all changes since the clean state (VM mus
                                A VM that ran on a named state and was not saved since is
                                only reset with --discard
 vm commit <name>               make the current state the new clean state (VM must be stopped).
-                               win: its named states are built on the clean state and a
-                               commit ends them: --drop-states deletes them with it
+                               win: its named states stand on the clean state.
+                               --keep-states moves them to the new one, each as it was;
+                               --drop-states deletes them
 vm save <name> <state> [note]  keep the stopped VM's disk as it is under a name, beside the
                                clean state. --replace writes over a state of that name
 vm note <name> <state> text    the line of text the list shows beside a state

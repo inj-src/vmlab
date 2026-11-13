@@ -344,7 +344,13 @@ state the disk is on and whether it ran since. A VM that ran on a named state an
 saved since is not reset or loaded over without `--discard`.
 
 The states are changes to this ready state: on another one they are a broken disk. `$W commit`
-therefore refuses while states exist (`--drop-states` deletes them with it), and `$W setup`
+therefore refuses while states exist, unless told what to do with them. `--keep-states` moves
+them along: each state is pointed at a copy of the ready state as it is (`win11-ready.held.qcow2`,
+a reflink), the commit runs, and `qemu-img rebase` moves each state to the new ready state,
+copying into it whatever the commit changed underneath. A state then reads as before the
+commit, without the commit's change, and has grown by about the commit's size; with the two
+states of 2026-11-13 it took 2 minutes. A state that could not be moved stays whole on the
+copy and the next `commit --keep-states` moves it. `--drop-states` deletes the states. `$W setup`
 asks for `vm clear win --all` first. Its trial runs (`WIN_VENUS_READY`, `WIN_VENUS_DISK`) keep
 their marks in `/vmlab/run/win-venus/trial-states`, away from the real ones.
 
