@@ -31,7 +31,10 @@ def ssh(os_, cmd, timeout=180):
     """Run a command in the VM (win: Windows PowerShell 5.1, mac: zsh). Returns (rc, stdout)."""
     ip, port = vm_addr(os_)
     args = ["ssh", "-i", str(KEY), "-o", f"UserKnownHostsFile={KNOWN}", "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=8", "-o", "LogLevel=ERROR", "-p", port, f"dev@{ip}"]
+            "-o", "ConnectTimeout=8", "-o", "LogLevel=ERROR", "-p", port]
+    if os_ == "win":
+        args += ["-o", "SetEnv=VMLAB_SHELL=pwsh"]  # PowerShell, not the default Git Bash
+    args.append(f"dev@{ip}")
     if os_ == "win":
         # Always go through an explicit powershell.exe so the DefaultShell setting doesn't matter.
         import base64
