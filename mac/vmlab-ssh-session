@@ -1,0 +1,27 @@
+#!/bin/sh
+# vmlab-ssh-session: sshd's ForceCommand for dev on the Mac VM (/etc/ssh/sshd_config.d/
+# 100-vmlab.conf; set up by desktop-ssh.sh). It runs what the SSH client asked for in dev's GUI
+# login session, the one with the Dock and the windows, as dev: `open`, the pasteboard, the
+# login keychain and dev's launchd services then work as in Terminal. sudo needs no password.
+#
+# A command runs in a zsh login shell (as `vm run mac` ran scripts: Homebrew-style PATH entries
+# from .zprofile are there); no command gives an interactive login shell. sftp (scp too) is
+# passed straight to sftp-server. Until dev is logged in (auto-login, seconds after boot) a
+# session runs where sshd started it.
+cmd=$SSH_ORIGINAL_COMMAND
+case $cmd in
+  /usr/libexec/sftp-server*|internal-sftp*) exec /usr/libexec/sftp-server ;;
+esac
+
+if [ -n "$cmd" ]; then set -- /bin/zsh -lc "$cmd"; else set -- /bin/zsh -l; fi
+
+uid=$(id -u)
+if launchctl print "gui/$uid" >/dev/null 2>&1; then
+  # launchctl asuser needs root; the second sudo goes back to dev. sudo empties the
+  # environment, so the variables a session is expected to have are passed on.
+  exec sudo -n launchctl asuser "$uid" sudo -n -u "$(id -un)" -H /usr/bin/env \
+    TERM="${TERM:-dumb}" LANG="${LANG:-en_US.UTF-8}" \
+    SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" ${SSH_TTY:+SSH_TTY="$SSH_TTY"} \
+    "$@"
+fi
+exec "$@"
