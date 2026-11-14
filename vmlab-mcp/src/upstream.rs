@@ -318,6 +318,12 @@ pub async fn connect(
         }
         tracing::info!(%machine, %ip, port, "connecting");
         let mut c = tokio::process::Command::new("ssh");
+        // win's sessions are Git Bash unless they ask for pwsh, which remote_command is
+        // written in (win/vmshell). Every vmlab-mcp sends it for win, so the shared mux masters
+        // carry it.
+        if matches!(machine, Machine::Win) {
+            c.args(["-o", "SetEnv=VMLAB_SHELL=pwsh"]);
+        }
         c.args(ssh_args(cfg, ip, port)).arg(remote_command(machine));
         c
     };

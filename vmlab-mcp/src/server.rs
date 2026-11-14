@@ -26,7 +26,8 @@ Windows' injected mark). Every tool takes a required \
 start it with `vm start <name>` (one VM at a time; see /vmlab/tools/vmlab/AGENTS.md). Each \
 session keeps its own Cua connection per VM, so element refs and Cua sessions persist between \
 calls until the VM reboots. Check outcomes yourself in the VM when it matters: `ssh win \
-\"<command>\"` or `ssh mac \"<command>\"` (a script on stdin; both run on the VM's desktop). \
+\"<command>\"` (Git Bash; `ssh win-pwsh` for PowerShell) or `ssh mac \"<command>\"` (zsh); a \
+script on stdin; both run on the VM's desktop. \
 In an Electron window, type with delivery_mode \"foreground\" and read a field back \
 before trusting a tool's success (see AGENTS.md).";
 
