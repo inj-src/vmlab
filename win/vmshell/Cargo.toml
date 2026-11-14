@@ -1,0 +1,9 @@
+[package]
+name = "vmshell"
+version = "0.1.0"
+edition = "2021"
+description = "OpenSSH's DefaultShell on the vmlab Windows VM: pwsh, outside sshd's job object"
+
+[profile.release]
+opt-level = "s"
+strip = true
