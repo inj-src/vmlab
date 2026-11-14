@@ -1,7 +1,7 @@
 # etest.ps1 x64|ia32 [plain|webgpu|venc|on12]: run the Electron test app in the guest's desktop
 # session and report its GPU process. On the host: an Electron release unpacked to
 # /vmlab/share/etest/<arch>, and main.js, package.json and ../venc.html in /vmlab/share/etest/app.
-# Then: vm ssh win 'pwsh -File C:\share\etest\etest.ps1 x64 venc'
+# Then: ssh win-pwsh 'pwsh -File C:\share\etest\etest.ps1 x64 venc'
 param([ValidateSet('x64', 'ia32')][string]$Arch = 'x64', [ValidateSet('plain', 'webgpu', 'venc', 'on12')][string]$Variant = 'plain')
 $dir = "C:\Users\dev\etest"; $out = "$dir\result-$Arch.txt"
 # Chromium switches that make the GPU process load d3d12.dll, which a plain Electron does not do

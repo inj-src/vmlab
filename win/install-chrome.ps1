@@ -1,5 +1,5 @@
 # install-chrome.ps1: Google Chrome for the test VM, with no sign-in, sync, promos or update churn.
-# Run over `vm ssh win` with Windows PowerShell (needs admin, works from SSH's session):
+# Run over `ssh win-pwsh` with Windows PowerShell (needs admin, works from SSH's session):
 #   powershell -NoProfile -File C:\vmlab\install-chrome.ps1
 # Afterwards, from the desktop: launch Chrome once to clear anything first-run left, then make it
 # the default browser in Settings > Apps > Default apps > Google Chrome > Set default (Windows

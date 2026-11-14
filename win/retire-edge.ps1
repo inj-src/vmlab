@@ -1,5 +1,5 @@
 # retire-edge.ps1: take Microsoft Edge out of the way without uninstalling it, keep WebView2.
-# Run over `vm ssh win` with PowerShell 7:  pwsh -NoProfile -File C:\vmlab\retire-edge.ps1
+# Run over `ssh win-pwsh` with PowerShell 7:  pwsh -NoProfile -File C:\vmlab\retire-edge.ps1
 # Why not uninstall: Edge's setup.exe only uninstalls in the EEA, and switching DeviceRegion to
 # Ireland (even with a reboot) still returns 532 "Stable is not uninstallable for process"; the
 # region seems fixed at first setup. Removing it anyway needs unofficial hacks that Windows repairs.

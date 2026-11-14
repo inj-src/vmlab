@@ -1,4 +1,4 @@
-# debloat.ps1: conservative cleanup of the Windows test VM. Run over `vm ssh win` with Windows
+# debloat.ps1: conservative cleanup of the Windows test VM. Run over `ssh win-pwsh` with Windows
 # PowerShell (Appx cmdlets are most reliable there):  powershell -NoProfile -File C:\vmlab\debloat.ps1
 # Removes consumer apps nobody tests against, quiets suggestions and telemetry, and leaves the
 # platform alone: Store, Notepad, Calculator, Paint, Terminal, Photos, Snipping Tool, Windows Search,

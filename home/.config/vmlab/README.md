@@ -12,7 +12,7 @@ Each VM is run by its own launcher, which `vm` calls: `/vmlab/tools/vmlab/gpu/wi
 
 Electron 38 "Bench Form".
 
-- `win`: `C:\vmlab\bench-app`. Start it with `ssh win 'C:\vmlab\bench-app\start.ps1'`.
+- `win`: `C:\vmlab\bench-app`. Start it with `ssh win-pwsh 'C:\vmlab\bench-app\start.ps1'`.
 - `mac`: `~/vmlab/bench-app`. Start it with `open -n ~/vmlab/bench-app/node_modules/electron/dist/Electron.app --env BENCH_DIR=$HOME/bench --args ~/vmlab/bench-app`.
 
 ## When a VM lacks something you need
@@ -32,14 +32,14 @@ The user's word on this (2026-11-12): when the work needs something the VMs don'
 
 ## Gotchas
 
-- **Windows PowerShell 5.1 from SSH** needs a clean module path: `Remove-Item Env:PSModulePath; powershell …`. Otherwise core cmdlets such as `Get-FileHash` are missing, and `run-interactive.ps1` fails that way.
+- **Windows PowerShell 5.1 from `ssh win-pwsh`** needs a clean module path: `Remove-Item Env:PSModulePath; powershell …`. Otherwise core cmdlets such as `Get-FileHash` are missing, and `run-interactive.ps1` fails that way.
 - **Windows Direct3D 12:** a native program gets a device through a bridge to Vulkan; Chromium gets no WebGPU adapter on the GPU. See [When a VM lacks something you need](#when-a-vm-lacks-something-you-need).
 - **Windows screen capture:** DXGI Desktop Duplication works (fixed 2026-11-14; before, a capture tool showed black). ffmpeg's `ddagrab` fails for another reason (it wants a Direct3D 11 device with video support); use `ffmpeg -f gdigrab -i desktop`. Not tried: a second or rotated output, capture while a full-screen game runs. `gpu/README.md`, "Desktop Duplication", has the test.
-- **Windows `Path` over SSH:** sshd runs as dev from its logon, and its environment is the one of that logon. The PowerShell profile therefore rebuilds `Path` from the registry in each SSH session, so a tool installed in one call is found in the next; other variables set since logon are not there until Windows restarts.
+- **Windows `Path` over SSH:** sshd runs as dev from its logon, and its environment is the one of that logon. vmshell (the SSH shell, `win/vmshell`) therefore reads `Path` from the registry for each session, so a tool installed in one call is found in the next; other variables set since logon are not there until Windows restarts.
 - **Windows features:** Windows Update is disabled, so `Add-WindowsCapability` and the Store fail. Use winget, or GitHub MSIs.
 - **Node 26 and Electron's postinstall:** the electron package's zip extraction can exit early, leaving `node_modules/electron/dist` with only `locales/`. Fix it by extracting the cached zip from `C:\cache\electron` with `tar -xf` into `dist`, then writing `electron.exe` to `path.txt`.
-- **Electron's output through a pipe:** started with its output piped through PowerShell, Electron's main process dies with EPIPE once the pipe's reader is gone. Over `ssh` the output is such a pipe: start Electron with `Start-Process … -RedirectStandardOutput <log>`, which also gives a program that stays its own log.
-- **Node versions on Windows:** `fnm install <n>` makes its first version fnm's default, and that would replace Node 26 in every new shell. The PowerShell 7 profile (`C:\Program Files\PowerShell\7\profile.ps1`) therefore ends with `fnm use system`: Node 26 unless a command says `fnm use <n>`. Nothing switches at `cd`.
+- **Electron's output through a pipe:** Electron's main process dies with EPIPE once the reader of its output pipe is gone. Over `ssh` the output is such a pipe: start Electron with its output in a file (`nohup <electron> . > /tmp/app.log 2>&1 &`), which also gives a program that stays its own log.
+- **Node versions on Windows:** `fnm install <n>` makes its first version fnm's default, and that would replace Node 26 in every new shell. The PowerShell 7 profile (`C:\Program Files\PowerShell\7\profile.ps1`) therefore ends with `fnm use system`, and Git Bash does the same at its first `fnm` command (`C:\vmlab\bash-env.sh`, read through `~/.bashrc`): Node 26 unless a command says `fnm use <n>`. Nothing switches at `cd`.
 - **PostgreSQL's installer and winget:** EDB's download server answers winget with 403. `win/install-postgres.ps1` takes the address and the hash from `winget show` and downloads with `curl.exe`.
 - **A forward that is taken:** Windows' sshd accepts a second forward of a port that is in use and says nothing, so `vm forward` checks this machine's own forwards first.
 - **Killing processes by command line:** `pkill -f <pattern>` (and the PowerShell equivalent, filtering on `CommandLine -match`) also matches the shell that runs it, so the command kills itself. Anchor the pattern (`^ssh .*`) or filter by process name.

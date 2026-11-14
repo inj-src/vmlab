@@ -6,13 +6,13 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 | Name  | Guest                                                                                                                                                     | Inside it                                                                                                                                                                                                                                    |
 | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); Direct3D 12 for native programs through a bridge to Vulkan; no WebGPU on the GPU. Screen capture with Desktop Duplication works. | OpenSSH (default shell: pwsh 7), Git, Node 26 LTS, pnpm 12, fnm, PostgreSQL 16, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
+| `win` | Windows 11 Pro 26300, x64. Defender and Windows Update are disabled. GPU: Direct3D 9 to 11, OpenGL and Vulkan (so WebGL works); Direct3D 12 for native programs through a bridge to Vulkan; no WebGPU on the GPU. Screen capture with Desktop Duplication works. | OpenSSH (Git Bash; PowerShell 7 as `win-pwsh`), Git, Node 26 LTS, pnpm 12, fnm, PostgreSQL 16, Python 3.12, uv, Rust 1.99 (MSVC target; Visual Studio 2022 Build Tools with the C++ tools and the Windows 11 SDK; clippy, rustfmt), 7-Zip, VS Code, Chrome (default browser), Cua Driver |
 | `mac` | macOS Tahoe 26.7, x64 (Intel). Automatic updates are off. GPU: Metal 3.                                                                                   | Remote Login (zsh), Xcode Command Line Tools (git, clang, swiftc; not Xcode itself), Node 26 LTS (`/usr/local/bin`), Python 3.12 and uv, Rust 1.99 (clippy, rustfmt), VS Code, Chrome (default browser), Cua Driver.                         |
 
 - Login on both: user `dev`, password `vmlab`. It is an admin account and logs in automatically.
 - Each VM has 6 CPUs and 8 GB, a 1920×1080 screen when it runs without a window, and internet.
-- `win` is set up for testing, not like a customer's PC: Defender antivirus and Windows Update are off. For a test that depends on the antivirus (an installer, a first launch, a flagged binary), use the saved state with Defender on: `vm start win defender`. Its definitions are of 2026-11-12, and real-time protection comes on some seconds after SSH answers (wait for `(Get-MpComputerStatus).RealTimeProtectionEnabled`). When a result depends on Windows Update, say in your report that the VM could not show it.
-- SmartScreen is on in every state of `win`. Its "Windows protected your PC" box appears only for a file that carries the Mark-of-the-Web and is started through Explorer, so a file you built in the VM or copied in with `scp` or `vm push` starts without it. To see what a customer's download does, mark the file first: `Set-Content -Path app.exe -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'`, then `ssh win 'explorer.exe app.exe'`.
+- `win` is set up for testing, not like a customer's PC: Defender antivirus and Windows Update are off. For a test that depends on the antivirus (an installer, a first launch, a flagged binary), use the saved state with Defender on: `vm start win defender`. Its definitions are of 2026-11-12, and real-time protection comes on some seconds after SSH answers (wait for `ssh win-pwsh '(Get-MpComputerStatus).RealTimeProtectionEnabled'`). When a result depends on Windows Update, say in your report that the VM could not show it.
+- SmartScreen is on in every state of `win`. Its "Windows protected your PC" box appears only for a file that carries the Mark-of-the-Web and is started through Explorer, so a file you built in the VM or copied in with `scp` or `vm push` starts without it. To see what a customer's download does, mark the file first: `ssh win-pwsh "Set-Content -Path app.exe -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'"`, then `ssh win 'explorer.exe app.exe'`.
 - `mac` runs only x64 builds. For arm64 or Apple Silicon checks, use a GitHub Actions `macos-15` runner.
 
 ## Rules
@@ -35,6 +35,7 @@ vm status                    which VM is running, and who started it
 vm start <win|mac>           boot without a window and wait until SSH answers
 vm start <name> --window     the same, in a window on the user's desktop
 ssh <win|mac> "<command>"    run a command on the VM's desktop; a script on stdin; scp, sftp
+ssh win-pwsh "<command>"     the same in PowerShell 7 (win's default is Git Bash)
 vm ip <name>, vm port <name> where its SSH is: 127.0.0.1, port 2222 (win) or 2227 (mac)
 vm push <name> <dir> [dest]  mirror the git work tree at <dir> into the VM
 vm cache [clear <name>]      size of each VM's build cache; empty one
@@ -83,17 +84,20 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
 - **Run things with plain `ssh`:** `ssh win "<command>"`, `ssh mac "<command>"`. A script goes on stdin as a quoted heredoc, written as on the VM itself, with no escaping:
   ```
   ssh win <<'EOF'
-  Set-Location C:\cache\src\app
-  cargo build --release; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+  set -e
+  cd /c/cache/src/app
+  cargo build --release
   cargo test
   EOF
   ```
-  Every session runs on the VM's desktop as `dev`, in the home folder, so windows show and the GPU is there: PowerShell 7 with admin rights on `win`; a zsh login shell on `mac`, where `sudo` asks no password and `screencapture` and accessibility calls work. `scp` and `sftp` work as usual (`scp app.zip win:C:/share/`). A call takes about 0.5 s on `win` and 0.1 to 0.3 s on `mac`.
-- **Output and exit code:** output comes back as it is written, in UTF-8; `win` ends lines with CRLF. The exit code is the command's or script's: its `exit N`, else that of its last command (on `win`: the last program's, 1 after an error that ended the script, else 0; a failed program does not end a PowerShell script, so test `$LASTEXITCODE` between steps).
-- **Leave out `-t`.** On `win` a session with a terminal always exits 0 and loses a command's output. ssh has no time limit of its own, and on `win` a command keeps running when its ssh is cut off: after your harness's timeout, stop what is left (`taskkill /T /F /PID <id>`).
+  Every session runs on the VM's desktop as `dev`, in the home folder, so windows show and the GPU is there: Git Bash with admin rights on `win`; a zsh login shell on `mac`, where `sudo` asks no password and `screencapture` and accessibility calls work. `scp` and `sftp` work as usual (`scp app.zip win:C:/share/`). A call takes about 0.1 s on `win` and 0.1 to 0.3 s on `mac`.
+- **Git Bash on `win`:** Windows programs and Git's Unix tools are both on the Path (cargo, node, pnpm, git, winget, python). `C:\cache` is `/c/cache`, and Windows programs take `C:/cache` as well. Git Bash turns an argument that looks like a Unix path into a Windows one, a Windows switch too (`/S` arrives as `S:/`): double its slash (`setup.exe //S`, `cmd //c dir`, `taskkill //F //IM app.exe`), or put `MSYS_NO_PATHCONV=1` before the command.
+- **PowerShell on `win`: `ssh win-pwsh "<command>"`**, the same desktop session in PowerShell 7 with a script on stdin as well (0.4 s a call). Use it for cmdlets and the lab's helpers (`C:\vmlab\*.ps1`). A failed program does not end a PowerShell script: test `$LASTEXITCODE` between steps.
+- **Output and exit code:** output comes back as it is written, in UTF-8 (Windows programs end lines with CRLF). The exit code is the command's or script's, as from a shell on Linux: its `exit N`, else that of its last command (in PowerShell: a program's own exit code, 1 for a cmdlet that failed or an error that ended the script).
+- **Leave out `-t`.** On `win` a session with a terminal always exits 0 and loses a command's output. ssh has no time limit of its own; when your harness cuts an `ssh` off, the command ends with it.
 - **A long build or test suite:** start the `ssh` as a background command of your own harness and act on its exit code. Run builds of one project one after another.
-- **A program that stays (a GUI app, a dev server)** keeps running after the session ends. On `win`: `$p = Start-Process app.exe -WindowStyle Hidden -PassThru -RedirectStandardOutput $env:TEMP\app.log -RedirectStandardError $env:TEMP\app.err`, print `$p.Id`, stop it later with `taskkill /T /F /PID <id>`. On `mac`: `open -a <App>`, or `nohup <command> > /tmp/app.log 2>&1 &`. Started without these, it holds the session open until it ends.
-- **Waiting for an installer on `win`:** `$p = Start-Process setup.exe -ArgumentList '/S' -PassThru; $p.WaitForExit(); $p.ExitCode`. `Start-Process -Wait` also waits for every program the installer leaves running.
+- **A program that stays (a GUI app, a dev server):** start it in the background with its output in a file, on both VMs: `nohup <command> > /tmp/app.log 2>&1 & echo $!`. It keeps running after the session ends; stop it later with `kill <pid>` (on `win` also `taskkill //T //F //IM app.exe`). On `mac`, `open -a <App>` starts an app.
+- **An installer on `win`:** `./setup.exe //S; echo $?` waits for the installer and gives its exit code.
 - **Apps on the Mac desktop:** `open -a <App>` starts one there (auto-login is on); stop it with `pkill -x <App>`. Use these in place of `osascript` AppleEvents (`tell app …`, `quit app …`): each of those puts a privacy (Automation) prompt on the desktop that blocks GUI work until someone answers it.
 - **An Electron app, two ways, yours to choose per check:** vmlab-mcp works the window as a person does, and reaches what is outside the page too (the installer, a native dialog, the tray). Playwright works the page from inside: start the app inside the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222 9333`, then connect Playwright or playwright-mcp to `http://localhost:9333`. (The third number is the port on this machine; the user's own Chrome often holds 9222.) Run Playwright `_electron` tests inside the VM.
 - **A service of this machine, from inside the VM:** `vm forward <name> 5800 7000` puts this machine's `localhost:5800` and `:7000` on the VM's own `localhost`, so an app built against `http://localhost:5800` works unchanged. `vm unforward <name>` closes them. Where a forward does not fit, this machine is `host.vmlab` on `win` and `10.0.2.2` on both.
@@ -118,8 +122,11 @@ Using it:
 - **In an Electron window** (from the trials of 2026-11-14):
   - Type with `delivery_mode: "foreground"`. In the background, `win` refuses the keys and `mac` loses them while reporting "sent, unverified".
   - The first `get_window_state` may show only the frame and the menu; read it again after the first click.
+  - Click a text field (foreground) before `type_text`, in two calls. A `type_text` with x,y that clicks and types at once lost every key on `mac` while reporting them sent.
+  - A checkbox's ticked state is not in the accessibility tree: check the screenshot or the app's own output.
   - A `<select>` on `win`: focus it and press the option's first letter (`press_key`, foreground). On `mac`, `set_value` on the select works.
-  - A save dialog's file name: `set_value` on the field. `type_text` on `win` adds to the name already selected there while reporting that it replaced it.
+  - A save dialog's file name: `set_value` on the field. `type_text` on `win` adds to the name already selected there while reporting that it replaced it. The folder: on `mac`, `set_value` on Where; on `win`, click it in the sidebar in the foreground (a background click is refused).
+  - Closing a window: a background click on Close can leave it open, and a foreground one can return `foreground_unavailable` after the window closed. Check over `ssh` that the process is gone instead of trusting either.
 - Check outcomes over `ssh` (files written, app state). Don't trust a screenshot alone, nor a tool's "success": read a field back after typing into it.
 
 ## The plain picture and real input (`vm gui`)
@@ -128,8 +135,8 @@ Using it:
 
 - **The screen as it is:** `vm gui <name> shot <file.png>`, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.**
 - **Input that has to be real:** `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
-- **Bring a window to the front first:** `ssh win 'C:\vmlab\focus.ps1 notepad'` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
-- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `ssh win 'C:\vmlab\tray.ps1 <part of its program name>'` puts it beside the clock.
+- **Bring a window to the front first:** `ssh win-pwsh 'C:\vmlab\focus.ps1 notepad'` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
+- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `ssh win-pwsh 'C:\vmlab\tray.ps1 <part of its program name>'` puts it beside the clock.
 - **Display scaling on `win`:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
 
 ## When to open the reference
@@ -138,7 +145,7 @@ Using it:
 
 - **Gotchas:** something fails or behaves oddly in a VM. Read it before debugging: Windows PowerShell 5.1, `Path` over SSH and Windows features; Electron's postinstall and its output through a pipe; Node versions with fnm; macOS packages and privacy permissions; killing processes by command line; GPU limits; browsers; the VM window; clock drift.
 - **When a VM lacks something you need:** a capability is missing (WebGPU and what an app draws with Direct3D 12 on `win` are the known cases). You may work around it yourself; the section has the terms, the sources and what to tell the user.
-- **Smoke-test app:** a ready Electron app in both VMs for checking the lab itself.
+- **Smoke-test app:** Bench Form, a ready Electron app in both VMs for checking the lab itself: where it is and how to start it.
 - **Where things live** and **Freeing disk space on /vmlab:** the disk images, the caches, what is safe to delete.
 
 `/vmlab/tools/vmlab/gpu/README.md`: how the virtual GPUs work, every local patch with its cause, and each launcher's own commands (screenshots, guest keyboard and mouse without SSH).
