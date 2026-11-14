@@ -45,6 +45,18 @@ $lines = @(
 $old = if (Test-Path $profileFile) { Get-Content $profileFile | Where-Object { $_ -notmatch '^# vmlab: |^\[Console\]::OutputEncoding = |^if \(\[Console\]::IsOutputRedirected\) \{ \$PSStyle|^if \(\$env:SSH_CONNECTION\) \{ \$env:Path = ' } } else { @() }
 Set-Content -Path $profileFile -Value ($lines + @($old)) -Encoding utf8
 
+# 2b. Every Git Bash reads the lab's bash-env.sh: a command from sshd reads ~/.bashrc (bash's
+#     rule for a shell sshd starts), a terminal ~/.bash_profile, which reads ~/.bashrc, and the
+#     rest BASH_ENV, which vmshell sets. LF line ends: bash takes a CR for part of the command.
+$bashrc = Join-Path $env:USERPROFILE '.bashrc'
+$keep = if (Test-Path $bashrc) { @(Get-Content $bashrc | Where-Object { $_ -notmatch '^# vmlab: |/c/vmlab/bash-env\.sh' }) } else { @() }
+$text = @('# vmlab: the lab''s bash setup (C:\vmlab\bash-env.sh)', '[ -f /c/vmlab/bash-env.sh ] && . /c/vmlab/bash-env.sh') + $keep
+[IO.File]::WriteAllText($bashrc, (($text -join "`n") + "`n"))
+$bashProfile = Join-Path $env:USERPROFILE '.bash_profile'
+$keep = if (Test-Path $bashProfile) { @(Get-Content $bashProfile | Where-Object { $_ -notmatch '^# vmlab: |/c/vmlab/bash-env\.sh' }) } else { @() }
+if (-not ($keep -match '\.bashrc')) { $keep = @('[ -f ~/.bashrc ] && . ~/.bashrc') + $keep }
+[IO.File]::WriteAllText($bashProfile, (($keep -join "`n") + "`n"))
+
 # 3. sshd passes VMLAB_SHELL on to vmshell (AcceptEnv is global, so before the first Match)
 $cfg = 'C:\ProgramData\ssh\sshd_config'
 $text = Get-Content $cfg

@@ -48,6 +48,7 @@ use std::sync::{mpsc, Arc};
 
 const GIT: &str = r"C:\Program Files\Git";
 const PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+const BASH_ENV: &str = r"C:\vmlab\bash-env.sh";
 
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -218,6 +219,10 @@ fn bash() -> Command {
     c.env("MSYSTEM", msystem).env("EXEPATH", format!(r"{GIT}\bin")).env("PLINK_PROTOCOL", "ssh");
     let prefix = format!(r"{GIT}\{}\bin;{GIT}\usr\bin;{home}\bin", msystem.to_lowercase());
     c.env("Path", format!("{prefix};{}", session_path()));
+    // The lab's setup for every bash, scripts too (win/bash-env.sh: fnm)
+    if std::env::var_os("BASH_ENV").is_none() && std::path::Path::new(BASH_ENV).is_file() {
+        c.env("BASH_ENV", BASH_ENV.replace('\\', "/"));
+    }
     let raw = args_after_program();
     match command_text() {
         Some(text) => {

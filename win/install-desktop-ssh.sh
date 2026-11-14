@@ -7,7 +7,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [[ $(vm status | awk '$1 == "win" { print $2 }') == running ]] || { echo "start win first (vm start win)" >&2; exit 1; }
 
-tar -C "$here" --exclude=target -cf - vmshell desktop-ssh.ps1 | vm ssh win-pwsh 'tar -xf - -C C:\vmlab'
+tar -C "$here" --exclude=target -cf - vmshell desktop-ssh.ps1 bash-env.sh | vm ssh win-pwsh 'tar -xf - -C C:\vmlab'
 vm run win --timeout 900 <<< '& C:\vmlab\desktop-ssh.ps1'
 vm stop win
 vm start win
