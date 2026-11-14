@@ -19,7 +19,7 @@ holds everything that makes them run except the disks and what is downloaded or 
 | `gpu/win3d/` | The Windows VM: launcher `win-venus.sh`, the clean state's build (`setup-ready.sh`, `guest-scripts/`), patches for QEMU and the guest drivers, the boot firmware change. |
 | `gpu/reims/` | The macOS VM: launcher `mac26.sh`, patches for the reims window and SDL, the title bar plugin. |
 | `gpu/rig/` | A headless GNOME desktop for testing the VM windows without touching the real one. |
-| `win/`, `mac/` | How the base disks were installed and set up; `win/run-interactive.ps1` (the helper for Windows' desktop session); `mac/spice-agent/` (the clipboard in macOS). |
+| `win/`, `mac/` | How the base disks were installed and set up; `win/vm-run.ps1` (the guest's half of `vm run win`) and `win/run-interactive.ps1` (the older helper for Windows' desktop session, which the lab's own scripts still call); `mac/spice-agent/` (the clipboard in macOS). |
 | `vmlab-mcp/` | The MCP server that drives a VM's GUI (Rust; `cargo build --release`, then copy `target/release/vmlab-mcp` to `~/.local/bin/`). |
 | `bench/` | The computer-use benchmark. |
 | `host/` | Copies of what the lab changed outside the home folder, as a record (below). |

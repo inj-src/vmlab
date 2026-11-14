@@ -137,6 +137,49 @@ cmd_commit(){
 
 cmd_ssh(){ local n=$1; shift; need "$n"; [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"; exec ssh $(ssh_opts "$n") -t "${GUSER[$n]}@127.0.0.1" "$@"; }
 cmd_ip(){ need "$1"; [[ $(state_of "$1") == running ]] || die "$1 is not running"; echo 127.0.0.1; }
+
+# vm run <name> [--timeout SEC] [FILE]: run a script in the VM. The script is stdin (a quoted
+# heredoc) or FILE and goes over as a file, so no shell on the way reads its quotes or its $.
+# win: PowerShell 7 on the visible desktop, as dev with admin rights (win/vm-run.ps1).
+# mac: zsh, a login shell in the desktop (Aqua) session, where SSH alone is in the background one.
+# Output and exit code are the script's; 124 means it ran out of time.
+cmd_run(){
+  local n=$1; shift; need "$n"
+  local timeout=3600 file=-
+  while (( $# )); do
+    case $1 in
+      --timeout) [[ ${2:-} =~ ^[0-9]+$ ]] || die "vm run: --timeout takes seconds"; timeout=$2; shift 2 ;;
+      -) shift ;;
+      -*) die "vm run: unknown option '$1' (vm help)" ;;
+      *) file=$1; shift ;;
+    esac
+  done
+  [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"
+  [[ $file != - || ! -t 0 ]] || die "vm run: give the script on stdin (vm run $n <<'EOF' ... EOF) or as a file"
+  [[ $file == - || -r $file ]] || die "vm run: cannot read $file"
+  local tmp id rc=0
+  tmp=$(mktemp "$STATE/run.XXXXXX"); id=$(basename "$tmp"); id=${id#run.}
+  cat -- "$file" > "$tmp"
+  [[ -s $tmp ]] || { rm -f "$tmp"; die "vm run: the script is empty"; }
+  local scp_opts=(-q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -P "${PORT[$n]}")
+  case $n in
+    win)
+      # the guest's half goes along with every run: win/vm-run.ps1 (nothing is installed there)
+      local s=".vmrun-$id.ps1" h=".vmrun-$id.helper.ps1" d; d=$(mktemp -d "$STATE/run.d.XXXXXX")
+      cp "$tmp" "$d/$s"; cp "$LAB/tools/vmlab/win/vm-run.ps1" "$d/$h"
+      scp "${scp_opts[@]}" "$d/$s" "$d/$h" "${GUSER[$n]}@127.0.0.1:." || { rm -rf "$d" "$tmp"; die "vm run: could not send the script"; }
+      rm -rf "$d"
+      guest win 'pwsh -NoProfile -File $HOME\'"$h"' -Script $HOME\'"$s"' -TimeoutSec '"$timeout"'; exit $LASTEXITCODE' < /dev/null | sed -u 's/\r$//' || rc=${PIPESTATUS[0]} ;;
+    mac)
+      local s=".vmrun-$id.zsh"
+      scp "${scp_opts[@]}" "$tmp" "${GUSER[$n]}@127.0.0.1:$s" || { rm -f "$tmp"; die "vm run: could not send the script"; }
+      timeout "$timeout" ssh $(ssh_opts mac) "${GUSER[$n]}@127.0.0.1" "if sudo -n true 2>/dev/null; then sudo -n launchctl asuser \$(id -u) sudo -n -u \$(id -un) -H zsh -l $s; else zsh -l $s; fi; c=\$?; rm -f $s; exit \$c" < /dev/null || rc=$?
+      # out of time: the script and what it started are still running there
+      (( rc != 124 )) || guest mac "k(){ local c; for c in \$(pgrep -P \$1); do k \$c; done; kill \$1 2>/dev/null; }; for p in \$(pgrep -f '[z]sh -l $s'); do k \$p; done; rm -f $s" < /dev/null || true ;;
+  esac
+  rm -f "$tmp"
+  return $rc
+}
 cmd_port(){ need "$1"; echo "${PORT[$1]}"; }
 
 cmd_view(){
@@ -441,6 +484,12 @@ vm start <win|mac> [state] [--window]
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
                                it land on the guest's desktop). Without: no window
 vm ssh <name> [command...]     shell or one command in the VM (win: PowerShell, mac: zsh)
+vm run <name> [--timeout SEC] [FILE]
+                               run a script on the VM's desktop: stdin (a quoted heredoc) or FILE,
+                               sent as a file so its quotes and $ arrive untouched. win: PowerShell
+                               7 as dev with admin rights; mac: a zsh login shell. Output and exit
+                               code are the script's, 124 = out of time (default 3600 s); programs
+                               the script starts keep running after it
 vm push <name> <dir> [dest]    mirror the git work tree at <dir>, uncommitted and untracked
                                files too (not ignored ones), to the guest's build cache:
                                C:\cache\src\<repo> on win, ~/cache/src/<repo> on mac, or to
@@ -494,6 +543,7 @@ case $sub in
   note) [[ $# -ge 3 ]] || die "usage: vm note <name> <state> <text>"; cmd_note "$@" ;;
   clear) [[ $# -ge 2 ]] || die "usage: vm clear <name> <state>... | --all  [-y]"; cmd_clear "$@" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;
+  run) [[ $# -ge 1 ]] || die "usage: vm run <name> [--timeout SEC] [FILE] (the script on stdin or in FILE)"; cmd_run "$@" ;;
   untunnel) [[ $# -ge 1 ]] || die "usage: vm untunnel <localport>"; cmd_untunnel "$1" ;;
   cache) cmd_cache "$@" ;;
   push) [[ $# -ge 2 && $# -le 3 ]] || die "usage: vm push <name> <dir> [dest]"; cmd_push "$@" ;;

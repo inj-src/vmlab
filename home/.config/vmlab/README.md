@@ -12,7 +12,7 @@ Each VM is run by its own launcher, which `vm` calls: `/vmlab/tools/vmlab/gpu/wi
 
 Electron 38 "Bench Form".
 
-- `win`: `C:\vmlab\bench-app`. Start it with `C:\vmlab\run-interactive.ps1 -Command "& C:\vmlab\bench-app\start.ps1"`.
+- `win`: `C:\vmlab\bench-app`. Start it with `vm run win <<< '& C:\vmlab\bench-app\start.ps1'`.
 - `mac`: `~/vmlab/bench-app`. Start it with `open -n ~/vmlab/bench-app/node_modules/electron/dist/Electron.app --env BENCH_DIR=$HOME/bench --args ~/vmlab/bench-app`.
 
 ## When a VM lacks something you need
@@ -38,7 +38,7 @@ The user's word on this (2026-11-12): when the work needs something the VMs don'
 - **Windows `Path` over SSH:** an SSH session gets the machine's `Path`, not the user's. A tool installed per user (as cargo is) is found over SSH only once its folder is on the machine `Path` and Windows has restarted.
 - **Windows features:** Windows Update is disabled, so `Add-WindowsCapability` and the Store fail. Use winget, or GitHub MSIs.
 - **Node 26 and Electron's postinstall:** the electron package's zip extraction can exit early, leaving `node_modules/electron/dist` with only `locales/`. Fix it by extracting the cached zip from `C:\cache\electron` with `tar -xf` into `dist`, then writing `electron.exe` to `path.txt`.
-- **Electron's output through a pipe:** started with its output piped through PowerShell, Electron's main process dies with EPIPE once the pipe's reader is gone. `run-interactive.ps1 -Start` sends the output to a log file instead.
+- **Electron's output through a pipe:** started with its output piped through PowerShell, Electron's main process dies with EPIPE once the pipe's reader is gone. In a `vm run` script the output goes to a file, not a pipe, and `Start-Process … -RedirectStandardOutput <log>` gives a program that stays its own log.
 - **Node versions on Windows:** `fnm install <n>` makes its first version fnm's default, and that would replace Node 26 in every new shell. The PowerShell 7 profile (`C:\Program Files\PowerShell\7\profile.ps1`) therefore ends with `fnm use system`: Node 26 unless a command says `fnm use <n>`. Nothing switches at `cd`.
 - **PostgreSQL's installer and winget:** EDB's download server answers winget with 403. `win/install-postgres.ps1` takes the address and the hash from `winget show` and downloads with `curl.exe`.
 - **A forward that is taken:** Windows' sshd accepts a second forward of a port that is in use and says nothing, so `vm forward` checks this machine's own forwards first.

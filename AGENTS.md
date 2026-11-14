@@ -12,7 +12,7 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 - Login on both: user `dev`, password `vmlab`. It is an admin account and logs in automatically.
 - Each VM has 6 CPUs and 8 GB, a 1920×1080 screen when it runs without a window, and internet.
 - `win` is set up for testing, not like a customer's PC: Defender antivirus and Windows Update are off. For a test that depends on the antivirus (an installer, a first launch, a flagged binary), use the saved state with Defender on: `vm start win defender`. Its definitions are of 2026-11-12, and real-time protection comes on some seconds after SSH answers (wait for `(Get-MpComputerStatus).RealTimeProtectionEnabled`). When a result depends on Windows Update, say in your report that the VM could not show it.
-- SmartScreen is on in every state of `win`. Its "Windows protected your PC" box appears only for a file that carries the Mark-of-the-Web and is started through Explorer, so a file you built in the VM or copied in with `scp` or `vm push` starts without it. To see what a customer's download does, mark the file first: `Set-Content -Path app.exe -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'`, then `explorer.exe app.exe` through `run-interactive.ps1`.
+- SmartScreen is on in every state of `win`. Its "Windows protected your PC" box appears only for a file that carries the Mark-of-the-Web and is started through Explorer, so a file you built in the VM or copied in with `scp` or `vm push` starts without it. To see what a customer's download does, mark the file first: `Set-Content -Path app.exe -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'`, then `explorer.exe app.exe` in a `vm run` script.
 - `mac` runs only x64 builds. For arm64 or Apple Silicon checks, use a GitHub Actions `macos-15` runner.
 
 ## Rules
@@ -34,7 +34,8 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 vm status                    which VM is running, and who started it
 vm start <win|mac>           boot without a window and wait until SSH answers
 vm start <name> --window     the same, in a window on the user's desktop
-vm ssh <name> "<command>"    run a command inside the VM
+vm run <name> [FILE]         run a script on the VM's desktop: a quoted heredoc or FILE
+vm ssh <name> "<command>"    one plain command, in the background session
 vm ip <name>, vm port <name> where its SSH is: 127.0.0.1, port 2222 (win) or 2227 (mac)
 vm push <name> <dir> [dest]  mirror the git work tree at <dir> into the VM
 vm cache [clear <name>]      size of each VM's build cache; empty one
@@ -80,14 +81,23 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
 
 ## Running things in a VM
 
-- **Builds, installs, test suites:** `vm ssh win "cd C:\cache\src\app; cargo build"`; on `mac` the same with its paths (`~/cache/src/app`). The shell is PowerShell 7 on `win` and zsh on `mac`.
-- **On the visible Windows desktop:** anything started over SSH runs in an invisible session (Session 0): its screenshots come out black and Vulkan finds no GPU there. `C:\vmlab\run-interactive.ps1` runs things on the visible desktop, with no console window of its own. Call it from `vm ssh win` as `Remove-Item Env:PSModulePath; powershell -File C:\vmlab\run-interactive.ps1 …`:
-  - `-Command "<PowerShell>"` waits, prints the command's output and returns its exit code (`-TimeoutSec`, default one hour). Use it for test scripts and for winget, which only works in the desktop session.
-  - `-Start "<command line>" [-Log <file>] [-Dir <folder>]` is for a program that stays (a GUI app, a dev server): it returns in 2 s with the log file and a process id. The program's output goes to the log file itself, so start Electron this way: piped through PowerShell its main process dies with EPIPE. Stop it with `taskkill /T /F /PID <id>`.
-- **On the visible Mac desktop:** `open -a <App>` over SSH starts the app there (auto-login is on); stop it with `pkill -x <App>`. Use these in place of `osascript` AppleEvents (`tell app …`, `quit app …`): each of those puts a privacy (Automation) prompt on the desktop that blocks GUI work until someone answers it.
+- **Run things with `vm run`.** The script is a quoted heredoc or a file and arrives as a file, so write it as you would on the VM itself, with no escaping for SSH:
+  ```
+  vm run win --timeout 1800 <<'EOF'
+  Set-Location C:\cache\src\app
+  cargo build --release; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+  cargo test
+  EOF
+  ```
+  It runs on the VM's desktop, starting in the home folder: PowerShell 7 as `dev` with admin rights on `win`, a zsh login shell on `mac`. Output comes back as it is written, in UTF-8. The exit code is the script's: on `win` its `exit N`, 1 after an error that ended it, else 0 (a failed program does not end a PowerShell script: test `$LASTEXITCODE`); on `mac` that of its last command. 124 means `--timeout` (default 3600 s) ran out; the script and its child processes are then killed.
+- **`vm ssh <name> "<command>"`** is for one plain command (`vm ssh win "Get-Process node"`). It runs in the background session: on `win` that is Session 0, where windows are invisible, screenshots come out black, Vulkan finds no GPU and winget fails. Give `vm run` whatever shows a window, takes a screenshot, draws, or has quotes or `$` in it.
+- **A long build or test suite:** start `vm run` as a background command of your own harness and act on its exit code. Run builds of one project one after another.
+- **A program that stays (a GUI app, a dev server):** start it inside a `vm run` script; it keeps running after the script ends. On `win`: `$p = Start-Process app.exe -WindowStyle Hidden -PassThru -RedirectStandardOutput $env:TEMP\app.log -RedirectStandardError $env:TEMP\app.err`, print `$p.Id`, stop it later with `taskkill /T /F /PID <id>`. On `mac`: `open -a <App>`, or `nohup <command> > /tmp/app.log 2>&1 &`.
+- **Waiting for an installer on `win`:** `$p = Start-Process setup.exe -ArgumentList '/S' -PassThru; $p.WaitForExit(); $p.ExitCode`. `Start-Process -Wait` also waits for every program the installer leaves running.
+- **Apps on the Mac desktop:** `open -a <App>` starts one there (auto-login is on); stop it with `pkill -x <App>`. Use these in place of `osascript` AppleEvents (`tell app …`, `quit app …`): each of those puts a privacy (Automation) prompt on the desktop that blocks GUI work until someone answers it.
 - **An Electron app, two ways, yours to choose per check:** vmlab-mcp works the window as a person does, and reaches what is outside the page too (the installer, a native dialog, the tray). Playwright works the page from inside: start the app inside the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222 9333`, then connect Playwright or playwright-mcp to `http://localhost:9333`. (The third number is the port on this machine; the user's own Chrome often holds 9222.) Run Playwright `_electron` tests inside the VM.
 - **A service of this machine, from inside the VM:** `vm forward <name> 5800 7000` puts this machine's `localhost:5800` and `:7000` on the VM's own `localhost`, so an app built against `http://localhost:5800` works unchanged. `vm unforward <name>` closes them. Where a forward does not fit, this machine is `host.vmlab` on `win` and `10.0.2.2` on both.
-- **Node and pnpm on `win`:** `node` is 26. For a project on another version: `fnm install 24` once (kept on `C:\cache`), then `fnm use 24` at the start of each `vm ssh` command, or `fnm exec --using=24 -- <command>` in the desktop session. `pnpm` is on the Path and switches to the version in the project's `packageManager` by itself. Downloads of Electron, electron-builder, npm and pnpm are kept on `C:\cache`.
+- **Node and pnpm on `win`:** `node` is 26. For a project on another version: `fnm install 24` once (kept on `C:\cache`), then `fnm use 24` at the start of each script or command. `pnpm` is on the Path and switches to the version in the project's `packageManager` by itself. Downloads of Electron, electron-builder, npm and pnpm are kept on `C:\cache`.
 - **PostgreSQL on `win`:** 16, installed as on a customer's PC: service `postgresql-x64-16`, port 5432, user `postgres`, password `postgres`, tools in `C:\Program Files\PostgreSQL\16\bin` (not on the Path). Its databases are on the system disk: `vm reset` empties it.
 - **A build from GitHub (an installer from Actions, a release):** download it on this machine, where `gh` is signed in, into `/vmlab/share`. The VMs have no `gh` and get no GitHub token.
 - **Native GUI** (installers, file dialogs, tray, menus, any app's real UI): vmlab-mcp, the next section.
@@ -115,7 +125,7 @@ Using it:
 
 - **The screen as it is:** `vm gui <name> shot <file.png>`, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.**
 - **Input that has to be real:** `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
-- **Bring a window to the front first:** `run-interactive.ps1 -Command "C:\vmlab\focus.ps1 notepad"` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
+- **Bring a window to the front first:** `vm run win <<< 'C:\vmlab\focus.ps1 notepad'` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
 - **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `vm ssh win "C:\vmlab\tray.ps1 <part of the program's name>"` puts it beside the clock.
 - **Display scaling on `win`:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
 
