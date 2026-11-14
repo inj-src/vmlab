@@ -396,8 +396,8 @@ Reading a GPU process dump: the failed load's record (`DelayLoadInfo`, 72 bytes)
 crashing thread's stack, with the DLL's name and `dwLastError`; Chrome's symbols are on its
 symbol server (`chrome.dll.pdb`, 5.8 GB) and `llvm-symbolizer-18 --obj=chrome.dll
 --relative-address` names the frames. Upstream's bridge README (vmlab-win3d `build/d3d12/`) says
-nothing of the restriction, and VMLabDev/vmlab has no commit on it (all branches, 2026-11-13). Not
-reported upstream yet.
+nothing of the restriction, and VMLabDev/vmlab has no commit on it (all branches, 2026-11-14).
+Reported upstream 2026-11-14 with the way we keep both: https://github.com/VMLabDev/vmlab/issues/238.
 
 ### Desktop Duplication (`kmd-patches/0004`, `guest-patches/9003`)
 
@@ -453,7 +453,7 @@ Tests and tools:
   (`ffmpeg -f gdigrab -i desktop`), the host's picture and Cua Driver's screenshots work as
   before.
 - Not tried: a rotated or a second output, a capture while a full-screen game flips, voxl itself.
-  Not reported upstream yet.
+  Reported upstream 2026-11-14 with both patches: https://github.com/VMLabDev/vmlab/issues/237.
 
 ### Saved states (`vm save`, `vm states`)
 

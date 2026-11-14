@@ -1,6 +1,6 @@
 # vmlab-mcp
 
-A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and `mac` (macOS) VMs through [Cua Driver](https://cua.ai/docs/cua-driver). It is installed for every Claude Code and Codex session of this machine; see the lab's `AGENTS.md` (`/vmlab/tools/vmlab/AGENTS.md`).
+A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and `mac` (macOS) VMs through [Cua Driver](https://cua.ai/docs/cua-driver). It is installed for every Claude Code, Codex and Antigravity (`agy`, `~/.gemini/config/mcp_config.json`) session of this machine; see the lab's `AGENTS.md` (`/vmlab/tools/vmlab/AGENTS.md`).
 
 ## Behaviour
 
