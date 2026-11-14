@@ -4,18 +4,19 @@ A Windows 11 and a macOS 26 test VM on one Ubuntu 24.04 laptop (Intel + RTX 4050
 virtual GPU, a window on the desktop and an MCP server for driving its GUI. This repository
 holds everything that makes them run except the disks and what is downloaded or built.
 
-- **Using the VMs** (rules, the `vm` command, getting code in, the GUI server): `AGENTS.md`.
-  Agents read it before any VM work; the global instructions of Claude Code and Codex
-  (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) point at it.
-- **The reference behind it** (gotchas, working around what a VM lacks, where things live,
-  freeing disk space): `home/.config/vmlab/README.md`, linked as `~/.config/vmlab/README.md`.
+- **Using the VMs** (rules, the `vm` command, getting code in, the GUI): the agent skill
+  `skills/vmlab/`, which `./install.sh` links into Claude Code and Codex.
+- **Working on the lab:** `AGENTS.md`, then `docs/lab.md` (how it is put together, where
+  things live, freeing disk space).
 - **How the GPU VMs are built, and why each local change exists**: `gpu/README.md`.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `home/` | Files that belong in the home folder, at the same paths: the `vm` command and its helpers, the lab's README, the two launchers of the app grid. `./install.sh` links them into place. |
+| `skills/vmlab/` | The agent skill for using the VMs. |
+| `docs/` | The lab's reference for working on it. |
+| `home/` | Files that belong in the home folder, at the same paths: the `vm` command and its helpers, `ssh_config`, the two launchers of the app grid. `./install.sh` links them into place. |
 | `gpu/win3d/` | The Windows VM: launcher `win-venus.sh`, the clean state's build (`setup-ready.sh`, `guest-scripts/`), patches for QEMU and the guest drivers, the boot firmware change. |
 | `gpu/reims/` | The macOS VM: launcher `mac26.sh`, patches for the reims window and SDL, the title bar plugin. |
 | `gpu/rig/` | A headless GNOME desktop for testing the VM windows without touching the real one. |
@@ -49,7 +50,7 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 | reims-util | `gpu/reims-util/` | github.com/steelbrain/reims-util at `ed7398997f83f9d004477e6eab8eaf46a462a47a`, unchanged. |
 | The Mac window's title bar plugin | `gpu/reims/libdecor-cairo/libdecor-cairo.so` | `gpu/reims/libdecor-vmlab/build.sh install` (the tarball and the patch are tracked). |
 | The Rust toolchain | `/vmlab/reims/rustup`, `/vmlab/reims/cargo` | rustup, with `RUSTUP_HOME` and `CARGO_HOME` set to those. |
-| Stable lane leftovers | `gpu/metal2vulkan/`, `gpu/win-research/` | Not used by the VMs (`home/.config/vmlab/README.md`, "Freeing disk space"). The lane's checkout `gpu/reims-vgpu/` was removed on 2026-11-12. |
+| Stable lane leftovers | `gpu/metal2vulkan/`, `gpu/win-research/` | Not used by the VMs (`docs/lab.md`, "Freeing disk space"). The lane's checkout `gpu/reims-vgpu/` was removed on 2026-11-12. |
 
 ## The host
 

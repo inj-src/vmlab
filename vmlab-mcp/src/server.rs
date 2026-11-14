@@ -23,13 +23,14 @@ tree. The `vm gui` command works in bare pixels: keep it for a plain screenshot 
 the guest must take for a person's (a keyboard hook or hotkey under test; Cua's keys carry \
 Windows' injected mark). Every tool takes a required \
 `machine` argument: \"win\" (Windows 11) or \"mac\" (macOS). The VM must already be running: \
-start it with `vm start <name>` (one VM at a time; see /vmlab/tools/vmlab/AGENTS.md). Each \
+start it with `vm start <name>`. Load the `vmlab` skill first: the lab's rules and commands, and \
+in its gui.md the steps that fail quietly unless driven a set way. Each \
 session keeps its own Cua connection per VM, so element refs and Cua sessions persist between \
 calls until the VM reboots. Check outcomes yourself in the VM when it matters: `ssh win \
 \"<command>\"` (Git Bash; `ssh win-pwsh` for PowerShell) or `ssh mac \"<command>\"` (zsh); a \
 script on stdin; both run on the VM's desktop. \
 In an Electron window, type with delivery_mode \"foreground\" and read a field back \
-before trusting a tool's success (see AGENTS.md).";
+before trusting a tool's success.";
 
 pub struct Proxy {
     cfg: Arc<Config>,
