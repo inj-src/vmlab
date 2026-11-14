@@ -38,6 +38,10 @@
 //! after an error that ended the script or kept it from running. (`pwsh -c` returns 1 for a
 //! failed program, whatever its exit code was.)
 
+// A GUI program: Windows makes no console window for it. sshd runs on the desktop, and without
+// this every session showed one there (the shell gets a console without a window, see main).
+#![windows_subsystem = "windows"]
+
 use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::os::windows::process::CommandExt;
@@ -71,6 +75,9 @@ extern "system" {
     fn PeekNamedPipe(pipe: Handle, buf: *mut u8, size: u32, read: *mut u32, avail: *mut u32, left: *mut u32) -> i32;
     fn CancelIoEx(file: Handle, overlapped: *mut core::ffi::c_void) -> i32;
     fn SetHandleInformation(h: Handle, mask: u32, flags: u32) -> i32;
+    fn AttachConsole(pid: u32) -> i32;
+    fn SetStdHandle(which: u32, h: Handle) -> i32;
+    fn CreateFileW(name: *const u16, access: u32, share: u32, sa: *const core::ffi::c_void, disposition: u32, flags: u32, template: Handle) -> Handle;
     fn GetCurrentProcess() -> Handle;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
     fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
@@ -372,12 +379,31 @@ fn relay(mut child: Child) -> i32 {
     code
 }
 
+/// With a terminal (`ssh -t`) sshd starts vmshell in the session's pseudo console host without
+/// handles of its own: vmshell, a GUI program, attaches to that console and takes its input and
+/// output, as a console program would have had them.
+fn attach_terminal() {
+    let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if !h.is_null() && h as isize != -1 && unsafe { GetFileType(h) } != 0 {
+        return;
+    }
+    if unsafe { AttachConsole(u32::MAX) } == 0 {
+        return; // ATTACH_PARENT_PROCESS; the parent has no console
+    }
+    for (which, name) in [(STD_INPUT_HANDLE, "CONIN$"), (STD_OUTPUT_HANDLE, "CONOUT$"), (STD_ERROR_HANDLE, "CONOUT$")] {
+        // GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING
+        let f = unsafe { CreateFileW(wide(name).as_ptr(), 0xC000_0000, 3, null(), 3, 0, null_mut()) };
+        unsafe { SetStdHandle(which, f) };
+    }
+}
+
 fn main() {
+    attach_terminal();
     unsafe { SetConsoleCtrlHandler(Some(ignore), 1) };
     // A subsystem: sshd starts sftp-server through the shell (`-c sftp-server.exe`). It is no
     // shell session, and it stalls on pipes other than sshd's: run it as is, with sshd's.
     if let Some(c) = command_text().filter(|c| c.trim().to_ascii_lowercase().ends_with("sftp-server.exe")) {
-        let code = Command::new(c.trim()).status().ok().and_then(|st| st.code()).unwrap_or(1);
+        let code = Command::new(c.trim()).creation_flags(CREATE_NO_WINDOW).status().ok().and_then(|st| st.code()).unwrap_or(1);
         exit(code)
     }
     let want_pwsh = std::env::var("VMLAB_SHELL").is_ok_and(|s| s.eq_ignore_ascii_case("pwsh"));
