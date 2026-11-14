@@ -35,7 +35,7 @@ vm status                    which VM is running, and who started it
 vm start <win|mac>           boot without a window and wait until SSH answers
 vm start <name> --window     the same, in a window on the user's desktop
 vm run <name> [FILE]         run a script on the VM's desktop: a quoted heredoc or FILE
-vm ssh <name> "<command>"    one plain command, in the background session
+vm execute <name> "<command>"  one command on the VM's desktop, as vm run runs a script
 vm ip <name>, vm port <name> where its SSH is: 127.0.0.1, port 2222 (win) or 2227 (mac)
 vm push <name> <dir> [dest]  mirror the git work tree at <dir> into the VM
 vm cache [clear <name>]      size of each VM's build cache; empty one
@@ -89,8 +89,8 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
   cargo test
   EOF
   ```
-  It runs on the VM's desktop, starting in the home folder: PowerShell 7 as `dev` with admin rights on `win`, a zsh login shell on `mac`. Output comes back as it is written, in UTF-8. The exit code is the script's: on `win` its `exit N`, 1 after an error that ended it, else 0 (a failed program does not end a PowerShell script: test `$LASTEXITCODE`); on `mac` that of its last command. 124 means `--timeout` (default 3600 s) ran out; the script and its child processes are then killed.
-- **`vm ssh <name> "<command>"`** is for one plain command (`vm ssh win "Get-Process node"`). It runs in the background session: on `win` that is Session 0, where windows are invisible, screenshots come out black, Vulkan finds no GPU and winget fails. Give `vm run` whatever shows a window, takes a screenshot, draws, or has quotes or `$` in it.
+  It runs on the VM's desktop, so windows show and the GPU is there, starting in the home folder: PowerShell 7 as `dev` with admin rights on `win`, a zsh login shell on `mac`. Output comes back as it is written, in UTF-8. The exit code is the script's: its `exit N`, else that of its last command (on `win`: the last program's, 1 after an error that ended the script, else 0; a failed program does not end a PowerShell script, so test `$LASTEXITCODE` between steps). 124 means `--timeout` (default 3600 s) ran out; the script and its child processes are then killed.
+- **`vm execute <name> "<command>"`** is the same for one line (`vm execute win "Get-Process node"`), with the same desktop, exit code and `--timeout`. It takes about 1 s on `win` and 0.2 s on `mac`. A command with quotes or `$` in it reads more plainly as a `vm run` heredoc.
 - **A long build or test suite:** start `vm run` as a background command of your own harness and act on its exit code. Run builds of one project one after another.
 - **A program that stays (a GUI app, a dev server):** start it inside a `vm run` script; it keeps running after the script ends. On `win`: `$p = Start-Process app.exe -WindowStyle Hidden -PassThru -RedirectStandardOutput $env:TEMP\app.log -RedirectStandardError $env:TEMP\app.err`, print `$p.Id`, stop it later with `taskkill /T /F /PID <id>`. On `mac`: `open -a <App>`, or `nohup <command> > /tmp/app.log 2>&1 &`.
 - **Waiting for an installer on `win`:** `$p = Start-Process setup.exe -ArgumentList '/S' -PassThru; $p.WaitForExit(); $p.ExitCode`. `Start-Process -Wait` also waits for every program the installer leaves running.
@@ -104,7 +104,7 @@ A saved state is a VM's whole disk kept under a name beside the clean state: a W
 
 ## Driving the GUI (vmlab-mcp)
 
-`~/.local/bin/vmlab-mcp` is a stdio MCP server with the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs in one tool list: elements found by name, clicks and right-clicks on them, hotkeys, window state, the accessibility tree, screenshots. **It is how you test or check anything a VM shows**; confirm the result over `vm ssh`. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
+`~/.local/bin/vmlab-mcp` is a stdio MCP server with the [Cua Driver](https://cua.ai/docs/cua-driver) computer-use tools of both VMs in one tool list: elements found by name, clicks and right-clicks on them, hotkeys, window state, the accessibility tree, screenshots. **It is how you test or check anything a VM shows**; confirm the result with `vm execute` or `vm run`. Source and design notes are in `/vmlab/tools/vmlab/vmlab-mcp/README.md`.
 
 **Every session has the tools:** the server is installed for all Claude Code sessions (`mcp__vmlab__*`; a tool search for `vmlab` finds them) and all Codex sessions (`codex mcp list` shows `vmlab`), since 2026-11-13. A session started before that gets them at its next start; if a later one lacks them, tell the user.
 
@@ -116,8 +116,12 @@ Using it:
 - Start the VM first with `vm start <name>`, one VM at a time. While the VM is off, calls return `<name> is not running: run \`vm start <name>\` first`.
 - Each agent session has its own Cua connection per VM, so element refs and Cua sessions last between calls. A VM reboot resets them; the next call reconnects.
 - Cua runs in the desktop session, so its screenshots work on win too (unlike apps started over SSH; see [Running things in a VM](#running-things-in-a-vm)).
-- Don't call `install_extension`, `install_ffmpeg` or `check_for_update`. They change the VM's Cua install.
-- Check outcomes over `vm ssh` (files written, app state). Don't trust a screenshot alone.
+- **In an Electron window** (from the trials of 2026-11-14):
+  - Type with `delivery_mode: "foreground"`. In the background, `win` refuses the keys and `mac` loses them while reporting "sent, unverified".
+  - The first `get_window_state` may show only the frame and the menu; read it again after the first click.
+  - A `<select>` on `win`: focus it and press the option's first letter (`press_key`, foreground). On `mac`, `set_value` on the select works.
+  - A save dialog's file name: `set_value` on the field. `type_text` on `win` adds to the name already selected there while reporting that it replaced it.
+- Check outcomes with `vm execute` (files written, app state). Don't trust a screenshot alone, nor a tool's "success": read a field back after typing into it.
 
 ## The plain picture and real input (`vm gui`)
 
@@ -126,7 +130,7 @@ Using it:
 - **The screen as it is:** `vm gui <name> shot <file.png>`, whatever is on it: a crash dialog, a prompt, the wrong window in front. **Look at it before you debug a GUI test from logs.**
 - **Input that has to be real:** `vm gui <name> click X Y [right|double]`, `type 'text'`, `key ctrl+s` (also `win`, `alt`, `shift`; `ret`, `esc`, `tab`, `f4`) use the VM's own keyboard and pointer, at pixels of the screenshot. The guest takes them for a person's. Use them to test anything that watches input (a keyboard hook, a hotkey, a text expander): keys sent from inside Windows, by Cua, SendKeys or SendInput, carry Windows' "injected" mark, and real ones never do.
 - **Bring a window to the front first:** `vm run win <<< 'C:\vmlab\focus.ps1 notepad'` (part of the title, a process name or a process id). It prints what it focused and fails with exit code 1 if that window is not in front. A script's own `SetForegroundWindow` or `AppActivate` fails most of the time on Windows, and the keys then go to whatever was in front.
-- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `vm ssh win "C:\vmlab\tray.ps1 <part of the program's name>"` puts it beside the clock.
+- **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. After the app has shown its icon once, `vm execute win "C:\vmlab\tray.ps1 <part of the program's name>"` puts it beside the clock.
 - **Display scaling on `win`:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
 
 ## When to open the reference
