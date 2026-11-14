@@ -25,9 +25,9 @@ Windows' injected mark). Every tool takes a required \
 `machine` argument: \"win\" (Windows 11) or \"mac\" (macOS). The VM must already be running: \
 start it with `vm start <name>` (one VM at a time; see /vmlab/tools/vmlab/AGENTS.md). Each \
 session keeps its own Cua connection per VM, so element refs and Cua sessions persist between \
-calls until the VM reboots. Check outcomes yourself in the VM when it matters: `vm execute \
-<name> \"<command>\"` for one command, `vm run <name>` for a script (both run on the VM's \
-desktop). In an Electron window, type with delivery_mode \"foreground\" and read a field back \
+calls until the VM reboots. Check outcomes yourself in the VM when it matters: `ssh win \
+\"<command>\"` or `ssh mac \"<command>\"` (a script on stdin; both run on the VM's desktop). \
+In an Electron window, type with delivery_mode \"foreground\" and read a field back \
 before trusting a tool's success (see AGENTS.md).";
 
 pub struct Proxy {
