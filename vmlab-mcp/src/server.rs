@@ -25,7 +25,8 @@ Windows' injected mark). Every tool takes a required \
 `machine` argument: \"win\" (Windows 11) or \"mac\" (macOS). The VM must already be running: \
 start it with `vm start <name>` (one VM at a time; see /vmlab/tools/vmlab/AGENTS.md). Each \
 session keeps its own Cua connection per VM, so element refs and Cua sessions persist between \
-calls until the VM reboots. Check outcomes yourself over `vm ssh` when it matters.";
+calls until the VM reboots. Check outcomes yourself in the VM when it matters: `vm run <name>` \
+for a script (it runs on the VM's desktop), `vm ssh <name> \"<command>\"` for one plain command.";
 
 pub struct Proxy {
     cfg: Arc<Config>,

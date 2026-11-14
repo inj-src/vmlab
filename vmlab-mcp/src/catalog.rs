@@ -115,11 +115,29 @@ pub fn load(dir: &Path, machine: Machine) -> Vec<Value> {
     normalize(read_cache(dir, machine).unwrap_or_else(|| seed(machine)))
 }
 
+/// Cua tools a test agent has no use for, left out of the list: driver upkeep (updates,
+/// extensions, ffmpeg), deprecated or legacy tools, the agent cursor's styling, and replaying a
+/// recording. Fewer names to scan under tool search. A call to one is refused as unknown.
+pub const HIDDEN: &[&str] = &[
+    "check_for_update",
+    "install_extension",
+    "install_ffmpeg",
+    "escalate_session",
+    "get_session_state",
+    "page",
+    "set_agent_cursor_enabled",
+    "set_agent_cursor_motion",
+    "set_agent_cursor_theme",
+    "replay_trajectory",
+];
+
 /// Round-trip tools through rmcp's `Tool`, the form they are served in. Non-standard fields
 /// (Cua adds `capabilities` and `risk`) drop out, so lists from different sources compare equal.
+/// The `HIDDEN` tools drop out here too.
 pub fn normalize(tools: Vec<Value>) -> Vec<Value> {
     tools
         .into_iter()
+        .filter(|t| !HIDDEN.contains(&tool_name(t)))
         .filter_map(|t| match serde_json::from_value::<rmcp::model::Tool>(t) {
             Ok(tool) => serde_json::to_value(tool).ok(),
             Err(e) => {
@@ -649,6 +667,8 @@ mod tests {
     fn normalize_drops_nonstandard_fields() {
         let t = json!({"name": "a", "inputSchema": {"type": "object"}, "risk": "low", "capabilities": ["x"]});
         assert_eq!(normalize(vec![t, json!({"no": "name"})]), vec![json!({"name": "a", "inputSchema": {"type": "object"}})]);
+        let hidden = json!({"name": "install_ffmpeg", "inputSchema": {"type": "object"}});
+        assert_eq!(normalize(vec![hidden]), Vec::<Value>::new());
     }
 
     #[test]

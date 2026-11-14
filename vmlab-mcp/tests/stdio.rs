@@ -124,7 +124,8 @@ fn vm_off() {
 
     c.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
     let tools = c.wait(1, 10)["result"]["tools"].as_array().unwrap().clone();
-    assert!(tools.len() >= 60, "seed union has {} tools", tools.len());
+    assert!(tools.len() >= 50, "seed union has {} tools", tools.len());
+    assert!(tools.iter().all(|t| t["name"] != "install_ffmpeg"), "a hidden tool is listed");
     for t in &tools {
         assert_eq!(t["inputSchema"]["required"][0], "machine", "{}", t["name"]);
         assert_eq!(t["inputSchema"]["properties"]["machine"]["enum"], json!(["win", "mac"]));
