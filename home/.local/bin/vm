@@ -43,7 +43,10 @@ power_restore(){
   return 0
 }
 
-ssh_opts(){ echo -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -p "${PORT[$1]}"; }
+# One SSH connection per VM, shared by the calls of the next two minutes (ControlMaster): a call
+# then starts in 0.3 s in place of 0.5 s. The shared connection ends with the VM.
+MUX="-o ControlMaster=auto -o ControlPath=$STATE/ssh-%p -o ControlPersist=120"
+ssh_opts(){ echo -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR $MUX -p "${PORT[$1]}"; }
 guest(){ local n=$1; shift; ssh $(ssh_opts "$n") "${GUSER[$n]}@127.0.0.1" "$@"; }
 
 wait_ssh(){
@@ -135,7 +138,28 @@ cmd_commit(){
   echo "$n: its disk as it is now is the clean state"
 }
 
+# vm ssh <name> [command...]: plain SSH, in the background session (Session 0 on win), with
+# stdin passed on. Not in vm help: agents use vm execute and vm run; the lab's own scripts that
+# stream data over stdin (mac/install-spice-agent.sh) use this.
 cmd_ssh(){ local n=$1; shift; need "$n"; [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"; exec ssh $(ssh_opts "$n") -t "${GUSER[$n]}@127.0.0.1" "$@"; }
+
+# vm execute <name> [--timeout SEC] [command...]: one command, run as vm run runs a script (on
+# the desktop, same output and exit code). Without a command, in a terminal: a shell for a person.
+cmd_execute(){
+  local n=$1; shift; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"
+  local t=()
+  if [[ ${1:-} == --timeout ]]; then t=(--timeout "${2:-}"); shift 2 || die "vm execute: --timeout takes seconds"; fi
+  if (( $# == 0 )); then
+    [[ -t 0 ]] || die "vm execute: give a command (vm execute $n \"<command>\"), or a script to vm run"
+    exec ssh $(ssh_opts "$n") -t "${GUSER[$n]}@127.0.0.1"
+  fi
+  local f rc=0; f=$(mktemp "$STATE/exec.XXXXXX")
+  printf '%s\n' "$*" > "$f"
+  cmd_run "$n" "${t[@]}" "$f" || rc=$?
+  rm -f "$f"
+  return $rc
+}
 cmd_ip(){ need "$1"; [[ $(state_of "$1") == running ]] || die "$1 is not running"; echo 127.0.0.1; }
 
 # vm run <name> [--timeout SEC] [FILE]: run a script in the VM. The script is stdin (a quoted
@@ -161,7 +185,7 @@ cmd_run(){
   tmp=$(mktemp "$STATE/run.XXXXXX"); id=$(basename "$tmp"); id=${id#run.}
   cat -- "$file" > "$tmp"
   [[ -s $tmp ]] || { rm -f "$tmp"; die "vm run: the script is empty"; }
-  local scp_opts=(-q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -P "${PORT[$n]}")
+  local scp_opts=(-q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR $MUX -P "${PORT[$n]}")
   case $n in
     win)
       # the guest's half goes along with every run: win/vm-run.ps1 (nothing is installed there)
@@ -175,6 +199,7 @@ cmd_run(){
       scp "${scp_opts[@]}" "$tmp" "${GUSER[$n]}@127.0.0.1:$s" || { rm -f "$tmp"; die "vm run: could not send the script"; }
       timeout "$timeout" ssh $(ssh_opts mac) "${GUSER[$n]}@127.0.0.1" "if sudo -n true 2>/dev/null; then sudo -n launchctl asuser \$(id -u) sudo -n -u \$(id -un) -H zsh -l $s; else zsh -l $s; fi; c=\$?; rm -f $s; exit \$c" < /dev/null || rc=$?
       # out of time: the script and what it started are still running there
+      (( rc != 124 )) || echo "vm run: stopped after $timeout s" >&2
       (( rc != 124 )) || guest mac "k(){ local c; for c in \$(pgrep -P \$1); do k \$c; done; kill \$1 2>/dev/null; }; for p in \$(pgrep -f '[z]sh -l $s'); do k \$p; done; rm -f $s" < /dev/null || true ;;
   esac
   rm -f "$tmp"
@@ -483,7 +508,9 @@ vm start <win|mac> [state] [--window]
                                --window: in a window on the desktop (full screen: its title
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
                                it land on the guest's desktop). Without: no window
-vm ssh <name> [command...]     shell or one command in the VM (win: PowerShell, mac: zsh)
+vm execute <name> [--timeout SEC] "<command>"
+                               one command in the VM, run as vm run runs a script (below). With
+                               no command, in a terminal: a shell
 vm run <name> [--timeout SEC] [FILE]
                                run a script on the VM's desktop: stdin (a quoted heredoc) or FILE,
                                sent as a file so its quotes and $ arrive untouched. win: PowerShell
@@ -543,6 +570,7 @@ case $sub in
   note) [[ $# -ge 3 ]] || die "usage: vm note <name> <state> <text>"; cmd_note "$@" ;;
   clear) [[ $# -ge 2 ]] || die "usage: vm clear <name> <state>... | --all  [-y]"; cmd_clear "$@" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;
+  execute) [[ $# -ge 1 ]] || die "usage: vm execute <name> [--timeout SEC] \"<command>\""; cmd_execute "$@" ;;
   run) [[ $# -ge 1 ]] || die "usage: vm run <name> [--timeout SEC] [FILE] (the script on stdin or in FILE)"; cmd_run "$@" ;;
   untunnel) [[ $# -ge 1 ]] || die "usage: vm untunnel <localport>"; cmd_untunnel "$1" ;;
   cache) cmd_cache "$@" ;;
