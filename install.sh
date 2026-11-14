@@ -18,4 +18,15 @@ while IFS= read -r -d '' src; do
   ln -sfn "$src" "$dest"
   echo "linked ~/$rel"
 done < <(find "$REPO/home" -type f -print0 | sort -z)
+
+# `ssh win` and `ssh mac`: ~/.ssh/config includes the lab's host entries. Include must stand
+# before any Host line, so it goes first. ssh refuses a config that others may write to.
+inc='Include ~/.config/vmlab/ssh_config'
+chmod 644 "$REPO/home/.config/vmlab/ssh_config"
+if ! grep -qxF "$inc" "$HOME/.ssh/config" 2>/dev/null; then
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  { echo "$inc"; echo; cat "$HOME/.ssh/config" 2>/dev/null || true; } > "$HOME/.ssh/config.vmlab-new"
+  chmod 600 "$HOME/.ssh/config.vmlab-new" && mv "$HOME/.ssh/config.vmlab-new" "$HOME/.ssh/config"
+  echo "added the lab's hosts to ~/.ssh/config (ssh win, ssh mac)"
+fi
 exit $rc

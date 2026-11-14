@@ -1,0 +1,23 @@
+# The lab's VMs for plain ssh, scp and sftp: `ssh win "<command>"`, `ssh mac "<command>"`.
+# ~/.ssh/config includes this file (install.sh adds the line). Both land on the VM's desktop
+# session as dev (win: PowerShell 7 with admin rights; mac: zsh, sudo without a password).
+# The options match the vm command's, so both share one connection per VM (ControlMaster).
+Host win mac
+    HostName 127.0.0.1
+    User dev
+    IdentityFile ~/.ssh/vmlab_ed25519
+    IdentitiesOnly yes
+    UserKnownHostsFile ~/.cache/vmlab/known_hosts
+    StrictHostKeyChecking accept-new
+    BatchMode yes
+    ConnectTimeout 5
+    LogLevel ERROR
+    ControlMaster auto
+    ControlPath ~/.cache/vmlab/ssh-%p
+    ControlPersist 120
+
+Host win
+    Port 2222
+
+Host mac
+    Port 2227

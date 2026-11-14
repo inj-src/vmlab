@@ -141,9 +141,9 @@ cmd_commit(){
   echo "$n: its disk as it is now is the clean state"
 }
 
-# vm ssh <name> [command...]: plain SSH, in the background session (Session 0 on win), with
-# stdin passed on. Not in vm help: agents use vm execute and vm run; the lab's own scripts that
-# stream data over stdin (mac/install-spice-agent.sh) use this.
+# vm ssh <name> [command...]: plain SSH with stdin passed on, as `ssh win` / `ssh mac` (the
+# guests put every session on the desktop: win/desktop-ssh.ps1, mac/desktop-ssh.sh). Not in vm
+# help; the lab's own scripts use it, as they run before ~/.ssh/config has the lab's hosts.
 cmd_ssh(){ local n=$1; shift; need "$n"; [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"; exec ssh $(ssh_opts "$n") -t "${GUSER[$n]}@127.0.0.1" "$@"; }
 
 # vm execute <name> [--timeout SEC] [command...]: one command, run as vm run runs a script (on
@@ -511,15 +511,12 @@ vm start <win|mac> [state] [--window]
                                --window: in a window on the desktop (full screen: its title
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
                                it land on the guest's desktop). Without: no window
-vm execute <name> [--timeout SEC] "<command>"
-                               one command in the VM, run as vm run runs a script (below). With
-                               no command, in a terminal: a shell
-vm run <name> [--timeout SEC] [FILE]
-                               run a script on the VM's desktop: stdin (a quoted heredoc) or FILE,
-                               sent as a file so its quotes and $ arrive untouched. win: PowerShell
-                               7 as dev with admin rights; mac: a zsh login shell. Output and exit
-                               code are the script's, 124 = out of time (default 3600 s); programs
-                               the script starts keep running after it
+ssh <win|mac> "<command>"      plain ssh (hosts from install.sh): a command on the VM's desktop
+                               as dev. win: PowerShell 7 with admin rights; mac: a zsh login
+                               shell, sudo without a password. A script on stdin
+                               (ssh win <<'EOF' ... EOF); scp and sftp too. Leave out -t
+vm run, vm execute             older forms of the same (a script, one command; --timeout SEC),
+                               kept for scripts that use them
 vm push <name> <dir> [dest]    mirror the git work tree at <dir>, uncommitted and untracked
                                files too (not ignored ones), to the guest's build cache:
                                C:\cache\src\<repo> on win, ~/cache/src/<repo> on mac, or to
