@@ -9,6 +9,9 @@ LAB=/vmlab
 STATE=${XDG_CACHE_HOME:-$HOME/.cache}/vmlab
 KEY=$HOME/.ssh/vmlab_ed25519
 mkdir -p "$STATE"
+# The VMs are user units. A caller with a stripped environment (an MCP server started by Codex)
+# has no XDG_RUNTIME_DIR, and systemctl --user then finds no bus and every VM looks shut off.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 
 # name -> launcher, its user unit, the SSH port on 127.0.0.1, guest user
 declare -A RUN=([win]=$LAB/tools/vmlab/gpu/win3d/win-venus.sh [mac]=$LAB/tools/vmlab/gpu/reims/mac26.sh)
