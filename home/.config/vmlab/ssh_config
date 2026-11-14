@@ -1,8 +1,16 @@
 # The lab's VMs for plain ssh, scp and sftp: `ssh win "<command>"`, `ssh mac "<command>"`.
 # ~/.ssh/config includes this file (install.sh adds the line). Both land on the VM's desktop
-# session as dev (win: PowerShell 7 with admin rights; mac: zsh, sudo without a password).
-# The options match the vm command's, so both share one connection per VM (ControlMaster).
-Host win mac
+# session as dev (win: Git Bash with admin rights, `ssh win-pwsh` for PowerShell 7; mac: zsh,
+# sudo without a password). The options match the vm command's, so both share one connection
+# per VM (ControlMaster).
+
+# win-pwsh: the session asks vmshell for pwsh. A connection of its own, since a session shared
+# over ControlMaster sends no SetEnv. (ssh takes the first value it finds, so this stands first.)
+Host win-pwsh
+    SetEnv VMLAB_SHELL=pwsh
+    ControlPath ~/.cache/vmlab/ssh-pwsh-%p
+
+Host win win-pwsh mac
     HostName 127.0.0.1
     User dev
     IdentityFile ~/.ssh/vmlab_ed25519
@@ -16,7 +24,7 @@ Host win mac
     ControlPath ~/.cache/vmlab/ssh-%p
     ControlPersist 120
 
-Host win
+Host win win-pwsh
     Port 2222
 
 Host mac
