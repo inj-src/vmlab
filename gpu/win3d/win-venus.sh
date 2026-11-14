@@ -22,14 +22,24 @@
 #                                       screen; Ctrl+Alt+F leaves it. Text and pictures copied
 #                                       on either side paste on the other; files dragged onto
 #                                       the window land on the guest's desktop.
-#                                       Without --window: no window.
+#                                       Without --window: the same window, made hidden, when
+#                                       a desktop can be reached (`show` puts it on the screen),
+#                                       at 1920x1080 always, without sound. No desktop, or
+#                                       WIN_VENUS_HIDDEN_WINDOW=off: no window at all.
+#                                       With a window either way: the title bar's hide button
+#                                       hides it (Windows keeps running), and the VM has an icon
+#                                       in the desktop's tray (show or hide, restart, shut down;
+#                                       ~/.local/bin/vm-tray).
 #                                       Either way the display is also on VNC, 127.0.0.1:5911
+#   win-venus.sh show | hide            the window on the screen, or off it (Windows runs on)
+#   win-venus.sh window                 the window: shown, hidden, or none (started without one)
 #   win-venus.sh stop                   ask Windows to shut down, then stop the helpers
 #   win-venus.sh kill                   stop everything now
 #   win-venus.sh status                 what is running
 #   win-venus.sh ssh [command...]       ssh into the guest (dev@127.0.0.1:2222)
 #   win-venus.sh scp SRC... DEST        copy files; the guest is dev@127.0.0.1:PATH
-#   win-venus.sh view                   open the VNC console in remote-viewer
+#   win-venus.sh view                   show the window; without one, the VNC console in
+#                                       remote-viewer (which resizes Windows to its own size)
 #   win-venus.sh shot <file.png>        screenshot the guest display (over VNC)
 #   win-venus.sh scale [PERCENT]        Windows' display scaling now, or set it (100, 125, 150...).
 #                                       With a window it follows the screen by itself (the
@@ -92,6 +102,7 @@ CACHE_EMPTY=/vmlab/images/win-cache-empty.qcow2
 
 die(){ echo "win-venus: $*" >&2; exit 1; }
 . "$HERE/../states.sh"
+. "$HERE/../window.sh"
 alive(){ [[ -f $S/$1.pid ]] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
 qmp(){ # qmp '<json command>': one command over the QMP socket
   python3 -I - "$S/qmp.sock" "$1" <<'EOF'
@@ -106,7 +117,7 @@ EOF
 }
 
 start(){
-  local gpu=${1:-} node select layer=() display env=() audio=none a
+  local gpu=${1:-} node select layer=() display env=() audio=none window=none a
   case $gpu in
     intel)  node=$(gpu_node 0x8086); select='*intel*' ;;
     nvidia) node=$(gpu_node 0x10de); select='*nvidia*'
@@ -117,8 +128,18 @@ start(){
   esac
   [[ -x $QEMU ]] || die "build QEMU first: $HERE/build-qemu.sh"
   display=(-display "egl-headless,rendernode=$node" -vnc "127.0.0.1:$VNC_DISPLAY")
+  # No --window: the window is made all the same, hidden, where a desktop can be reached, so
+  # `show` (vm view) can put it on the screen later; a VNC viewer instead resized Windows and
+  # broke an agent's clicks. It keeps Windows at 1920x1080 and has no sound, for an agent's run.
+  # A QEMU built before qemu-patches/0014 has none of it: the window as before, and no tray.
+  local hideable=; grep -aq VMLAB_WINDOW_HIDDEN "$QEMU" && hideable=1
   case ${2:-} in
-    --window) audio=pipewire
+    --window) window=shown ;;
+    '') [[ -n $hideable && ${WIN_VENUS_HIDDEN_WINDOW:-on} != off ]] && desktop && window=hidden ;;
+    *) die "usage: win-venus.sh start <intel|nvidia> [--window]" ;;
+  esac
+  case $window in
+    shown|hidden) [[ $window == shown ]] && audio=pipewire
       # The window is GTK's plain (non-OpenGL) one beside egl-headless, which qemu-patches/0002
       # opens where VMLAB_WINDOW is set: the guest's frames are rendered and read back on $gpu,
       # as without a window, and the window shows them. `-display gtk,gl=on` cannot be used for
@@ -135,15 +156,18 @@ start(){
       # The title bar has one button, full screen (qemu-patches/0010); QEMU's menus are not shown.
       # WIN_VENUS_WINDOW_X11=1, for tests: the window under XWayland, where xdotool and
       # xwininfo can measure and resize it.
+      # CONTROL and STATE_FILE (qemu-patches/0014): `show` and `hide` reach the window through
+      # the FIFO, and it writes shown or hidden to the file; HIDDEN makes it without showing it.
       for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR WAYLAND_DEBUG; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
+      local size=${WIN_VENUS_WINDOW_SIZE:-first}
+      [[ $window == hidden ]] && size=1920x1080 && env+=(--setenv=VMLAB_WINDOW_HIDDEN=1)
       env+=(--setenv=VMLAB_WINDOW=1 --setenv=VMLAB_WINDOW_APP_ID=vmlab-win11 --setenv="VMLAB_WINDOW_TITLE=Windows 11" --setenv=VMLAB_WINDOW_CLOSE_POWERS_DOWN=1
-        --setenv="VMLAB_WINDOW_FIXED_SIZE=${WIN_VENUS_WINDOW_SIZE:-first}" --setenv="VMLAB_WINDOW_SCALE_FILE=$S/scale" --setenv="VMLAB_WINDOW_SIZE_FILE=$S/size")
+        --setenv="VMLAB_WINDOW_FIXED_SIZE=$size" --setenv="VMLAB_WINDOW_SCALE_FILE=$S/scale" --setenv="VMLAB_WINDOW_SIZE_FILE=$S/size"
+        --setenv="VMLAB_WINDOW_CONTROL=$S/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$S/window.state")
       # WIN_VENUS_WINDOW_RESTORED=1, for tests: the window opens at QEMU's own size, not maximized.
       [[ -n ${WIN_VENUS_WINDOW_RESTORED:-} ]] || env+=(--setenv=VMLAB_WINDOW_MAXIMIZE=1)
       [[ -n ${WIN_VENUS_WINDOW_X11:-} ]] && env+=(--setenv=GDK_BACKEND=x11)
       ;;
-    '') ;;
-    *) die "usage: win-venus.sh start <intel|nvidia> [--window]" ;;
   esac
   [[ -n $node ]] || die "no $gpu render node"
   alive qemu && die "already running (win-venus.sh stop)"
@@ -163,7 +187,9 @@ start(){
   # closed, which powers it down; only `stop` and `kill` end them): their units would refuse
   # the new ones their names.
   systemctl --user stop vmlab-win-venus-net vmlab-win-venus-scale 2>/dev/null || true
-  rm -f "$S"/{net,qmp,ga}.sock "$S"/{net,qemu}.pid "$S/size"; : > "$S/qemu.log"; : > "$S/net.log"
+  systemctl --user stop vmlab-tray-win 2>/dev/null || true
+  rm -f "$S"/{net,qmp,ga}.sock "$S"/{net,qemu}.pid "$S/size" "$S/window.ctl" "$S/window.state"; : > "$S/qemu.log"; : > "$S/net.log"
+  [[ $window == none || -z $hideable ]] || mkfifo -m 600 "$S/window.ctl"
   # Both run as transient user units, so they outlive the terminal or app that started them,
   # and QEMU's stderr (the render server's messages too) lands in qemu.log.
   local smb=
@@ -220,9 +246,11 @@ start(){
     -pidfile "$S/qemu.pid"
   up qemu || { stop_helpers; die "QEMU did not start: $(tail -5 "$S/qemu.log")"; }
   for _ in $(seq 20); do python3 -I "$HERE/../pin.py" "$S/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
-  # With a window, Windows' own scaling follows the screen the window is on (scale-watch below)
-  [[ $audio == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
-  echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $audio == none ]] || echo " and a window"), log $S/qemu.log"
+  # With a window, Windows' own scaling follows the screen the window is on (scale-watch
+  # below); a hidden window's Windows stays at 1920x1080 and 100%.
+  [[ $window == shown ]] && unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
+  [[ $window == none || -z $hideable ]] || tray win vmlab-win-venus "$S/window.state"
+  echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $window == none ]] || echo ", a window ($window)"), log $S/qemu.log"
 }
 # unit NAME LOG [systemd-run options...] COMMAND...: run COMMAND as a transient user unit
 unit(){ local name=$1 log=$2; shift 2
@@ -328,7 +356,10 @@ case ${1:-} in
   status) alive qemu && echo "running on $(cat "$S/gpu") (pid $(cat "$S/qemu.pid"))" || echo "not running" ;;
   ssh) shift; ssh_guest "$@" ;;
   scp) shift; scp -q -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR "$@" ;;
-  view) exec remote-viewer "vnc://127.0.0.1:$((5900 + VNC_DISPLAY))" ;;
+  show|hide) alive qemu || die "not running"; window_ask "$1" "$S/window.ctl" "$S/window.state" ;;
+  window) alive qemu && [[ -p $S/window.ctl ]] && cat "$S/window.state" 2>/dev/null || echo none ;;
+  view) if alive qemu && [[ -p $S/window.ctl ]]; then window_ask show "$S/window.ctl" "$S/window.state"
+        else exec remote-viewer "vnc://127.0.0.1:$((5900 + VNC_DISPLAY))"; fi ;;
   # over VNC: QMP's screendump has no picture of a guest that draws through the GPU ("no surface")
   shot) [[ -n ${2:-} ]] || die "usage: win-venus.sh shot <file.png>"; python3 -I "$HERE/vncshot.py" $((5900 + VNC_DISPLAY)) "$2" ;;
   d3d12) [[ ${2:-status} =~ ^(native|bridge|status)$ ]] || die "usage: win-venus.sh d3d12 [bridge|native|status]"

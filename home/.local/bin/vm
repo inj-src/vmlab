@@ -24,7 +24,8 @@ die(){ echo "vm: $*" >&2; exit 1; }
 need(){ [[ -n ${RUN[$1]:-} ]] || die "unknown VM '$1' (use: ${!RUN[*]})"; }
 state_of(){ systemctl --user is-active --quiet "${UNIT[$1]}" && echo running || echo shutoff; }
 running_vms(){ for n in "${!RUN[@]}"; do [[ $(state_of "$n") == running ]] && echo "$n"; done; true; }
-has_window(){ systemctl --user show "${UNIT[$1]}" -p Environment | grep -q -E 'VMLAB_WINDOW=|REIMS_VGPU_WINDOW_MAXIMIZED='; }
+# The running VM's window: shown, hidden, or none (started where no desktop could be reached)
+window_of(){ "${RUN[$1]}" window 2>/dev/null || echo none; }
 
 # Lab-only power: the performance profile while a VM runs, and only on the full-power barrel
 # charger (ACAD). The USB-C charger cannot keep up with it. vm stop puts the old profile back.
@@ -229,12 +230,39 @@ cmd_port(){ need "$1"; echo "${PORT[$1]}"; }
 cmd_view(){
   local n=$1; need "$n"
   if [[ $(state_of "$n") != running ]]; then cmd_start "$n" --window; return; fi
-  if has_window "$n"; then echo "$n is running in a window on the desktop"; return; fi
+  # Every start makes the window, hidden without --window (gpu/window.sh): it only needs showing
+  if [[ $(window_of "$n") != none ]]; then "${RUN[$n]}" show > /dev/null && echo "$n's window is on the desktop"; return; fi
+  # A run started before that (2026-11-15) with --window: shown, and nothing to ask it
+  if systemctl --user show "${UNIT[$n]}" -p Environment | grep -q -E 'VMLAB_WINDOW=|REIMS_VGPU_WINDOW_MAXIMIZED='; then
+    echo "$n is running in a window on the desktop"; return
+  fi
   case $n in
     win) setsid "${RUN[win]}" view >/dev/null 2>&1 < /dev/null &
       echo "win was started without a window, so this is a plain viewer of its screen. For its real window: vm stop win, then vm view win" ;;
     mac) die "mac runs without a window: vm stop mac, then vm view mac" ;;
   esac
+}
+
+cmd_hide(){
+  local n=$1; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running"
+  [[ $(window_of "$n") != none ]] || die "$n has no window (started where no desktop could be reached)"
+  "${RUN[$n]}" hide > /dev/null && echo "$n's window is hidden; $n keeps running (vm view $n shows it)"
+}
+
+# Restarts the guest's OS; the VM, its window and its tray icon stay. Back when SSH answers.
+cmd_restart(){
+  local n=$1; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running"
+  case $n in
+    win) guest win 'shutdown.exe -r -t 0' > /dev/null 2>&1 ;;
+    mac) guest mac 'sudo -n shutdown -r now' > /dev/null 2>&1 ;;
+  esac || die "$n did not take the restart (no SSH yet?)"
+  # SSH goes away as the guest shuts down, then comes back
+  local deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )) && guest "$n" exit 2>/dev/null; do sleep 2; done
+  wait_ssh "$n" 600 || die "$n restarted but SSH did not answer within 10 min"
+  echo "$n restarted"
 }
 
 cmd_tunnel(){
@@ -526,7 +554,9 @@ vm start <win|mac> [state] [--window]
                                stopped if it is on that state already.
                                --window: in a window on the desktop (full screen: its title
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
-                               it land on the guest's desktop). Without: no window
+                               it land on the guest's desktop). Without: the same window,
+                               hidden, at 1920x1080 (vm view shows it). Either way the VM has
+                               an icon in the desktop's tray: show or hide, restart, shut down
 ssh <win|mac> "<command>"      plain ssh (hosts from install.sh): a command on the VM's desktop
                                as dev. win: Git Bash with admin rights (ssh win-pwsh: the same
                                in PowerShell 7); mac: a zsh login shell, sudo without a
@@ -556,8 +586,10 @@ vm gui <name> type 'text' | key ctrl+s [ret ...] | size
                                The guest takes them for a person's (Windows does not mark
                                them as injected). Key names: win (= cmd), alt, ctrl, shift
                                and QEMU's (ret, esc, tab, f4, up, delete, a, 1)
-vm view <name>                 start it in its window; if it already runs without one, win
-                               opens a plain viewer and mac has to be stopped first
+vm view <name>                 show its window (a stopped VM starts in it)
+vm hide <name>                 hide its window; the VM keeps running (also the title bar's
+                               button left of full screen)
+vm restart <name>              restart the guest's OS, and wait for SSH
 vm ip <name>, vm port <name>   where the VM's SSH is: 127.0.0.1 and a port (win 2222, mac 2227)
 Shared folder: /vmlab/share on this machine is C:\share on win and ~/share on mac.
 vm stop <name>                 graceful shutdown (forced after 2 min)
@@ -582,7 +614,7 @@ sub=${1:-help}; shift || true
 case $sub in
   status|help) "cmd_$sub" ;;
   start) [[ $# -ge 1 ]] || die "usage: vm start <name> [state] [--window]"; cmd_start "$@" ;;
-  stop|ip|port|view) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
+  stop|ip|port|view|hide|restart) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   reset|commit) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$@" ;;
   states) cmd_states "$@" ;;
   save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--replace] [note...]"; cmd_save "$@" ;;

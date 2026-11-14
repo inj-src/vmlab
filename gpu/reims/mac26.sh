@@ -19,7 +19,17 @@
 #                                             ../../mac/spice-agent); files and folders
 #                                             dragged onto the window land on the guest's
 #                                             desktop (drop, below)
-#                                           Without a window, 1920x1080
+#                                           Without --window: the same window, made
+#                                             hidden, when a desktop can be reached
+#                                             (`show` puts it on the screen), macOS at
+#                                             1920x1080 always. No desktop, or
+#                                             MAC26_HIDDEN_WINDOW=off: no window, 1920x1080.
+#                                           With a window either way: the title bar's hide
+#                                             button hides it (macOS keeps running), and the
+#                                             VM has an icon in the desktop's tray (show or
+#                                             hide, restart, shut down; ~/.local/bin/vm-tray)
+#   mac26.sh show | hide                  the window on the screen, or off it (macOS runs on)
+#   mac26.sh window                       the window: shown, hidden, or none
 #   mac26.sh stop                         shut macOS down
 #   mac26.sh kill                         power off now
 #   mac26.sh status                       running or not, and why QEMU ended if reims ended it
@@ -81,6 +91,7 @@ guest(){ ssh "${SSH_OPTS[@]}" -p "$PORT" dev@127.0.0.1 "$@"; }
 stopped(){ alive && die "stop it first (mac26.sh stop)"; return 0; }
 STATES=/vmlab/images/states/mac ST_VM=mac     # the marks and notes of the named states; the states are in the disk file
 . /vmlab/tools/vmlab/gpu/states.sh
+. /vmlab/tools/vmlab/gpu/window.sh
 # NAME, "-" (a snapshot's own size is not recorded anywhere), time saved
 snapshots(){ qemu-img info -U --output=json "$V/disk.qcow2" | python3 -I -c '
 import json, sys
@@ -89,11 +100,17 @@ for s in json.load(sys.stdin).get("snapshots", []):
 has_snapshot(){ snapshots | cut -f1 | grep -qx -- "$1"; }
 
 start(){
-  local window=0 a
+  local window=none a
   for a in "$@"; do case $a in
-    --window) window=1 ;;
+    --window) window=shown ;;
     *) die "usage: mac26.sh start [--window]" ;;
   esac; done
+  # No --window: the window is made all the same, hidden, where a desktop can be reached, so
+  # `show` (vm view) can put it on the screen later (../window.sh). macOS stays at 1920x1080.
+  # A QEMU built before reims' window-shown-and-hidden-on-request.dev.patch has none of it:
+  # the window as before, and no tray.
+  local hideable=; grep -aq REIMS_VGPU_WINDOW_HIDDEN "${R%/bin/reims}/data/reims-ctl/qemu/current/bin/qemu-system-x86_64" && hideable=1
+  [[ $window == none && -n $hideable && ${MAC26_HIDDEN_WINDOW:-on} != off ]] && desktop && window=hidden
   # The window was closed a moment ago and macOS is still shutting down (closed, below): the
   # start waits for it, 40 s at most.
   if alive && [[ -e $V/closing ]]; then
@@ -159,7 +176,10 @@ start(){
   # MAC26_TRACE=FILE: reims' timeline of guest doorbells, interrupts, commits and presents (large).
   [[ -n ${MAC26_TRACE:-} ]] && sed -i "s|^export REIMS_VGPU_LOG=|export REIMS_VGPU_TRACE=$MAC26_TRACE\n&|" "$V/run.sh"
   local env=()
-  if (( window )); then
+  systemctl --user stop vmlab-tray-mac 2>/dev/null || true
+  rm -f "$V/window.ctl" "$V/window.state"
+  if [[ $window != none ]]; then
+    [[ -z $hideable ]] || mkfifo -m 600 "$V/window.ctl"
     for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
     # As the user asked for both VMs: the window opens maximized (our switch in reims' window
     # code, ../README.md).
@@ -171,7 +191,15 @@ start(){
       --setenv="VMLAB_DROP_COMMAND=$(readlink -f "$0") drop")
     # The guest keeps the resolution it starts with (our switch too, ../README.md): reims' own
     # window makes every resize a new macOS resolution.
-    env+=(--setenv="REIMS_VGPU_WINDOW_MODE=${MAC26_WINDOW_SIZE:-first}")
+    # A hidden window keeps macOS at 1920x1080, for an agent's run: its pixels never change.
+    if [[ $window == hidden ]]; then
+      env+=(--setenv=REIMS_VGPU_WINDOW_HIDDEN=1 --setenv=REIMS_VGPU_WINDOW_MODE=1920x1080)
+    else
+      env+=(--setenv="REIMS_VGPU_WINDOW_MODE=${MAC26_WINDOW_SIZE:-first}")
+    fi
+    # `show` and `hide` reach the window through the FIFO, which the title bar's hide button
+    # writes to too; the window writes shown or hidden to the file (../window.sh).
+    env+=(--setenv="VMLAB_WINDOW_CONTROL=$V/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$V/window.state")
     # The window's close button shuts macOS down (closed, below; our switch in reims' window
     # code, which hides the window at the click either way). Without the switch reims powers
     # the VM off, a power cut to whatever is open in macOS: MAC26_CLOSE=poweroff keeps that.
@@ -222,7 +250,7 @@ start(){
   st_ran
   systemd-run --user --quiet --collect --unit="$UNIT" "${env[@]}" \
     -p StandardOutput="append:$V/logs/qemu.log" -p StandardError="append:$V/logs/qemu.log" "${thp[@]}" "$V/run.sh"
-  (( window )) && agent_link
+  if [[ $window != none ]]; then agent_link; [[ -z $hideable ]] || tray mac "$UNIT" "$V/window.state"; fi
   for _ in $(seq 20); do python3 -I "${0%/*}/../pin.py" "$V/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
   for _ in $(seq 90); do
     alive || die "QEMU ended: $(tail -3 "$V/logs/qemu.log")"
@@ -374,6 +402,8 @@ case ${1:-} in
   closed) closed ;;
   drop) shift; drop "$@" ;;
   kill) systemctl --user stop "$UNIT" 2>/dev/null || true; echo killed ;;
+  show|hide) alive || die "not running"; window_ask "$1" "$V/window.ctl" "$V/window.state" ;;
+  window) alive && [[ -p $V/window.ctl ]] && cat "$V/window.state" 2>/dev/null || echo none ;;
   status) alive && echo running || { echo "not running"
     # QEMU ends itself where reims cannot do what the guest asked; say so (../README.md)
     grep -m1 -o 'reims-vgpu: fatal:.\{0,260\}' "$V/logs/qemu.log" 2>/dev/null || true; } ;;

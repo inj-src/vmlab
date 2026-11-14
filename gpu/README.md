@@ -592,6 +592,59 @@ Without the limit (`--disable-gpu-vsync --disable-frame-rate-limit`, the benchma
 - The render server's own `install.sh` exits silently on this host (a `pipefail` on `ldconfig -p |
   awk … exit`); `opt/virgl/libexec/virgl_render_server` was copied by hand.
 
+## The hidden window and the tray icon (both VMs)
+
+Every start makes the VM's real window, shown with `--window` and hidden otherwise, so a VM an
+agent started can be watched at any time in the same window a person would use (the user's
+request, 2026-11-15; a VNC viewer resized Windows and broke an agent's clicks, and a headless
+Mac could not be watched at all). `window.sh` holds what the two launchers share.
+
+| | Windows (`win3d/win-venus.sh`) | macOS (`reims/mac26.sh`) |
+|---|---|---|
+| Window | QEMU's GTK window, `qemu-patches/0014` | reims' SDL window, `reims/patches/window-shown-and-hidden-on-request.dev.patch` |
+| Opens hidden with | `VMLAB_WINDOW_HIDDEN=1` | `REIMS_VGPU_WINDOW_HIDDEN=1` |
+| Size while hidden | 1920×1080 | 1920×1080 (`REIMS_VGPU_WINDOW_MODE`) |
+| Sound | only with `--window` | always (PipeWire) |
+| No window at all | `WIN_VENUS_HIDDEN_WINDOW=off`, or no desktop to reach | `MAC26_HIDDEN_WINDOW=off`, or no desktop to reach |
+
+- **Control**: the window reads `show` and `hide` lines from a FIFO in the VM's run directory
+  (`window.ctl`, `VMLAB_WINDOW_CONTROL`) and writes `shown` or `hidden` to `window.state`
+  (`VMLAB_WINDOW_STATE_FILE`). The reader opens the FIFO for reading and writing, so it never
+  sees an end. Each launcher has `show`, `hide` and `window` (prints shown, hidden or none).
+- **`vm`**: `vm view NAME` shows the window, `vm hide NAME` hides it, `vm restart NAME` restarts
+  the guest's OS (the VM process stays; it waits for SSH to drop and come back), `vm stop` shuts
+  it down as before.
+- **The title bar's hide button** (`view-restore-symbolic`, the user's pick, left of full
+  screen) writes `hide` to the same FIFO: the VM keeps running. Closing still shuts it down.
+  The Mac's title bar (`reims/libdecor-vmlab`) also has the Windows one's hover states.
+- **Clipboard**: none shared while hidden, on both (nobody is looking, and the guest has no
+  business reading the host's clipboard). The Windows side guards in `gtk-clipboard.c`, the
+  Mac's in `native/linux/agent.rs`.
+- **The tray icon** (`~/.local/bin/vm-tray`, the user's request, 2026-11-15): while a VM with a
+  window runs, the desktop's top bar has its icon. Its menu: the VM's name, Show or Hide,
+  Restart, Shut down (each through `vm`); a middle click shows or hides. Python with Ayatana
+  AppIndicator, drawn by GNOME's AppIndicator extension. It runs as `vmlab-tray-win` or
+  `vmlab-tray-mac`, a user unit bound to the VM's, so it goes when the VM ends; its errors go
+  to `tray.log` in the VM's run directory. `VMLAB_TRAY=off`: none. None for a VM in the test
+  rig's nested desktop either: the tray is the real session's D-Bus.
+  - **Icons**: `icons/vmlab-win11-symbolic.svg` (the four squares, no tile) and
+    `icons/vmlab-macos26-symbolic.svg` (the tile with "26" cut out, traced to one even-odd
+    path), the user's picks from four drawn sets. Symbolic icons: the extension recolours them
+    for the panel, light or dark, by overriding the fill of every `rect`, `circle` and `path`,
+    so they must be plain filled shapes (a mask or a stroke comes out as a solid block).
+- **Old builds**: a launcher makes a hidden window only if the binary has the switch
+  (`grep -a` for `VMLAB_WINDOW_HIDDEN` in the QEMU, `REIMS_VGPU_WINDOW_HIDDEN` in reims'
+  current QEMU); otherwise it starts as before (no window, no FIFO, no tray), since the
+  working tree is live and an older binary would show its window.
+- **Costs**: a window ties the VM to the desktop's session, so if GNOME Shell crashes or the
+  user logs out, an agent's VM ends with it. A hidden window keeps 1920×1080 whatever the
+  screen; `vm view` shows it maximized and the guest takes the window's size as it does with
+  `--window`.
+- Checked 2026-11-15 in the rig (`rig/nested.sh`): the Windows window hidden, shown, hidden by
+  its button and shown again (no guest); the Mac title bar's hide button writes `hide` and
+  hovers; both tray icons recoloured in the nested top bar, the menu opens and its first item
+  follows the state file. Not yet on the real VMs.
+
 ## macOS: `reims/mac26.sh` (reims-vgpu)
 
 [reims-vgpu](https://github.com/steelbrain/reims-vgpu) gives a macOS guest Metal, translated to
@@ -626,7 +679,7 @@ of guest memory into video memory every frame, whether or not it changed (measur
 
 ```sh
 M=/vmlab/tools/vmlab/gpu/reims/mac26.sh
-$M start                # no window; returns when SSH answers (about 20 s)
+$M start                # a hidden window ("The hidden window" above); returns when SSH answers (about 20 s)
 $M ssh 'sw_vers'        # dev@127.0.0.1, port 2227
 $M gui shot /tmp/s.png  # also: click X Y | type 'text' | key cmd+q   (pixels of that screenshot)
 $M stop

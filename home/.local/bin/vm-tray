@@ -1,0 +1,91 @@
+#!/usr/bin/python3 -I
+"""vm-tray NAME STATE_FILE: the VM's icon in the desktop's tray while it runs, the user's request
+(2026-11-15). Its menu shows or hides the VM's window, restarts the guest, or shuts it down,
+through `vm` (view, hide, restart, stop); a middle click shows or hides the window.
+
+The VM's launcher starts it as a user unit bound to the VM's (gpu/win3d/win-venus.sh,
+gpu/reims/mac26.sh), so the icon goes when the VM ends. STATE_FILE is where the window writes
+`shown` or `hidden` (VMLAB_WINDOW_STATE_FILE); the menu's first item follows it. The tray is
+GNOME's AppIndicator extension (Ubuntu's ubuntu-appindicators), through Ayatana AppIndicator.
+"""
+import os
+import subprocess
+import sys
+
+import gi
+
+gi.require_version('Gtk', '3.0')
+gi.require_version('AyatanaAppIndicator3', '0.1')
+from gi.repository import AyatanaAppIndicator3 as AppIndicator, GLib, Gtk  # noqa: E402
+
+ICONS = '/vmlab/tools/vmlab/gpu/icons'
+VMS = {'win': ('Windows 11', 'vmlab-win11-symbolic'), 'mac': ('macOS 26 Tahoe', 'vmlab-macos26-symbolic')}
+VM = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'vm')
+
+
+class Tray:
+    def __init__(self, name, state_file):
+        self.name, self.state_file = name, state_file
+        self.title, icon = VMS[name]
+        self.busy = None        # 'Restarting…' or 'Shutting down…' while that runs
+        self.ind = AppIndicator.Indicator.new(f'vmlab-{name}', icon,
+                                              AppIndicator.IndicatorCategory.APPLICATION_STATUS)
+        self.ind.set_icon_theme_path(ICONS)
+        self.ind.set_title(self.title)
+        self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+
+        menu = Gtk.Menu()
+        self.heading = Gtk.MenuItem(label=self.title, sensitive=False)
+        self.toggle = Gtk.MenuItem(label='Show')
+        self.toggle.connect('activate', lambda _: self.run('hide' if self.shown() else 'view'))
+        self.restart = Gtk.MenuItem(label='Restart')
+        self.restart.connect('activate', lambda _: self.run('restart', 'Restarting…'))
+        self.stop = Gtk.MenuItem(label='Shut down')
+        self.stop.connect('activate', lambda _: self.run('stop', 'Shutting down…'))
+        for item in (self.heading, Gtk.SeparatorMenuItem(), self.toggle, Gtk.SeparatorMenuItem(),
+                     self.restart, self.stop):
+            menu.append(item)
+        menu.show_all()
+        self.ind.set_menu(menu)
+        self.ind.set_secondary_activate_target(self.toggle)
+        self.refresh()
+        GLib.timeout_add(1000, self.refresh)
+
+    def shown(self):
+        try:
+            with open(self.state_file) as f:
+                return f.read().strip() == 'shown'
+        except OSError:
+            return False
+
+    def refresh(self):
+        self.toggle.set_label('Hide' if self.shown() else 'Show')
+        self.heading.set_label(f'{self.title}: {self.busy}' if self.busy else self.title)
+        for item in (self.toggle, self.restart, self.stop):
+            item.set_sensitive(self.busy is None)
+        return GLib.SOURCE_CONTINUE
+
+    def run(self, command, busy=None):
+        """`vm COMMAND NAME`, without waiting; while a restart or shutdown runs, the menu says so
+        and takes nothing else."""
+        proc = subprocess.Popen([VM, command, self.name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=sys.stderr)
+        if busy:
+            self.busy = busy
+            GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc.pid, self.done)
+        self.refresh()
+
+    def done(self, _pid, _status):
+        self.busy = None
+        self.refresh()
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in VMS:
+        sys.exit('usage: vm-tray <win|mac> STATE_FILE')
+    Tray(sys.argv[1], sys.argv[2])
+    Gtk.main()
+
+
+if __name__ == '__main__':
+    main()
