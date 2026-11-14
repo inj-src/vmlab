@@ -174,6 +174,12 @@ the old icon for as long as it is open.
   - `0012`: every key goes to the guest while the window has the keyboard ("Keyboard and
     pointer" above).
   - `0013`: a press on the title bar gives the desktop its shortcuts back (the same place).
+  - `0014`: `VMLAB_WINDOW_HIDDEN` makes the window without showing it; `VMLAB_WINDOW_CONTROL`
+    names a FIFO QEMU reads `show` and `hide` lines from, and with it the title bar has a hide
+    button left of full screen; `VMLAB_WINDOW_STATE_FILE` gets `shown` or `hidden` ("The
+    hidden window" below). A hidden window shares no clipboard. Checked 2026-11-15 in the rig
+    without a guest: no window and no dock entry while hidden; `show` maximizes it; the hide
+    button hides it and the picture comes back at the next `show`.
   Checked 2026-11-12: `0001` to `0013` on the release's sources give the built files byte for
   byte.
     To try a window change without a guest: `build/qemu-system-x86_64 -L build/pc-bios
@@ -745,7 +751,10 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     mode it can still set).
   - The title bar is libdecor's cairo plugin with `libdecor-vmlab/vmlab-titlebar.patch`: it
     matches the Windows window's GTK title bar (Yaru dark, the desktop's font, the same
-    buttons).
+    buttons, the same hover look, and the hide button with `VMLAB_WINDOW_CONTROL`). The bar is
+    a desynchronized sub-surface: synced, its redraws waited for the window's next commit,
+    which reims makes only for a new guest frame, and an idle Mac sends almost none, so the
+    buttons showed no hover (fixed 2026-11-15; checked with libdecor's demo in the rig).
 - **A person at the screen**: `$M start --window` (also "macOS 26 Tahoe" in the app grid,
   `~/.local/share/applications/vmlab-macos26.desktop`, icon `icons/vmlab-macos26.svg`). The
   window opens maximized (asked for by the user, for both VMs, with a resolution that does not

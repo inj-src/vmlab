@@ -1,0 +1,212 @@
+gtk: vmlab: a hidden window, shown and hidden on request
+
+Every start of the VM now makes its real window, hidden when VMLAB_WINDOW_HIDDEN is set, so
+`vm view` can show it later instead of opening a VNC viewer, which resized the guest and
+broke an agent's clicks. VMLAB_WINDOW_CONTROL names a FIFO that QEMU reads lines from:
+"show" presents the window (maximized first with VMLAB_WINDOW_MAXIMIZE), "hide" hides it.
+QEMU opens it read-write so it never sees end-of-file when a writer closes.
+VMLAB_WINDOW_STATE_FILE gets "shown" or "hidden" after each change, so `vm` can tell.
+
+With the FIFO, the title bar has a hide button left of full screen: the window goes and
+the VM keeps running. Close still shuts the VM down. The Mac window has the same button
+(../../reims/libdecor-vmlab/vmlab-titlebar.patch).
+
+A hidden window shares no clipboard: the guest cannot read the host's clipboard, or set
+it, while nobody is looking at the VM.
+
+The full screen button and the hide button come from one maker, so both look alike.
+---
+diff --git a/ui/gtk-clipboard.c b/ui/gtk-clipboard.c
+index 4554fd8..b0931f3 100644
+--- a/ui/gtk-clipboard.c
++++ b/ui/gtk-clipboard.c
+@@ -109,7 +109,8 @@ static void gd_clipboard_update_info(GtkDisplayState *gd,
+ 
+     if (info != qemu_clipboard_info(s)) {
+         gd->cbpending[s] = 0;
+-        if (!self_update) {
++        /* vmlab: a hidden window shares no clipboard (gtk.c, gd_vmlab_show) */
++        if (!self_update && gtk_widget_get_visible(gd->window)) {
+             g_autoptr(GtkTargetList) list = NULL;
+             GtkTargetEntry *targets;
+             gint n_targets;
+@@ -255,6 +256,10 @@ static void gd_owner_change(GtkClipboard *clipboard,
+         /* ignore notifications about our own grabs */
+         return;
+     }
++    /* vmlab: a hidden window shares no clipboard (gtk.c, gd_vmlab_show) */
++    if (!gtk_widget_get_visible(gd->window)) {
++        return;
++    }
+ 
+ 
+     switch (event->owner_change.reason) {
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 2313fd8..c7a195e 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -49,6 +49,7 @@
+ 
+ #include <glib/gi18n.h>
+ #include <locale.h>
++#include <glib-unix.h>
+ #if defined(CONFIG_VTE)
+ #include <vte/vte.h>
+ #endif
+@@ -3157,14 +3158,98 @@ static gboolean gd_vmlab_title_button(GtkWidget *widget, GdkEventButton *button,
+     return FALSE;
+ }
+ 
+-static GtkWidget *gd_vmlab_full_screen_button(GtkDisplayState *s)
++/*
++ * vmlab: the window can be off the screen while the VM runs, and come back. VMLAB_WINDOW_HIDDEN=1
++ * makes it at the start without showing it (the VM is started for an agent, with no one
++ * watching); VMLAB_WINDOW_CONTROL names a pipe (a FIFO the launcher made) that takes "show" and
++ * "hide", a line each, from `vm view` and the launcher; VMLAB_WINDOW_STATE_FILE is kept at
++ * "shown" or "hidden". A hidden window is no window on the desktop: not in the dock, not in
++ * Alt+Tab, and it takes no keys. The clipboard is not shared while it is hidden
++ * (gtk-clipboard.c). The title bar's hide button (left of full screen) is there only with the
++ * pipe, the one way to show the window again.
++ */
++static void gd_vmlab_window_state(GtkDisplayState *s)
++{
++    const char *path = g_getenv("VMLAB_WINDOW_STATE_FILE");
++
++    if (path) {
++        g_file_set_contents(path, gtk_widget_get_visible(s->window) ? "shown\n" : "hidden\n",
++                            -1, NULL);
++    }
++}
++
++static void gd_vmlab_show(GtkDisplayState *s)
++{
++    if (!gtk_widget_get_visible(s->window) && g_getenv("VMLAB_WINDOW_MAXIMIZE")) {
++        gtk_window_maximize(GTK_WINDOW(s->window));
++    }
++    gtk_window_present(GTK_WINDOW(s->window));
++    gd_vmlab_window_state(s);
++}
++
++static void gd_vmlab_hide(GtkDisplayState *s)
++{
++    gtk_widget_hide(s->window);
++    gd_vmlab_window_state(s);
++}
++
++static gboolean gd_vmlab_control(gint fd, GIOCondition condition, gpointer opaque)
++{
++    GtkDisplayState *s = opaque;
++    char buf[256];
++    ssize_t n;
++
++    while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
++        g_auto(GStrv) lines = NULL;
++        char **line;
++
++        buf[n] = 0;
++        lines = g_strsplit(buf, "\n", -1);
++        for (line = lines; *line; line++) {
++            g_strstrip(*line);
++            if (!strcmp(*line, "show")) {
++                gd_vmlab_show(s);
++            } else if (!strcmp(*line, "hide")) {
++                gd_vmlab_hide(s);
++            } else if (**line) {
++                warn_report("vmlab: the window's control pipe got \"%s\" (show or hide)", *line);
++            }
++        }
++    }
++    return G_SOURCE_CONTINUE;
++}
++
++/* the pipe stays open for reading and writing, so it never reads as ended between writers */
++static bool gd_vmlab_control_init(GtkDisplayState *s)
+ {
+-    GtkWidget *button = gtk_button_new_from_icon_name("view-fullscreen-symbolic",
+-                                                      GTK_ICON_SIZE_MENU);
++    const char *path = g_getenv("VMLAB_WINDOW_CONTROL");
++    int fd;
++
++    if (!path) {
++        return false;
++    }
++    fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    if (fd < 0) {
++        warn_report("vmlab: the window's control pipe %s: %s", path, strerror(errno));
++        return false;
++    }
++    g_unix_fd_add(fd, G_IO_IN, gd_vmlab_control, s);
++    return true;
++}
++
++static void gd_vmlab_hide_clicked(GtkButton *button, void *opaque)
++{
++    gd_vmlab_hide(opaque);
++}
++
++/* a title bar button with the full screen button's look */
++static GtkWidget *gd_vmlab_title_bar_button(const char *icon, const char *tooltip)
++{
++    GtkWidget *button = gtk_button_new_from_icon_name(icon, GTK_ICON_SIZE_MENU);
+     GtkCssProvider *css = gtk_css_provider_new();
+ 
+     gtk_button_set_relief(GTK_BUTTON(button), GTK_RELIEF_NONE);
+-    gtk_widget_set_tooltip_text(button, _("Full screen (Ctrl+Alt+F to leave)"));
++    gtk_widget_set_tooltip_text(button, tooltip);
+     gtk_widget_set_can_focus(button, FALSE);
+     gtk_widget_set_focus_on_click(button, FALSE);
+     gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+@@ -3176,6 +3261,14 @@ static GtkWidget *gd_vmlab_full_screen_button(GtkDisplayState *s)
+                                    GTK_STYLE_PROVIDER(css),
+                                    GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+     g_object_unref(css);
++    return button;
++}
++
++static GtkWidget *gd_vmlab_full_screen_button(GtkDisplayState *s)
++{
++    GtkWidget *button = gd_vmlab_title_bar_button("view-fullscreen-symbolic",
++                                                  _("Full screen (Ctrl+Alt+F to leave)"));
++
+     g_signal_connect(button, "clicked", G_CALLBACK(gd_vmlab_full_screen_clicked), s);
+     return button;
+ }
+@@ -3267,6 +3360,14 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+         g_object_ref_sink(s->menu_bar);
+         gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header),
+                                 gd_vmlab_full_screen_button(s));
++        if (gd_vmlab_control_init(s)) {
++            GtkWidget *hide = gd_vmlab_title_bar_button(
++                "view-conceal-symbolic",
++                _("Hide the window (the VM keeps running; vm view shows it again)"));
++
++            g_signal_connect(hide, "clicked", G_CALLBACK(gd_vmlab_hide_clicked), s);
++            gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header), hide);
++        }
+         gtk_window_set_titlebar(GTK_WINDOW(s->window), s->vmlab_header);
+         gtk_widget_add_events(s->window, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
+         g_signal_connect(s->window, "button-press-event",
+@@ -3290,11 +3391,21 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+     gtk_container_add(GTK_CONTAINER(s->window), s->vbox);
+ 
+     /* vmlab: open filling the screen (the desktop's bars and the title bar stay) */
+-    if (g_getenv("VMLAB_WINDOW_MAXIMIZE")) {
++    if (g_getenv("VMLAB_WINDOW_MAXIMIZE") && !g_getenv("VMLAB_WINDOW_HIDDEN")) {
+         gtk_window_maximize(GTK_WINDOW(s->window));
+     }
+ 
+-    gtk_widget_show_all(s->window);
++    if (g_getenv("VMLAB_WINDOW_HIDDEN")) {
++        /* vmlab: made but not shown (gd_vmlab_show); its parts are ready for when it is */
++        gtk_widget_show_all(s->vbox);
++        if (s->vmlab_header) {
++            gtk_widget_show_all(s->vmlab_header);
++        }
++        gtk_widget_realize(s->window);
++    } else {
++        gtk_widget_show_all(s->window);
++    }
++    gd_vmlab_window_state(s);
+ 
+     for (idx = 0; idx < s->vcs->len; idx++) {
+         VirtualConsole *v = g_ptr_array_index(s->vcs, idx);
