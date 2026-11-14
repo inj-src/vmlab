@@ -42,7 +42,7 @@ index 4554fd8..b0931f3 100644
  
      switch (event->owner_change.reason) {
 diff --git a/ui/gtk.c b/ui/gtk.c
-index 2313fd8..c7a195e 100644
+index 2313fd8..8b95abd 100644
 --- a/ui/gtk.c
 +++ b/ui/gtk.c
 @@ -49,6 +49,7 @@
@@ -177,7 +177,7 @@ index 2313fd8..c7a195e 100644
                                  gd_vmlab_full_screen_button(s));
 +        if (gd_vmlab_control_init(s)) {
 +            GtkWidget *hide = gd_vmlab_title_bar_button(
-+                "view-conceal-symbolic",
++                "view-restore-symbolic",
 +                _("Hide the window (the VM keeps running; vm view shows it again)"));
 +
 +            g_signal_connect(hide, "clicked", G_CALLBACK(gd_vmlab_hide_clicked), s);
