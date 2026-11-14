@@ -241,8 +241,10 @@ stop(){
   for _ in $(seq 20); do systemctl --user is-active --quiet vmlab-win-venus || break; sleep 0.5; done
   rm -f "$S/qemu.pid"; stop_helpers; echo stopped
 }
+# Commands here are PowerShell: VMLAB_SHELL=pwsh asks the guest's vmshell for it (its default is
+# Git Bash; a guest from before vmshell ignores the variable).
 ssh_guest(){ ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" \
-  -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR dev@127.0.0.1 "$@"; }
+  -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -o SetEnv=VMLAB_SHELL=pwsh dev@127.0.0.1 "$@"; }
 
 # firmware: the firmware's file. The system's OVMF with a quiet start (no TianoCore logo, so
 # Windows draws its own, and no "BdsDxe: loading" lines: firmware/make-firmware.py), made again
