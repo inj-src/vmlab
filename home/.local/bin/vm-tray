@@ -67,9 +67,21 @@ class Tray:
 
     def run(self, command, busy=None):
         """`vm COMMAND NAME`, without waiting; while a restart or shutdown runs, the menu says so
-        and takes nothing else."""
-        proc = subprocess.Popen([VM, command, self.name], stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=sys.stderr)
+        and takes nothing else. In a unit of its own: this tray's unit is bound to the VM's, so
+        a shutdown stops it, and a `vm stop` among its processes would be killed half way (the
+        VM's helpers left running). Errors go to the tray's log."""
+        log = os.path.join(os.path.dirname(os.path.abspath(self.state_file)), 'tray.log')
+        runtime = os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
+        proc = subprocess.Popen(
+            ['systemd-run', '--user', '--quiet', '--collect', '--wait',
+             '-p', 'StandardOutput=null', '-p', f'StandardError=append:{log}',
+             *(f'--setenv={v}={os.environ[v]}' for v in ('WAYLAND_DISPLAY', 'DISPLAY',
+                'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS') if os.environ.get(v)),
+             VM, command, self.name],
+            # systemd's user manager is on the user's bus, which the tray's own bus is not in
+            # the test rig (gpu/rig/nested.sh)
+            env=dict(os.environ, DBUS_SESSION_BUS_ADDRESS=f'unix:path={runtime}/bus'),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=sys.stderr)
         if busy:
             self.busy = busy
             GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc.pid, self.done)

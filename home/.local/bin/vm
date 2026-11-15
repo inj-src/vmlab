@@ -256,7 +256,8 @@ cmd_restart(){
   [[ $(state_of "$n") == running ]] || die "$n is not running"
   case $n in
     win) guest win 'shutdown.exe -r -t 0' > /dev/null 2>&1 ;;
-    mac) guest mac 'sudo -n shutdown -r now' > /dev/null 2>&1 ;;
+    # macOS drops the SSH connection before shutdown returns, so its exit status says nothing
+    mac) guest mac 'sudo -n true' > /dev/null 2>&1 && { guest mac 'sudo -n shutdown -r now' > /dev/null 2>&1 || true; } ;;
   esac || die "$n did not take the restart (no SSH yet?)"
   # SSH goes away as the guest shuts down, then comes back
   local deadline=$((SECONDS + 120))

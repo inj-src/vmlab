@@ -637,13 +637,32 @@ Mac could not be watched at all). `window.sh` holds what the two launchers share
   current QEMU); otherwise it starts as before (no window, no FIFO, no tray), since the
   working tree is live and an older binary would show its window.
 - **Costs**: a window ties the VM to the desktop's session, so if GNOME Shell crashes or the
-  user logs out, an agent's VM ends with it. A hidden window keeps 1920×1080 whatever the
-  screen; `vm view` shows it maximized and the guest takes the window's size as it does with
-  `--window`.
-- Checked 2026-11-15 in the rig (`rig/nested.sh`): the Windows window hidden, shown, hidden by
-  its button and shown again (no guest); the Mac title bar's hide button writes `hide` and
-  hovers; both tray icons recoloured in the nested top bar, the menu opens and its first item
-  follows the state file. Not yet on the real VMs.
+  user logs out, an agent's VM ends with it. A hidden window keeps the guest at 1920×1080
+  whatever the screen, so an agent's coordinates never change (a resize under an agent broke
+  its clicks before): `vm view` shows that picture scaled into the maximized window, with bars
+  at the sides; full screen shows it pixel for pixel on a 1920×1080 screen. Each time the
+  window shows, GNOME asks "Allow inhibiting shortcuts" until the app has an Allow (a Deny
+  holds only for that window).
+- **The tray's commands run in units of their own** (`systemd-run --wait`, on the user's bus):
+  the tray's unit is bound to the VM's, so a shutdown stops it, and a `vm stop` among its own
+  processes was killed half way (Windows' network helper left running).
+- **`vm restart mac`** asks `sudo -n true` first and then ignores the restart's exit status:
+  macOS drops the SSH connection before `shutdown -r now` returns.
+- Checked 2026-11-15 on the real VMs, in the rig (`rig/nested.sh`) with a tray on the rig's
+  bus, each VM on its `pebble` disk:
+  - both start hidden (FIFO and state file, no window, no dock entry); `vm view` shows the
+    window maximized; the title bar's hide button hides it with the VM running; the Mac's
+    title bar buttons hover;
+  - the tray menu (Windows 11 / macOS 26 Tahoe, Show or Hide, Restart, Shut down): Show and
+    Hide follow and set the state; Restart takes Windows 28 s and the Mac 29 s, the label
+    reads "Restarting…" meanwhile and the window stays shown; Shut down ends the VM in 9 to
+    14 s and the tray icon and helpers with it;
+  - the clipboard, text through `wl-copy`/`wl-paste` in the rig: on Windows both ways shared
+    when shown, neither way while hidden, shared again once shown; on the Mac the same,
+    guest to host (the Mac's own clipboard is not read);
+  - on the real desktop, a plain `vm start` of each: hidden, and its item
+    (`/org/ayatana/NotificationItem/vmlab_win`, `vmlab_mac`) registered with the top bar;
+    gone after `vm stop`.
 
 ## macOS: `reims/mac26.sh` (reims-vgpu)
 
