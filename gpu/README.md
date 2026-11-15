@@ -269,7 +269,8 @@ were right, which is why dynamic buffers, index buffers and `gl_VertexID` draws 
   get what a commit changes: in the ready state `install`, restart Windows, stop,
   `vm commit win --keep-states`; then for each state `vm start win NAME`, `install`, restart
   Windows, stop, `vm save win NAME --replace "<its note>"`. Done so on 2026-11-13 with
-  patches 9001 and 9002 (`defender`, `pebble`, `office-wip`); about 2 minutes a state.
+  patches 9001 and 9002 (`defender`, `pebble`, and `office-wip`, deleted the same evening);
+  about 2 minutes a state.
 - Tests, in the guest: `node page-shot.mjs file:///C:/Users/dev/gl-vertex.html out.png 6` (18
   ways to feed vertices; the static-buffer ones fail on the release DLL) and `gl-features.html`
   (72 cases). Both pass with the fix. The first Chrome start after swapping the DLL once failed
@@ -782,7 +783,8 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     - The agent in a state must match: one saved before 2026-11-13 has the old agent, which
       waits for a serial port that is no longer there, and its clipboard is dead until
       `mac/install-spice-agent.sh` has run in it (done for `clean`, `mine`, `pebble`,
-      `office-wip`).
+      `office-wip`; since 2026-11-13 evening only `clean` and `pebble` remain: `mine` was
+      deleted and the Mac's `office-wip` became `pebble`).
     - **Why**: the link was a virtio serial port (`com.redhat.spice.0`), and macOS stopped
       reading it at random. It stops offering receive buffers on the port's queue
       (`x-query-virtio-queue-status`, queue 4: last-avail = shadow-avail = used) while the
