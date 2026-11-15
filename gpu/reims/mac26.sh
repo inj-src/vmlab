@@ -415,7 +415,7 @@ case ${1:-} in
   commit) stopped
     qemu-img snapshot -l "$V/disk.qcow2" | grep -qw clean && qemu-img snapshot -d clean "$V/disk.qcow2"
     qemu-img snapshot -c clean "$V/disk.qcow2"; st_mark clean; echo "the disk as it is now is the clean snapshot" ;;
-  state) [[ ${2:-} == list ]] || stopped
+  state) [[ ${2:-} == list || ${2:-} == default-size ]] || stopped
     case ${2:-} in
       save) st_valid "${3:-}"
         if has_snapshot "$3"; then qemu-img snapshot -d "$3" "$V/disk.qcow2"; fi
@@ -424,8 +424,11 @@ case ${1:-} in
         st_guard "${4:-}"; qemu-img snapshot -a "$3" "$V/disk.qcow2"; st_mark "$3"; echo "loaded: $3" ;;
       rm) st_valid "${3:-}"; has_snapshot "$3" || die "no state '$3'"
         qemu-img snapshot -d "$3" "$V/disk.qcow2"; st_forget "$3"; echo "deleted: $3" ;;
-      list) snapshots ;;
-      *) die "usage: mac26.sh state save NAME | load NAME [--discard] | rm NAME | list" ;;
+      list) # NAME, bytes (what it takes beside the default state: ../qcow2-sizes.py), time saved
+        snapshots | sort | join -t $'\t' - <(python3 -I /vmlab/tools/vmlab/gpu/qcow2-sizes.py "$V/disk.qcow2" clean | sort) |
+          awk -F'\t' -v OFS='\t' '{ print $1, $4, $3 }' ;;
+      default-size) python3 -I /vmlab/tools/vmlab/gpu/qcow2-sizes.py "$V/disk.qcow2" clean | awk -F'\t' '$1 == "clean" { print $2 }' ;;
+      *) die "usage: mac26.sh state save NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
     esac ;;
   *) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

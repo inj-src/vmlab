@@ -492,6 +492,14 @@ their marks in `/vmlab/run/win-venus/trial-states`, away from the real ones.
 The Mac keeps its states as snapshots inside its one disk file, beside `clean`
 (`reims/mac26.sh state …`); each is a whole disk of its own, and a commit leaves them alone.
 
+**Sizes in `vm states`** (2026-11-15, the user's request): the default state (`clean` here and
+in the launchers, `default` in what `vm` shows; `vm start NAME clean` still works) shows
+everything it takes: Windows' base and ready layers, the Mac's `clean` snapshot. Every other
+state shows what it takes beside the default: Windows' state file, and for a Mac snapshot the
+disk clusters it uses that `clean` does not (`qcow2-sizes.py`, which reads the snapshots' L1
+and L2 tables: qemu-img tells no snapshot's size). Clusters two named states share count for
+both, so the sizes may add up to more than the disk takes.
+
 One state of `win` belongs to the lab: `defender`, the clean state with Defender antivirus
 switched on again (`win/enable-defender.ps1`). A commit with `--drop-states` or a new ready
 state deletes it; `win/README-defender.txt` has the steps that build it again.

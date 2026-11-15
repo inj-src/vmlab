@@ -385,7 +385,7 @@ case ${1:-} in
     st_mark clean
     [[ ${2:-} != --keep-states ]] || states_release
     echo "committed: $READY is the ready state" ;;
-  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm ]] && die "stop it first"
+  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm && ${2:-} != default-size ]] && die "stop it first"
     case ${2:-} in
       save) st_valid "${3:-}"; mkdir -p "$STATES" "$S"
         [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
@@ -403,7 +403,9 @@ case ${1:-} in
           [[ -f $f ]] || continue
           printf '%s\t%s\t%s\n' "$(basename "$f" .qcow2)" "$(( $(stat -c %b "$f") * 512 ))" "$(stat -c %Y "$f")"
         done ;;
-      *) die "usage: win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list" ;;
+      default-size) # bytes on disk of the default (clean) state: the installed base and the ready layer on it
+        echo $(( ($(stat -c %b "$BASE") + $(stat -c %b "$READY")) * 512 )) ;;
+      *) die "usage: win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
     esac ;;
   setup) shift; exec "$HERE/setup-ready.sh" "$@" ;;
   *) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;

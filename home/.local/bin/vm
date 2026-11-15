@@ -91,15 +91,16 @@ cmd_start(){
   local other=""
   [[ $(state_of "$n") == running ]] || other=$(running_vms | grep -vx "$n" || true)
   [[ -z $other ]] || die "'$other' is running (one VM at a time). Leave it alone and ask the user, or the user can run: vm stop $other"
+  [[ $state == clean ]] && state=default
   if [[ -n $state ]]; then
     local cur; cur=$(st_cur "$n")
     if [[ $(state_of "$n") == running ]]; then
       [[ $cur == "$state" ]] || die "$n is running on '$cur' (vm stop $n first)"
     elif [[ $cur == "$state" ]]; then
-      if st_chg "$n" && [[ $state != clean ]]; then
+      if st_chg "$n" && [[ $state != default ]]; then
         echo "$n goes on from where it stopped: '$state' with changes not saved (for the state as saved: vm reset $n --discard, then start again)"
       fi
-    elif [[ $state == clean ]]; then "${RUN[$n]}" reset > /dev/null || exit 1
+    elif [[ $state == default ]]; then "${RUN[$n]}" reset > /dev/null || exit 1
     else "${RUN[$n]}" state load "$state" > /dev/null || exit 1
     fi
   fi
@@ -140,16 +141,16 @@ cmd_reset(){
   [[ -z $flag || $flag == --discard ]] || die "usage: vm reset <name> [--discard]"
   [[ $(state_of "$n") != running ]] || die "stop $n first (vm stop $n)"
   "${RUN[$n]}" reset $flag >/dev/null || exit 1
-  echo "$n reset to its clean state"
+  echo "$n reset to its default state"
 }
 
 cmd_commit(){
-  # Make the stopped VM's disk as it is now the clean state that reset returns to.
+  # Make the stopped VM's disk as it is now the default state that reset returns to.
   local n=$1 flag=${2:-}; need "$n"
   [[ $flag =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: vm commit <name> [--keep-states|--drop-states]"
   [[ $(state_of "$n") != running ]] || die "stop $n first"
   "${RUN[$n]}" commit $flag >/dev/null || exit 1
-  echo "$n: its disk as it is now is the clean state"
+  echo "$n: its disk as it is now is the default state"
 }
 
 # vm ssh <name> [command...]: the same as `ssh win` / `ssh mac` (the guests put every session on
@@ -378,7 +379,8 @@ cmd_cache(){
 # ---- Named states: a VM's disk kept under a name (the launchers do the keeping: gpu/states.sh).
 # The marks and the notes are files in $STATES_DIR/<vm>/.
 STATES_DIR=$LAB/images/states
-st_cur(){ cat "$STATES_DIR/$1/.current" 2>/dev/null || echo clean; }
+# The default state: what reset returns to. The launchers and the disks call it clean
+st_cur(){ local c; c=$(cat "$STATES_DIR/$1/.current" 2>/dev/null || echo clean); [[ $c == clean ]] && c=default; echo "$c"; }
 st_chg(){ [[ -e $STATES_DIR/$1/.changed ]]; }
 st_has(){ "${RUN[$1]}" state list | cut -f1 | grep -qx -- "$2"; }
 st_size(){ [[ $1 == - ]] && echo - || numfmt --to=iec --format=%.1f "$1"; }
@@ -387,13 +389,14 @@ ask(){ local a; read -r -p "$1 [y/N] " a < /dev/tty; [[ $a == [yY]* ]]; }
 tty_both(){ [[ -t 0 && -t 1 ]]; }
 
 # One line a state, tabs between: vm, state, bytes or -, time saved (epoch) or -, "loaded" where
-# the VM's disk is that state, "changed" where it ran since, the note. The clean state is first.
+# the VM's disk is that state, "changed" where it ran since, the note. The default state is first.
 state_rows(){
   local n name bytes when cur
   for n in win mac; do
     cur=$(st_cur "$n")
-    printf '%s\tclean\t-\t-\t%s\t%s\t%s\n' "$n" "$([[ $cur == clean ]] && echo loaded || echo -)" \
-      "$([[ $cur == clean ]] && st_chg "$n" && echo changed || echo -)" "what vm reset $n returns to"
+    printf '%s\tdefault\t%s\t-\t%s\t%s\t%s\n' "$n" "$("${RUN[$n]}" state default-size 2>/dev/null || echo -)" \
+      "$([[ $cur == default ]] && echo loaded || echo -)" \
+      "$([[ $cur == default ]] && st_chg "$n" && echo changed || echo -)" "what vm reset $n returns to"
     while IFS=$'\t' read -r name bytes when; do
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$name" "$bytes" "$when" "$([[ $cur == "$name" ]] && echo loaded || echo -)" \
         "$([[ $cur == "$name" ]] && st_chg "$n" && echo changed || echo -)" "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)"
@@ -429,7 +432,7 @@ state_lines(){
     [[ $cur == loaded && $(state_of "$n") == running ]] && W[i]=running C[i]=$'\e[32m'
     [[ $when == - ]] || M[i]="saved $(st_day "$when")"
     [[ $bytes == - ]] || R[i]=$(st_room "$bytes")
-    [[ $name == clean ]] && T[i]="what a reset returns to"
+    [[ $name == default ]] && T[i]="what a reset returns to"
     (( ${#name} > wn )) && wn=${#name}; (( ${#W[i]} > ww )) && ww=${#W[i]}
     (( ${#M[i]} > wm )) && wm=${#M[i]}; (( ${#R[i]} > wr )) && wr=${#R[i]}
   done < <(state_rows)
@@ -482,18 +485,18 @@ state_do(){
   [[ $act != new ]] || read -r -e -p "Name for $n as it is now: " new < /dev/tty || true
   (
     case $act in
-      save) [[ $name != clean ]] || die "the clean state is not saved over (vm commit $n changes it)"
+      save) [[ $name != default ]] || die "the default state is not saved over (vm commit $n changes it)"
         ask1 "Save $n as it is now over '$name'?" || exit 3
         stop_for_save "$n" && cmd_save "$n" "$name" --replace ;;
       new) [[ -n $new ]] || exit 3
-        [[ $new =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $new != clean ]] || die "a name is up to 16 lower-case letters, digits and . _ -"
+        [[ $new =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $new != clean && $new != default ]] || die "a name is up to 16 lower-case letters, digits and . _ - (not default or clean)"
         ! st_has "$n" "$new" || die "$n has a state '$new' already"
         read -r -e -p "Note (may be empty): " note < /dev/tty
         stop_for_save "$n" && cmd_save "$n" "$new" $note ;;
-      note) [[ $name != clean ]] || die "the clean state has no note"
+      note) [[ $name != default ]] || die "the default state has no note"
         read -r -e -i "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)" -p "Note on '$name': " note < /dev/tty
         cmd_note "$n" "$name" "$note" ;;
-      clear) [[ $name != clean ]] || die "the clean state cannot be deleted"
+      clear) [[ $name != default ]] || die "the default state cannot be deleted"
         ask1 "Delete $n's state '$name'? This cannot be undone." || exit 3
         cmd_clear "$n" "$name" -y ;;
     esac
@@ -594,15 +597,15 @@ vm restart <name>              restart the guest's OS, and wait for SSH
 vm ip <name>, vm port <name>   where the VM's SSH is: 127.0.0.1 and a port (win 2222, mac 2227)
 Shared folder: /vmlab/share on this machine is C:\share on win and ~/share on mac.
 vm stop <name>                 graceful shutdown (forced after 2 min)
-vm reset <name> [--discard]    discard all changes since the clean state (VM must be stopped).
+vm reset <name> [--discard]    discard all changes since the default state (VM must be stopped).
                                A VM that ran on a named state and was not saved since is
                                only reset with --discard
-vm commit <name>               make the current state the new clean state (VM must be stopped).
-                               win: its named states stand on the clean state.
+vm commit <name>               make the current state the new default state (VM must be stopped).
+                               win: its named states stand on the default state.
                                --keep-states moves them to the new one, each as it was;
                                --drop-states deletes them
 vm save <name> <state> [note]  keep the stopped VM's disk as it is under a name, beside the
-                               clean state. --replace writes over a state of that name
+                               default state. --replace writes over a state of that name
 vm note <name> <state> text    the line of text the list shows beside a state
 vm states                      the states of both VMs. In a terminal: a list to work in (start,
                                save, note, delete). --plain: a table. --json: for programs

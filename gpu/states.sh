@@ -12,8 +12,8 @@
 # since. A run on the clean state is dropped without a question, as `reset` always did.
 
 st_valid(){
-  [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $1 != clean ]] ||
-    die "a state's name is up to 16 lower-case letters, digits and . _ - (and not 'clean'): '$1'"
+  [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $1 != clean && $1 != default ]] ||
+    die "a state's name is up to 16 lower-case letters, digits and . _ - (and not 'clean' or 'default': the default state's names): '$1'"
 }
 st_current(){ cat "$STATES/.current" 2>/dev/null || echo clean; }
 st_changed(){ [[ -e $STATES/.changed ]]; }

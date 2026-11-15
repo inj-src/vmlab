@@ -19,8 +19,8 @@ How to use the lab's two VMs: the rules, the commands, getting code in, running 
 
 - **One VM at a time.** If `vm status` shows another VM running, leave it alone and ask the user. Another agent, or the user at the VM window, may be in the middle of something.
 - **Start without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch or take over.
-- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the clean state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them: a setup worth keeping across resets is a [saved state](#saved-states).
-- `vm commit` changes the clean state for every agent. Run it only when the user asks for a permanent change. On `win` the saved states stand on the clean state: `vm commit win --keep-states` keeps each as it was (a state does not get the commit's change: make it inside the state too, and save it again), `--drop-states` deletes them.
+- **Clean up what you started.** When you finish, run `vm stop <name>` and then `vm reset <name>`. Reset discards everything since the default state, except the build cache (`C:\cache`, `~/cache`). Though aggressive resets might bring repetitive tasks, find a good balance between them: a setup worth keeping across resets is a [saved state](#saved-states).
+- `vm commit` changes the default state for every agent. Run it only when the user asks for a permanent change. On `win` the saved states stand on the default state: `vm commit win --keep-states` keeps each as it was (a state does not get the commit's change: make it inside the state too, and save it again), `--drop-states` deletes them.
 - **A saved state you did not make is not yours:** start it, but do not save over it or delete it. `pebble` on each VM is the user's own setup. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started yourself; otherwise ask the user.
 - **GUI work goes through vmlab-mcp.** For anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer), use [its tools](#driving-the-gui-vmlab-mcp); every Claude Code and Codex session has them. The page inside an Electron app is the one place with a second way, Playwright: [choose per check](#running-things-in-a-vm).
 - The user may take over the VM window at any time. If GUI automation sees unexpected input or focus changes, stop and ask.
@@ -48,7 +48,7 @@ vm gui <name> click X Y | type 'text' | key ctrl+s
                              its real keyboard and pointer, at pixels of that picture
 vm view <name>               boot it in its window for the user (mouse and keyboard)
 vm stop <name>               shut down
-vm reset <name>              back to the clean state
+vm reset <name>              back to the default state
 vm states --plain            the saved states of both VMs (--json for a program)
 vm start <name> <state>      boot a saved state
 vm save <name> <state> "note"  keep the stopped VM as it is under a name
@@ -57,7 +57,7 @@ vm clear <name> <state>      delete a saved state
 
 ## Saved states
 
-A saved state is a VM's whole disk kept under a name beside the clean state: a Windows with a project installed and its database filled, a browser that is logged in. Use one when you would otherwise redo the same setup after every reset.
+A saved state is a VM's whole disk kept under a name beside the default state: a Windows with a project installed and its database filled, a browser that is logged in. Use one when you would otherwise redo the same setup after every reset.
 
 - **See them:** `vm states --plain` (name, size, when saved, a note, and which one the VM is on). Run in a terminal by the user, `vm states` is a list to work in.
 - **Use one:** `vm start win hq` boots it as it was saved. What your run changes is not in the state until you save again, so every agent starts from the same thing. Clean up with `vm stop win` and `vm reset win --discard`.
