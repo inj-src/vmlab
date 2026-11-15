@@ -4,7 +4,7 @@
 # win11-ready on it (the GPU driver and the rest of the ready state: reset returns to it,
 # commit writes to it, setup builds it again) and win11-venus on that (this run's changes).
 #
-#   win-venus.sh start <intel|nvidia> [--window]
+#   win-venus.sh start <intel|nvidia> [--window] [--defender]
 #                                       boot on that host GPU; --window: in a window on the
 #                                       user's screen with sound and a shared clipboard. It
 #                                       opens maximized and Windows takes its size once (1920x1042
@@ -30,7 +30,10 @@
 #                                       hides it (Windows keeps running), and the VM has an icon
 #                                       in the desktop's tray (show or hide, restart, shut down;
 #                                       ~/.local/bin/vm-tray).
-#                                       Either way the display is also on VNC, 127.0.0.1:5911
+#                                       Either way the display is also on VNC, 127.0.0.1:5911.
+#                                       --defender: Microsoft Defender on in the disk first
+#                                       (defender-on.sh; vm then updates its definitions). It
+#                                       stays on in this run's disk, and in a state saved from it
 #   win-venus.sh show | hide            the window on the screen, or off it (Windows runs on)
 #   win-venus.sh window                 the window: shown, hidden, or none (started without one)
 #   win-venus.sh stop                   ask Windows to shut down, then stop the helpers
@@ -124,20 +127,22 @@ start(){
       # host-layer/: without it the guest's Direct3D 11 uploads arrive with holes on this laptop
       [[ ${WIN_VENUS_LAYER:-on} == off ]] || layer=(--setenv=VK_LAYER_PATH="$HERE/host-layer"
         --setenv=VK_INSTANCE_LAYERS=VK_LAYER_VMLAB_coherent_memory) ;;
-    *) die "usage: win-venus.sh start <intel|nvidia> [--window]" ;;
+    *) die "usage: win-venus.sh start <intel|nvidia> [--window] [--defender]" ;;
   esac
+  shift
   [[ -x $QEMU ]] || die "build QEMU first: $HERE/build-qemu.sh"
   display=(-display "egl-headless,rendernode=$node" -vnc "127.0.0.1:$VNC_DISPLAY")
   # No --window: the window is made all the same, hidden, where a desktop can be reached, so
   # `show` (vm view) can put it on the screen later; a VNC viewer instead resized Windows and
   # broke an agent's clicks. It keeps Windows at 1920x1080 and has no sound, for an agent's run.
   # A QEMU built before qemu-patches/0014 has none of it: the window as before, and no tray.
-  local hideable=; grep -aq VMLAB_WINDOW_HIDDEN "$QEMU" && hideable=1
-  case ${2:-} in
+  local hideable= defender=; grep -aq VMLAB_WINDOW_HIDDEN "$QEMU" && hideable=1
+  for a in "$@"; do case $a in
     --window) window=shown ;;
-    '') [[ -n $hideable && ${WIN_VENUS_HIDDEN_WINDOW:-on} != off ]] && desktop && window=hidden ;;
-    *) die "usage: win-venus.sh start <intel|nvidia> [--window]" ;;
-  esac
+    --defender) defender=1 ;;
+    *) die "usage: win-venus.sh start <intel|nvidia> [--window] [--defender]" ;;
+  esac; done
+  [[ $window == shown || -z $hideable || ${WIN_VENUS_HIDDEN_WINDOW:-on} == off ]] || ! desktop || window=hidden
   case $window in
     shown|hidden) [[ $window == shown ]] && audio=pipewire
       # The window is GTK's plain (non-OpenGL) one beside egl-headless, which qemu-patches/0002
@@ -176,6 +181,8 @@ start(){
   mkdir -p "$S"
   [[ -f $READY ]] || die "no ready state ($READY): win-venus.sh setup"
   [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"
+  # .defender: the disk has Defender on (save and load carry it to and from NAME.defender)
+  [[ -z $defender ]] || { "$HERE/defender-on.sh" "$DISK" >&2 && : > "$STATES/.defender"; } || die "Defender was not turned on: not started"
   st_ran
   # Secure Boot has to be off for the test-signed driver: plain OVMF with its own variables,
   # the ready state's where it has saved them
@@ -320,7 +327,7 @@ backing_of(){ qemu-img info --output=json "$1" | python3 -I -c 'import json, sys
 state_names(){ local f n=(); for f in "$STATES"/*.qcow2; do [[ -f $f ]] && n+=("$(basename "$f" .qcow2)"); done; echo "${n[*]:-none}"; }
 
 case ${1:-} in
-  start) start "${2:-}" "${3:-}" ;;
+  start) shift; start "$@" ;;
   # Internal, a unit of its own beside a windowed VM: QEMU keeps $S/scale at the scale, in
   # percent, of the screen its window is on (VMLAB_WINDOW_SCALE_FILE), and gives Windows that
   # screen's pixels of the window. This gives Windows the same scaling, so that things in it
@@ -366,17 +373,20 @@ case ${1:-} in
     "$0" scp "$HERE/guest-scripts/d3d12-mode.ps1" dev@127.0.0.1:C:/vmlab/
     ssh_guest "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\d3d12-mode.ps1 ${2:-status}" ;;
   reset) alive qemu && die "stop it first"; st_guard "${2:-}"
-    rm -f "$DISK" "$S/OVMF_VARS.fd"; st_mark clean
+    rm -f "$DISK" "$S/OVMF_VARS.fd" "$STATES/.defender"; st_mark clean
     echo "this run's changes dropped: the next start is the ready state" ;;
   commit) alive qemu && die "stop it first"
     [[ ${2:-} =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: win-venus.sh commit [--keep-states|--drop-states]"
     [[ ${2:-} != --keep-states ]] || states_release   # what an earlier commit left unmoved
     [[ -f $DISK && -f $READY ]] || die "nothing to commit"
+    # Defender would scan every file a build writes, and once it has run, Windows does not let
+    # it be turned off again: the default state keeps it off
+    [[ ! -e $STATES/.defender ]] || die "this run has Defender on (started with --defender): the default state keeps it off. 'vm reset win' drops the run"
     # The named states are changes to READY as it is now: on another READY they are a broken disk
     if compgen -G "$STATES/*.qcow2" > /dev/null; then
       case ${2:-} in
         --keep-states) states_hold ;;
-        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$READY_HELD" ;;
+        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$STATES"/*.defender "$READY_HELD" ;;
         *) die "the ready state has named states on it, which a commit alone makes unusable: $(state_names). Commit with --keep-states (they stay as they are and grow by what the commit changed) or --drop-states (they are deleted)" ;;
       esac
     fi
@@ -391,14 +401,16 @@ case ${1:-} in
         [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
         cp --reflink=auto "$DISK" "$STATES/$3.qcow2.new"; mv "$STATES/$3.qcow2.new" "$STATES/$3.qcow2"
         cp "$([[ -f $S/OVMF_VARS.fd ]] && echo "$S/OVMF_VARS.fd" || echo "$READY_VARS")" "$STATES/$3.vars.fd"
+        if [[ -e $STATES/.defender ]]; then : > "$STATES/$3.defender"; else rm -f "$STATES/$3.defender"; fi
         st_mark "$3"; echo "saved: $3" ;;
       load) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
         st_guard "${4:-}"; mkdir -p "$S"
         cp --reflink=auto "$STATES/$3.qcow2" "$DISK.new"; mv "$DISK.new" "$DISK"
         cp "$STATES/$3.vars.fd" "$S/OVMF_VARS.fd"
+        if [[ -e $STATES/$3.defender ]]; then : > "$STATES/.defender"; else rm -f "$STATES/.defender"; fi
         st_mark "$3"; echo "loaded: $3" ;;
       rm) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
-        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd"; st_forget "$3"; echo "deleted: $3" ;;
+        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd" "$STATES/$3.defender"; st_forget "$3"; echo "deleted: $3" ;;
       list) for f in "$STATES"/*.qcow2; do   # NAME, bytes on disk, time saved
           [[ -f $f ]] || continue
           printf '%s\t%s\t%s\n' "$(basename "$f" .qcow2)" "$(( $(stat -c %b "$f") * 512 ))" "$(stat -c %Y "$f")"

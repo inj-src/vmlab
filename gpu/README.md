@@ -501,9 +501,26 @@ disk clusters it uses that `clean` does not (`qcow2-sizes.py`, which reads the s
 and L2 tables: qemu-img tells no snapshot's size). Clusters two named states share count for
 both, so the sizes may add up to more than the disk takes.
 
-One state of `win` belongs to the lab: `defender`, the clean state with Defender antivirus
-switched on again (`win/enable-defender.ps1`). A commit with `--drop-states` or a new ready
-state deletes it; `win/README-defender.txt` has the steps that build it again.
+**Defender on for a run** (`vm start win [state] --defender`, 2026-11-15, the user's request,
+in place of the lab's saved state `defender`): `win3d/defender-on.sh` gives Defender's
+services back Windows 11's start types in the stopped disk's SYSTEM hive, before QEMU starts,
+so any state can be started with it on. Offline, tamper protection has no say; once Windows has
+run Defender it refuses the way back, which is why the run and a state saved from it keep it.
+It needs no sudo and no host change: `qemu-storage-daemon` shows Windows' partition as a file
+(a FUSE export, through the setuid `fusermount3`), `ntfscat` and `ntfscp` read and write a
+file inside that image (ntfs-3g's mount would need root), and `hivexregedit --merge` edits the
+hive (hivex keeps the header's two sequence numbers equal, so Windows replays no log over the
+edit). 0.6 s, about 15 MB of the run's disk. `ntfscp` without `-f` refuses a volume Windows did
+not shut down cleanly (the lab has Fast Startup off: `HiberbootEnabled` 0), so a disk is never
+written under a dirty NTFS log. Then `vm` runs `win/update-defender.ps1` over SSH: once
+`WinDefend` runs, Microsoft's offline package `mpam-fe.exe` (Windows Update stays off), kept in
+the build cache's `C:\cache\defender` and downloaded again only at a week old, its
+Authenticode signature checked each time. Marks: `states/win/.defender` (the run's disk has it
+on) and `NAME.defender` beside a state; save and load carry it, reset drops it, a commit
+refuses it (the default state keeps Defender off). Checked 2026-11-16 on the real VM: 95 s from
+`vm start` to its return, the first download included, 5 s for the definitions step once the
+package is cached; real-time and tamper protection on; the EICAR test file found on write and
+every read of it refused. The lab's `defender` state was deleted then (10 GB of the SSD).
 
 ### The ready state (`$W setup`)
 
