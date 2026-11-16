@@ -24,8 +24,10 @@
 #                                       the window land on the guest's desktop.
 #                                       Without --window: the same window, made hidden, when
 #                                       a desktop can be reached (`show` puts it on the screen),
-#                                       at 1920x1080 always, without sound. No desktop, or
-#                                       WIN_VENUS_HIDDEN_WINDOW=off: no window at all.
+#                                       without sound. No desktop, or WIN_VENUS_HIDDEN_WINDOW=off:
+#                                       no window at all. Hidden, Windows is at 1920x1080 and
+#                                       100%; shown, it takes the window's pixels and the screen's
+#                                       scaling, as at a start with --window.
 #                                       With a window either way: the title bar's hide button
 #                                       hides it (Windows keeps running), and the VM has an icon
 #                                       in the desktop's tray (show or hide, restart, shut down;
@@ -165,7 +167,12 @@ start(){
       # the FIFO, and it writes shown or hidden to the file; HIDDEN makes it without showing it.
       for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR WAYLAND_DEBUG; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
       local size=${WIN_VENUS_WINDOW_SIZE:-first}
-      [[ $window == hidden ]] && size=1920x1080 && env+=(--setenv=VMLAB_WINDOW_HIDDEN=1)
+      [[ $window == hidden ]] && env+=(--setenv=VMLAB_WINDOW_HIDDEN=1)
+      # HIDDEN_SIZE (qemu-patches/0015): while the window is hidden Windows is offered 1920x1080,
+      # for an agent's clicks; shown, the window's own size (=first), a guest pixel to a screen
+      # pixel. A QEMU built before 0015 cannot change it on showing: 1920x1080 throughout.
+      if grep -aq VMLAB_WINDOW_HIDDEN_SIZE "$QEMU"; then env+=(--setenv=VMLAB_WINDOW_HIDDEN_SIZE=1920x1080)
+      elif [[ $window == hidden ]]; then size=1920x1080; fi
       env+=(--setenv=VMLAB_WINDOW=1 --setenv=VMLAB_WINDOW_APP_ID=vmlab-win11 --setenv="VMLAB_WINDOW_TITLE=Windows 11" --setenv=VMLAB_WINDOW_CLOSE_POWERS_DOWN=1
         --setenv="VMLAB_WINDOW_FIXED_SIZE=$size" --setenv="VMLAB_WINDOW_SCALE_FILE=$S/scale" --setenv="VMLAB_WINDOW_SIZE_FILE=$S/size"
         --setenv="VMLAB_WINDOW_CONTROL=$S/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$S/window.state")
@@ -253,9 +260,9 @@ start(){
     -pidfile "$S/qemu.pid"
   up qemu || { stop_helpers; die "QEMU did not start: $(tail -5 "$S/qemu.log")"; }
   for _ in $(seq 20); do python3 -I "$HERE/../pin.py" "$S/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
-  # With a window, Windows' own scaling follows the screen the window is on (scale-watch
-  # below); a hidden window's Windows stays at 1920x1080 and 100%.
-  [[ $window == shown ]] && unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
+  # With a window, Windows' own scaling follows the screen the window is on while it is shown,
+  # and is 100% while it is hidden (scale-watch below)
+  [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
   [[ $window == none || -z $hideable ]] || tray win vmlab-win-venus "$S/window.state"
   echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $window == none ]] || echo ", a window ($window)"), log $S/qemu.log"
 }
@@ -347,7 +354,8 @@ case ${1:-} in
           sized=$size tries=0; echo "$(date +%T) window size $size: not set: ${out##*$'\n'}"
         fi
       fi
-      want=$(cat "$S/scale" 2>/dev/null || true)
+      want=100      # hidden: the size and scaling an agent's run expects
+      [[ $(cat "$S/window.state" 2>/dev/null) == hidden ]] || want=$(cat "$S/scale" 2>/dev/null || true)
       if [[ $want =~ ^[0-9]+$ && $want != "$applied" ]]; then
         [[ -n $copied ]] || { "$0" scp "$HERE/guest-scripts/set-scale.ps1" "$HERE/guest-scripts/set-mode.ps1" dev@127.0.0.1:C:/vmlab/ 2>/dev/null && copied=1; }
         if [[ -n $copied ]] && out=$(guest_scale "$want" 2>&1); then

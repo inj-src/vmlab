@@ -629,7 +629,8 @@ Mac could not be watched at all). `window.sh` holds what the two launchers share
 |---|---|---|
 | Window | QEMU's GTK window, `qemu-patches/0014` | reims' SDL window, `reims/patches/window-shown-and-hidden-on-request.dev.patch` |
 | Opens hidden with | `VMLAB_WINDOW_HIDDEN=1` | `REIMS_VGPU_WINDOW_HIDDEN=1` |
-| Size while hidden | 1920×1080 | 1920×1080 (`REIMS_VGPU_WINDOW_MODE`) |
+| Size while hidden | 1920×1080, 100% (`VMLAB_WINDOW_HIDDEN_SIZE`, `qemu-patches/0015`) | 1920×1080 (`REIMS_VGPU_WINDOW_HIDDEN_MODE`, `reims/patches/window-hidden-mode.dev.patch`) |
+| Size while shown | the window's pixels, the screen's scaling (`=first`, the scale helper) | the window's pixels (`REIMS_VGPU_WINDOW_MODE=first`) |
 | Sound | only with `--window` | always (PipeWire) |
 | No window at all | `WIN_VENUS_HIDDEN_WINDOW=off`, or no desktop to reach | `MAC26_HIDDEN_WINDOW=off`, or no desktop to reach |
 
@@ -662,11 +663,24 @@ Mac could not be watched at all). `window.sh` holds what the two launchers share
   (`grep -a` for `VMLAB_WINDOW_HIDDEN` in the QEMU, `REIMS_VGPU_WINDOW_HIDDEN` in reims'
   current QEMU); otherwise it starts as before (no window, no FIFO, no tray), since the
   working tree is live and an older binary would show its window.
+- **Sizes** (2026-11-16, the user's request): hidden, the guest is at 1920×1080 (Windows at
+  100% too), the size an agent's run expects. Shown (`vm view`, the tray), it takes the
+  window's pixels, as a start with `--window` does: a guest pixel to a screen pixel, no bars
+  and no scaling; Windows' scaling follows the screen again (the `vmlab-win-venus-scale` unit
+  runs for every window now, and sets 100% while it is hidden). Hidden again, 1920×1080 again.
+  Before, a VM started hidden kept 1920×1080 when shown: the maximized window (1920×1042 under
+  its title bar) shrank it between black bars, text came out soft, and Windows' scaling no
+  longer followed the screen (the helper ran only for `--window`). Each change of size moves
+  and resizes the guest's windows: an agent that clicks by pixels while the user shows the
+  window may miss once (the GUI tools find elements by name). QEMU offers the window's size
+  0.3 s and 1.5 s after showing (the window's size settles after it is mapped); reims pins it
+  once the window has filled its screen for 0.4 s.
+  Checked on 2026-11-16 in the rig (a 1920×1080 screen), both VMs, measured inside the guest:
+  hidden 1920×1080; shown at 100% 1920×1008, at 125% 1920×990 (Windows' scaling 100% → 125%);
+  hidden again 1920×1080 (125% → 100%); the shown window filled to its edges, no bars. The
+  Mac takes the sizes; its scaling stays 1× (macOS has no 125%).
 - **Costs**: a window ties the VM to the desktop's session, so if GNOME Shell crashes or the
-  user logs out, an agent's VM ends with it. A hidden window keeps the guest at 1920×1080
-  whatever the screen, so an agent's coordinates never change (a resize under an agent broke
-  its clicks before): `vm view` shows that picture scaled into the maximized window, with bars
-  at the sides; full screen shows it pixel for pixel on a 1920×1080 screen. Each time the
+  user logs out, an agent's VM ends with it. Each time the
   window shows, GNOME asks "Allow inhibiting shortcuts" until the app has an Allow (a Deny
   holds only for that window).
 - **The tray's commands run in units of their own** (`systemd-run --wait`, on the user's bus):

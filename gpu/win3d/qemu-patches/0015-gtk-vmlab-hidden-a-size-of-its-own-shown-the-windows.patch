@@ -1,0 +1,123 @@
+gtk: vmlab: hidden, the guest keeps a size of its own; shown, it takes the window's
+
+VMLAB_WINDOW_HIDDEN_SIZE=1920x1080: while the window is hidden (0014) the guest is offered that
+size, whatever the window's, so a VM started for an agent keeps the same pixels under its
+clicks. The launcher sets it beside VMLAB_WINDOW_FIXED_SIZE=first for every window, hidden at
+the start or not. Shown (the control pipe's "show"), the window offers the guest its own size
+again, as at a start in a window (0005, 0007): a guest pixel to a screen pixel, with no bands
+beside the picture and no scaling. Before, a VM started hidden kept 1920x1080 when shown, and
+a maximized window (1920x1042 under the title bar) shrank it to fit: bands at the sides, soft
+text. Hidden again ("hide", or the title bar's button), it is offered the hidden size again.
+The size offered goes to VMLAB_WINDOW_SIZE_FILE either way, for the helper that sets the mode
+where the guest did not take it (win-venus.sh scale-watch).
+
+A shown window's size settles after it is mapped (maximized, on a scaled screen), so the offer
+is made 0.3 s and again 1.5 s after "show": the second puts right a size taken between.
+---
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 8b95abd..9ceb668 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -927,6 +927,25 @@ static void gd_set_ui_refresh_rate(VirtualConsole *vc, int refresh_rate)
+     qemu_console_set_ui_info(vc->gfx.dcl.con, &info, true);
+ }
+ 
++/*
++ * vmlab: VMLAB_WINDOW_HIDDEN_SIZE=1920x1080 is the size the guest is offered while the window is
++ * hidden (0014), whatever the window's: a VM no one looks at keeps a size of its own, for an
++ * agent's clicks. Shown, the window offers its own size again (gd_vmlab_show).
++ */
++static bool vmlab_hidden_size(VirtualConsole *vc, int *width, int *height)
++{
++    const char *size = g_getenv("VMLAB_WINDOW_HIDDEN_SIZE");
++    int w, h;
++
++    if (!size || !vc->s->window || gtk_widget_get_visible(vc->s->window) ||
++        sscanf(size, "%dx%d", &w, &h) != 2 || w < 640 || h < 480) {
++        return false;
++    }
++    *width = w;
++    *height = h;
++    return true;
++}
++
+ static void gd_set_ui_size(VirtualConsole *vc, gint width, gint height)
+ {
+     QemuUIInfo info;
+@@ -934,6 +953,18 @@ static void gd_set_ui_size(VirtualConsole *vc, gint width, gint height)
+     if (!qemu_console_ui_info_supported(vc->gfx.dcl.con)) {
+         return;
+     }
++    if (vmlab_hidden_size(vc, &width, &height)) {
++        /* the window's next showing offers its size again (=first) */
++        vmlab_first_taken = false;
++        vmlab_first_w = vmlab_first_h = 0;
++        vmlab_first_skip_w = vmlab_first_skip_h = 0;
++        if (g_getenv("VMLAB_WINDOW_SIZE_FILE")) {
++            g_autofree char *size = g_strdup_printf("%dx%d\n", width, height);
++
++            g_file_set_contents(g_getenv("VMLAB_WINDOW_SIZE_FILE"), size, -1, NULL);
++        }
++        goto offer;
++    }
+     /*
+      * vmlab: VMLAB_WINDOW_FIXED_SIZE=1920x1080 offers the guest that size whatever the window's
+      * is, and the window scales it. Otherwise every change of the window's size is offered to
+@@ -976,6 +1007,7 @@ static void gd_set_ui_size(VirtualConsole *vc, gint width, gint height)
+         vmlab_wl_guest_size(vc, &width, &height);
+     }
+ 
++offer:
+     info = *qemu_console_get_ui_info(vc->gfx.dcl.con);
+     info.width = width;
+     info.height = height;
+@@ -3178,19 +3210,48 @@ static void gd_vmlab_window_state(GtkDisplayState *s)
+     }
+ }
+ 
++/*
++ * vmlab: shown, the window offers the guest its own size (VMLAB_WINDOW_HIDDEN_SIZE kept it at
++ * another while hidden), a guest pixel to a screen pixel. Its size settles after it is mapped
++ * (maximized, on a scaled screen): the offer is made twice, and the second puts right a size
++ * the guest took between.
++ */
++static gboolean gd_vmlab_shown_size(gpointer opaque)
++{
++    GtkDisplayState *s = opaque;
++    VirtualConsole *vc = gd_vc_find_current(s);
++
++    if (vc && vc->type == GD_VC_GFX && gtk_widget_get_visible(s->window)) {
++        gd_vmlab_rescale(vc);
++    }
++    return G_SOURCE_REMOVE;
++}
++
+ static void gd_vmlab_show(GtkDisplayState *s)
+ {
+-    if (!gtk_widget_get_visible(s->window) && g_getenv("VMLAB_WINDOW_MAXIMIZE")) {
++    bool was_hidden = !gtk_widget_get_visible(s->window);
++
++    if (was_hidden && g_getenv("VMLAB_WINDOW_MAXIMIZE")) {
+         gtk_window_maximize(GTK_WINDOW(s->window));
+     }
+     gtk_window_present(GTK_WINDOW(s->window));
+     gd_vmlab_window_state(s);
++    if (was_hidden && g_getenv("VMLAB_WINDOW_HIDDEN_SIZE")) {
++        g_timeout_add(300, gd_vmlab_shown_size, s);
++        g_timeout_add(1500, gd_vmlab_shown_size, s);
++    }
+ }
+ 
+ static void gd_vmlab_hide(GtkDisplayState *s)
+ {
++    VirtualConsole *vc = gd_vc_find_current(s);
++
+     gtk_widget_hide(s->window);
+     gd_vmlab_window_state(s);
++    /* the hidden size again (gd_set_ui_size takes it while the window is hidden) */
++    if (vc && vc->type == GD_VC_GFX) {
++        gd_set_ui_size(vc, 0, 0);
++    }
+ }
+ 
+ static gboolean gd_vmlab_control(gint fd, GIOCondition condition, gpointer opaque)

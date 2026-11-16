@@ -21,9 +21,10 @@
 #                                             desktop (drop, below)
 #                                           Without --window: the same window, made
 #                                             hidden, when a desktop can be reached
-#                                             (`show` puts it on the screen), macOS at
-#                                             1920x1080 always. No desktop, or
-#                                             MAC26_HIDDEN_WINDOW=off: no window, 1920x1080.
+#                                             (`show` puts it on the screen). Hidden,
+#                                             macOS is at 1920x1080; shown, it takes the
+#                                             window's pixels, as with --window. No desktop,
+#                                             or MAC26_HIDDEN_WINDOW=off: no window, 1920x1080.
 #                                           With a window either way: the title bar's hide
 #                                             button hides it (macOS keeps running), and the
 #                                             VM has an icon in the desktop's tray (show or
@@ -109,7 +110,8 @@ start(){
   # `show` (vm view) can put it on the screen later (../window.sh). macOS stays at 1920x1080.
   # A QEMU built before reims' window-shown-and-hidden-on-request.dev.patch has none of it:
   # the window as before, and no tray.
-  local hideable=; grep -aq REIMS_VGPU_WINDOW_HIDDEN "${R%/bin/reims}/data/reims-ctl/qemu/current/bin/qemu-system-x86_64" && hideable=1
+  local qemu=${R%/bin/reims}/data/reims-ctl/qemu/current/bin/qemu-system-x86_64 hideable=
+  grep -aq REIMS_VGPU_WINDOW_HIDDEN "$qemu" && hideable=1
   [[ $window == none && -n $hideable && ${MAC26_HIDDEN_WINDOW:-on} != off ]] && desktop && window=hidden
   # The window was closed a moment ago and macOS is still shutting down (closed, below): the
   # start waits for it, 40 s at most.
@@ -191,12 +193,14 @@ start(){
       --setenv="VMLAB_DROP_COMMAND=$(readlink -f "$0") drop")
     # The guest keeps the resolution it starts with (our switch too, ../README.md): reims' own
     # window makes every resize a new macOS resolution.
-    # A hidden window keeps macOS at 1920x1080, for an agent's run: its pixels never change.
-    if [[ $window == hidden ]]; then
-      env+=(--setenv=REIMS_VGPU_WINDOW_HIDDEN=1 --setenv=REIMS_VGPU_WINDOW_MODE=1920x1080)
-    else
-      env+=(--setenv="REIMS_VGPU_WINDOW_MODE=${MAC26_WINDOW_SIZE:-first}")
-    fi
+    # While the window is hidden macOS is at 1920x1080, for an agent's run; shown, it takes the
+    # window's pixels (REIMS_VGPU_WINDOW_HIDDEN_MODE, patches/window-hidden-mode.dev.patch). A
+    # QEMU built before that cannot change it on showing: a hidden start keeps 1920x1080.
+    [[ $window == hidden ]] && env+=(--setenv=REIMS_VGPU_WINDOW_HIDDEN=1)
+    local mode=${MAC26_WINDOW_SIZE:-first}
+    if grep -aq REIMS_VGPU_WINDOW_HIDDEN_MODE "$qemu"; then env+=(--setenv=REIMS_VGPU_WINDOW_HIDDEN_MODE=1920x1080)
+    elif [[ $window == hidden ]]; then mode=1920x1080; fi
+    env+=(--setenv="REIMS_VGPU_WINDOW_MODE=$mode")
     # `show` and `hide` reach the window through the FIFO, which the title bar's hide button
     # writes to too; the window writes shown or hidden to the file (../window.sh).
     env+=(--setenv="VMLAB_WINDOW_CONTROL=$V/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$V/window.state")

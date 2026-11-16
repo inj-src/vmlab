@@ -1,0 +1,109 @@
+vmlab: hidden, the display keeps a size of its own; shown, it takes the window's pixels
+
+REIMS_VGPU_WINDOW_HIDDEN_MODE=1920x1080: while no window shows (window-shown-and-hidden-on-
+request), the display's mode is that size whatever the window's, so a Mac started for an agent
+keeps the pixels its clicks expect. It is pinned as a size nobody measured, so a window shown
+again keeps it until the window fills its screen for PIN_SETTLE and pins its own pixels
+(REIMS_VGPU_WINDOW_MODE=first, window-pinned-mode): a guest pixel to a screen pixel, no bars, no
+scaling. Before, a Mac started hidden had MODE=1920x1080 for good, and the maximized window
+(1920x1048) scaled it down between bars. Hidden again, the mode goes back to the hidden size.
+The lab's mac26.sh sets it for every window, beside MODE=first.
+--- a/crates/reims-vgpu-window/src/env.rs
++++ b/crates/reims-vgpu-window/src/env.rs
+@@ -26,6 +26,8 @@
+ pub const MODE_VAR: &str = "REIMS_VGPU_WINDOW_MODE";
+ /// The hidden start's variable (vmlab).
+ pub const HIDDEN_VAR: &str = "REIMS_VGPU_WINDOW_HIDDEN";
++/// The hidden mode's variable (vmlab).
++pub const HIDDEN_MODE_VAR: &str = "REIMS_VGPU_WINDOW_HIDDEN_MODE";
+ /// The close command's variable (vmlab).
+ pub const CLOSE_COMMAND_VAR: &str = "REIMS_VGPU_WINDOW_CLOSE_COMMAND";
+ 
+@@ -114,6 +116,12 @@
+         self.size
+     }
+ 
++    /// The scale the pinned mode was measured at; `None` for one that was not measured (fixed,
++    /// or the guest's own).
++    pub fn measured_at(&self) -> Option<f64> {
++        self.scale.map(f64::from_bits)
++    }
++
+     /// The guest set a mode: it is the pinned one where nothing was pinned yet (a window that
+     /// never filled its screen).
+     pub fn guest_set(&mut self, width: u32, height: u32) {
+@@ -224,6 +232,20 @@
+     *HIDDEN.get_or_init(|| std::env::var(HIDDEN_VAR).is_ok_and(|value| parse_switch(&value)))
+ }
+ 
++/// The mode the display offers while no window shows (vmlab; Linux): `REIMS_VGPU_WINDOW_HIDDEN_MODE`
++/// as `WxH` (`1920x1080`), whatever the windows' sizes, so a VM nobody looks at keeps the pixels an
++/// agent's clicks expect. Shown again, a window pins its pixels again (`REIMS_VGPU_WINDOW_MODE=first`,
++/// [`Pin`]). `None` where unset or not a size. Read once per process.
++pub fn hidden_mode() -> Option<(u32, u32)> {
++    static MODE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
++    *MODE.get_or_init(
++        || match parse_pinned_mode(std::env::var(HIDDEN_MODE_VAR).ok().as_deref()) {
++            PinnedMode::Fixed(width, height) => Some((u32::from(width), u32::from(height))),
++            PinnedMode::First | PinnedMode::Follows => None,
++        },
++    )
++}
++
+ /// The command that shuts the guest down when the person closes a window (vmlab; Linux):
+ /// `REIMS_VGPU_WINDOW_CLOSE_COMMAND`, a line for `/bin/sh -c`. The window hides and the command
+ /// runs, in place of telling the host, which powers the VM off; the host is told only where the
+--- a/crates/reims-vgpu-window/src/lib.rs
++++ b/crates/reims-vgpu-window/src/lib.rs
+@@ -66,5 +66,14 @@
+ pub use present::{Drawn, Presenter, VulkanTarget};
+ pub use screens::HostScreen;
+ 
++/// vmlab: whether the windows show (Linux: shown and hidden on request, `native::linux::control`;
++/// elsewhere always).
++pub fn windows_shown() -> bool {
++    #[cfg(target_os = "linux")]
++    return native::shown();
++    #[cfg(not(target_os = "linux"))]
++    return true;
++}
++
+ #[cfg(test)]
+ mod features;
+--- a/crates/reims-vgpu-window/src/native.rs
++++ b/crates/reims-vgpu-window/src/native.rs
+@@ -17,6 +17,8 @@
+ mod macos;
+ 
+ #[cfg(target_os = "linux")]
++pub(crate) use linux::control::shown;
++#[cfg(target_os = "linux")]
+ pub(crate) use linux::{
+     Surface, close, cursor_changed, guest_mode_changed, host_screens, now, open, sdl as sdl_os,
+ };
+--- a/crates/reims-vgpu/src/graphics.rs
++++ b/crates/reims-vgpu/src/graphics.rs
+@@ -2905,6 +2905,23 @@
+     /// that pins its mode states no scale at all, before the pin too: the scale is part of the
+     /// mode, and a guest told one sets its density by it and is told again when it changes.
+     fn mode(&self) -> Mode {
++        // vmlab: while no window shows, the mode `REIMS_VGPU_WINDOW_HIDDEN_MODE` names. It is the
++        // pinned one too, not measured at any scale, so a window shown again keeps it until it
++        // fills its screen and pins its own pixels (`reims_vgpu_window::env::Pin`).
++        if let Some((width, height)) = reims_vgpu_window::env::hidden_mode() {
++            if !reims_vgpu_window::windows_shown() {
++                let mut pin = self.pinned.lock();
++                if pin.size() != Some((width, height)) || pin.measured_at().is_some() {
++                    *pin = Pin::fixed(width, height);
++                }
++                return Mode {
++                    width,
++                    height,
++                    refresh_mhz: self.refresh_mhz,
++                    scale_120ths: 0,
++                };
++            }
++        }
+         let pinned = {
+             let mut pin = self.pinned.lock();
+             if reims_vgpu_window::env::pinned_mode() == PinnedMode::First {

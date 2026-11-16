@@ -583,7 +583,7 @@ vm start <win|mac> [state] [--window] [--defender]
                                --window: in a window on the desktop (full screen: its title
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
                                it land on the guest's desktop). Without: the same window,
-                               hidden, at 1920x1080 (vm view shows it). Either way the VM has
+                               hidden, at 1920x1080 (vm view shows it, at its own size). Either way the VM has
                                an icon in the desktop's tray: show or hide, restart, shut down.
                                --defender (win): Microsoft Defender on, as on a customer's PC
                                (the lab keeps it off), turned on in the disk before Windows
