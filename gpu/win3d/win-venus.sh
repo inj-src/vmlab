@@ -4,7 +4,7 @@
 # win11-ready on it (the GPU driver and the rest of the ready state: reset returns to it,
 # commit writes to it, setup builds it again) and win11-venus on that (this run's changes).
 #
-#   win-venus.sh start <intel|nvidia> [--window]
+#   win-venus.sh start <intel|nvidia> [--window] [--defender]
 #                                       boot on that host GPU; --window: in a window on the
 #                                       user's screen with sound and a shared clipboard. It
 #                                       opens maximized and Windows takes its size once (1920x1042
@@ -22,14 +22,29 @@
 #                                       screen; Ctrl+Alt+F leaves it. Text and pictures copied
 #                                       on either side paste on the other; files dragged onto
 #                                       the window land on the guest's desktop.
-#                                       Without --window: no window.
-#                                       Either way the display is also on VNC, 127.0.0.1:5911
+#                                       Without --window: the same window, made hidden, when
+#                                       a desktop can be reached (`show` puts it on the screen),
+#                                       without sound. No desktop, or WIN_VENUS_HIDDEN_WINDOW=off:
+#                                       no window at all. Hidden, Windows is at 1920x1080 and
+#                                       100%; shown, it takes the window's pixels and the screen's
+#                                       scaling, as at a start with --window.
+#                                       With a window either way: the title bar's hide button
+#                                       hides it (Windows keeps running), and the VM has an icon
+#                                       in the desktop's tray (show or hide, restart, shut down;
+#                                       ~/.local/bin/vm-tray).
+#                                       Either way the display is also on VNC, 127.0.0.1:5911.
+#                                       --defender: Microsoft Defender on in the disk first
+#                                       (defender-on.sh; vm then updates its definitions). It
+#                                       stays on in this run's disk, and in a state saved from it
+#   win-venus.sh show | hide            the window on the screen, or off it (Windows runs on)
+#   win-venus.sh window                 the window: shown, hidden, or none (started without one)
 #   win-venus.sh stop                   ask Windows to shut down, then stop the helpers
 #   win-venus.sh kill                   stop everything now
 #   win-venus.sh status                 what is running
 #   win-venus.sh ssh [command...]       ssh into the guest (dev@127.0.0.1:2222)
 #   win-venus.sh scp SRC... DEST        copy files; the guest is dev@127.0.0.1:PATH
-#   win-venus.sh view                   open the VNC console in remote-viewer
+#   win-venus.sh view                   show the window; without one, the VNC console in
+#                                       remote-viewer (which resizes Windows to its own size)
 #   win-venus.sh shot <file.png>        screenshot the guest display (over VNC)
 #   win-venus.sh scale [PERCENT]        Windows' display scaling now, or set it (100, 125, 150...).
 #                                       With a window it follows the screen by itself (the
@@ -92,6 +107,7 @@ CACHE_EMPTY=/vmlab/images/win-cache-empty.qcow2
 
 die(){ echo "win-venus: $*" >&2; exit 1; }
 . "$HERE/../states.sh"
+. "$HERE/../window.sh"
 alive(){ [[ -f $S/$1.pid ]] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
 qmp(){ # qmp '<json command>': one command over the QMP socket
   python3 -I - "$S/qmp.sock" "$1" <<'EOF'
@@ -106,19 +122,31 @@ EOF
 }
 
 start(){
-  local gpu=${1:-} node select layer=() display env=() audio=none a
+  local gpu=${1:-} node select layer=() display env=() audio=none window=none a
   case $gpu in
     intel)  node=$(gpu_node 0x8086); select='*intel*' ;;
     nvidia) node=$(gpu_node 0x10de); select='*nvidia*'
       # host-layer/: without it the guest's Direct3D 11 uploads arrive with holes on this laptop
       [[ ${WIN_VENUS_LAYER:-on} == off ]] || layer=(--setenv=VK_LAYER_PATH="$HERE/host-layer"
         --setenv=VK_INSTANCE_LAYERS=VK_LAYER_VMLAB_coherent_memory) ;;
-    *) die "usage: win-venus.sh start <intel|nvidia> [--window]" ;;
+    *) die "usage: win-venus.sh start <intel|nvidia> [--window] [--defender]" ;;
   esac
+  shift
   [[ -x $QEMU ]] || die "build QEMU first: $HERE/build-qemu.sh"
   display=(-display "egl-headless,rendernode=$node" -vnc "127.0.0.1:$VNC_DISPLAY")
-  case ${2:-} in
-    --window) audio=pipewire
+  # No --window: the window is made all the same, hidden, where a desktop can be reached, so
+  # `show` (vm view) can put it on the screen later; a VNC viewer instead resized Windows and
+  # broke an agent's clicks. It keeps Windows at 1920x1080 and has no sound, for an agent's run.
+  # A QEMU built before qemu-patches/0014 has none of it: the window as before, and no tray.
+  local hideable= defender=; grep -aq VMLAB_WINDOW_HIDDEN "$QEMU" && hideable=1
+  for a in "$@"; do case $a in
+    --window) window=shown ;;
+    --defender) defender=1 ;;
+    *) die "usage: win-venus.sh start <intel|nvidia> [--window] [--defender]" ;;
+  esac; done
+  [[ $window == shown || -z $hideable || ${WIN_VENUS_HIDDEN_WINDOW:-on} == off ]] || ! desktop || window=hidden
+  case $window in
+    shown|hidden) [[ $window == shown ]] && audio=pipewire
       # The window is GTK's plain (non-OpenGL) one beside egl-headless, which qemu-patches/0002
       # opens where VMLAB_WINDOW is set: the guest's frames are rendered and read back on $gpu,
       # as without a window, and the window shows them. `-display gtk,gl=on` cannot be used for
@@ -135,15 +163,23 @@ start(){
       # The title bar has one button, full screen (qemu-patches/0010); QEMU's menus are not shown.
       # WIN_VENUS_WINDOW_X11=1, for tests: the window under XWayland, where xdotool and
       # xwininfo can measure and resize it.
+      # CONTROL and STATE_FILE (qemu-patches/0014): `show` and `hide` reach the window through
+      # the FIFO, and it writes shown or hidden to the file; HIDDEN makes it without showing it.
       for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR WAYLAND_DEBUG; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
+      local size=${WIN_VENUS_WINDOW_SIZE:-first}
+      [[ $window == hidden ]] && env+=(--setenv=VMLAB_WINDOW_HIDDEN=1)
+      # HIDDEN_SIZE (qemu-patches/0015): while the window is hidden Windows is offered 1920x1080,
+      # for an agent's clicks; shown, the window's own size (=first), a guest pixel to a screen
+      # pixel. A QEMU built before 0015 cannot change it on showing: 1920x1080 throughout.
+      if grep -aq VMLAB_WINDOW_HIDDEN_SIZE "$QEMU"; then env+=(--setenv=VMLAB_WINDOW_HIDDEN_SIZE=1920x1080)
+      elif [[ $window == hidden ]]; then size=1920x1080; fi
       env+=(--setenv=VMLAB_WINDOW=1 --setenv=VMLAB_WINDOW_APP_ID=vmlab-win11 --setenv="VMLAB_WINDOW_TITLE=Windows 11" --setenv=VMLAB_WINDOW_CLOSE_POWERS_DOWN=1
-        --setenv="VMLAB_WINDOW_FIXED_SIZE=${WIN_VENUS_WINDOW_SIZE:-first}" --setenv="VMLAB_WINDOW_SCALE_FILE=$S/scale" --setenv="VMLAB_WINDOW_SIZE_FILE=$S/size")
+        --setenv="VMLAB_WINDOW_FIXED_SIZE=$size" --setenv="VMLAB_WINDOW_SCALE_FILE=$S/scale" --setenv="VMLAB_WINDOW_SIZE_FILE=$S/size"
+        --setenv="VMLAB_WINDOW_CONTROL=$S/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$S/window.state")
       # WIN_VENUS_WINDOW_RESTORED=1, for tests: the window opens at QEMU's own size, not maximized.
       [[ -n ${WIN_VENUS_WINDOW_RESTORED:-} ]] || env+=(--setenv=VMLAB_WINDOW_MAXIMIZE=1)
       [[ -n ${WIN_VENUS_WINDOW_X11:-} ]] && env+=(--setenv=GDK_BACKEND=x11)
       ;;
-    '') ;;
-    *) die "usage: win-venus.sh start <intel|nvidia> [--window]" ;;
   esac
   [[ -n $node ]] || die "no $gpu render node"
   alive qemu && die "already running (win-venus.sh stop)"
@@ -152,6 +188,8 @@ start(){
   mkdir -p "$S"
   [[ -f $READY ]] || die "no ready state ($READY): win-venus.sh setup"
   [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"
+  # .defender: the disk has Defender on (save and load carry it to and from NAME.defender)
+  [[ -z $defender ]] || { "$HERE/defender-on.sh" "$DISK" >&2 && : > "$STATES/.defender"; } || die "Defender was not turned on: not started"
   st_ran
   # Secure Boot has to be off for the test-signed driver: plain OVMF with its own variables,
   # the ready state's where it has saved them
@@ -163,7 +201,9 @@ start(){
   # closed, which powers it down; only `stop` and `kill` end them): their units would refuse
   # the new ones their names.
   systemctl --user stop vmlab-win-venus-net vmlab-win-venus-scale 2>/dev/null || true
-  rm -f "$S"/{net,qmp,ga}.sock "$S"/{net,qemu}.pid "$S/size"; : > "$S/qemu.log"; : > "$S/net.log"
+  systemctl --user stop vmlab-tray-win 2>/dev/null || true
+  rm -f "$S"/{net,qmp,ga}.sock "$S"/{net,qemu}.pid "$S/size" "$S/window.ctl" "$S/window.state"; : > "$S/qemu.log"; : > "$S/net.log"
+  [[ $window == none || -z $hideable ]] || mkfifo -m 600 "$S/window.ctl"
   # Both run as transient user units, so they outlive the terminal or app that started them,
   # and QEMU's stderr (the render server's messages too) lands in qemu.log.
   local smb=
@@ -220,9 +260,11 @@ start(){
     -pidfile "$S/qemu.pid"
   up qemu || { stop_helpers; die "QEMU did not start: $(tail -5 "$S/qemu.log")"; }
   for _ in $(seq 20); do python3 -I "$HERE/../pin.py" "$S/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
-  # With a window, Windows' own scaling follows the screen the window is on (scale-watch below)
-  [[ $audio == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
-  echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $audio == none ]] || echo " and a window"), log $S/qemu.log"
+  # With a window, Windows' own scaling follows the screen the window is on while it is shown,
+  # and is 100% while it is hidden (scale-watch below)
+  [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
+  [[ $window == none || -z $hideable ]] || tray win vmlab-win-venus "$S/window.state"
+  echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $window == none ]] || echo ", a window ($window)"), log $S/qemu.log"
 }
 # unit NAME LOG [systemd-run options...] COMMAND...: run COMMAND as a transient user unit
 unit(){ local name=$1 log=$2; shift 2
@@ -292,7 +334,7 @@ backing_of(){ qemu-img info --output=json "$1" | python3 -I -c 'import json, sys
 state_names(){ local f n=(); for f in "$STATES"/*.qcow2; do [[ -f $f ]] && n+=("$(basename "$f" .qcow2)"); done; echo "${n[*]:-none}"; }
 
 case ${1:-} in
-  start) start "${2:-}" "${3:-}" ;;
+  start) shift; start "$@" ;;
   # Internal, a unit of its own beside a windowed VM: QEMU keeps $S/scale at the scale, in
   # percent, of the screen its window is on (VMLAB_WINDOW_SCALE_FILE), and gives Windows that
   # screen's pixels of the window. This gives Windows the same scaling, so that things in it
@@ -312,7 +354,8 @@ case ${1:-} in
           sized=$size tries=0; echo "$(date +%T) window size $size: not set: ${out##*$'\n'}"
         fi
       fi
-      want=$(cat "$S/scale" 2>/dev/null || true)
+      want=100      # hidden: the size and scaling an agent's run expects
+      [[ $(cat "$S/window.state" 2>/dev/null) == hidden ]] || want=$(cat "$S/scale" 2>/dev/null || true)
       if [[ $want =~ ^[0-9]+$ && $want != "$applied" ]]; then
         [[ -n $copied ]] || { "$0" scp "$HERE/guest-scripts/set-scale.ps1" "$HERE/guest-scripts/set-mode.ps1" dev@127.0.0.1:C:/vmlab/ 2>/dev/null && copied=1; }
         if [[ -n $copied ]] && out=$(guest_scale "$want" 2>&1); then
@@ -328,24 +371,30 @@ case ${1:-} in
   status) alive qemu && echo "running on $(cat "$S/gpu") (pid $(cat "$S/qemu.pid"))" || echo "not running" ;;
   ssh) shift; ssh_guest "$@" ;;
   scp) shift; scp -q -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR "$@" ;;
-  view) exec remote-viewer "vnc://127.0.0.1:$((5900 + VNC_DISPLAY))" ;;
+  show|hide) alive qemu || die "not running"; window_ask "$1" "$S/window.ctl" "$S/window.state" ;;
+  window) alive qemu && [[ -p $S/window.ctl ]] && cat "$S/window.state" 2>/dev/null || echo none ;;
+  view) if alive qemu && [[ -p $S/window.ctl ]]; then window_ask show "$S/window.ctl" "$S/window.state"
+        else exec remote-viewer "vnc://127.0.0.1:$((5900 + VNC_DISPLAY))"; fi ;;
   # over VNC: QMP's screendump has no picture of a guest that draws through the GPU ("no surface")
   shot) [[ -n ${2:-} ]] || die "usage: win-venus.sh shot <file.png>"; python3 -I "$HERE/vncshot.py" $((5900 + VNC_DISPLAY)) "$2" ;;
   d3d12) [[ ${2:-status} =~ ^(native|bridge|status)$ ]] || die "usage: win-venus.sh d3d12 [bridge|native|status]"
     "$0" scp "$HERE/guest-scripts/d3d12-mode.ps1" dev@127.0.0.1:C:/vmlab/
     ssh_guest "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\d3d12-mode.ps1 ${2:-status}" ;;
   reset) alive qemu && die "stop it first"; st_guard "${2:-}"
-    rm -f "$DISK" "$S/OVMF_VARS.fd"; st_mark clean
+    rm -f "$DISK" "$S/OVMF_VARS.fd" "$STATES/.defender"; st_mark clean
     echo "this run's changes dropped: the next start is the ready state" ;;
   commit) alive qemu && die "stop it first"
     [[ ${2:-} =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: win-venus.sh commit [--keep-states|--drop-states]"
     [[ ${2:-} != --keep-states ]] || states_release   # what an earlier commit left unmoved
     [[ -f $DISK && -f $READY ]] || die "nothing to commit"
+    # Defender would scan every file a build writes, and once it has run, Windows does not let
+    # it be turned off again: the default state keeps it off
+    [[ ! -e $STATES/.defender ]] || die "this run has Defender on (started with --defender): the default state keeps it off. 'vm reset win' drops the run"
     # The named states are changes to READY as it is now: on another READY they are a broken disk
     if compgen -G "$STATES/*.qcow2" > /dev/null; then
       case ${2:-} in
         --keep-states) states_hold ;;
-        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$READY_HELD" ;;
+        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$STATES"/*.defender "$READY_HELD" ;;
         *) die "the ready state has named states on it, which a commit alone makes unusable: $(state_names). Commit with --keep-states (they stay as they are and grow by what the commit changed) or --drop-states (they are deleted)" ;;
       esac
     fi
@@ -354,25 +403,29 @@ case ${1:-} in
     st_mark clean
     [[ ${2:-} != --keep-states ]] || states_release
     echo "committed: $READY is the ready state" ;;
-  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm ]] && die "stop it first"
+  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm && ${2:-} != default-size ]] && die "stop it first"
     case ${2:-} in
       save) st_valid "${3:-}"; mkdir -p "$STATES" "$S"
         [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
         cp --reflink=auto "$DISK" "$STATES/$3.qcow2.new"; mv "$STATES/$3.qcow2.new" "$STATES/$3.qcow2"
         cp "$([[ -f $S/OVMF_VARS.fd ]] && echo "$S/OVMF_VARS.fd" || echo "$READY_VARS")" "$STATES/$3.vars.fd"
+        if [[ -e $STATES/.defender ]]; then : > "$STATES/$3.defender"; else rm -f "$STATES/$3.defender"; fi
         st_mark "$3"; echo "saved: $3" ;;
       load) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
         st_guard "${4:-}"; mkdir -p "$S"
         cp --reflink=auto "$STATES/$3.qcow2" "$DISK.new"; mv "$DISK.new" "$DISK"
         cp "$STATES/$3.vars.fd" "$S/OVMF_VARS.fd"
+        if [[ -e $STATES/$3.defender ]]; then : > "$STATES/.defender"; else rm -f "$STATES/.defender"; fi
         st_mark "$3"; echo "loaded: $3" ;;
       rm) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
-        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd"; st_forget "$3"; echo "deleted: $3" ;;
+        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd" "$STATES/$3.defender"; st_forget "$3"; echo "deleted: $3" ;;
       list) for f in "$STATES"/*.qcow2; do   # NAME, bytes on disk, time saved
           [[ -f $f ]] || continue
           printf '%s\t%s\t%s\n' "$(basename "$f" .qcow2)" "$(( $(stat -c %b "$f") * 512 ))" "$(stat -c %Y "$f")"
         done ;;
-      *) die "usage: win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list" ;;
+      default-size) # bytes on disk of the default (clean) state: the installed base and the ready layer on it
+        echo $(( ($(stat -c %b "$BASE") + $(stat -c %b "$READY")) * 512 )) ;;
+      *) die "usage: win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
     esac ;;
   setup) shift; exec "$HERE/setup-ready.sh" "$@" ;;
   *) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;

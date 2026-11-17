@@ -28,7 +28,7 @@ Installed as on a customer's PC: service `postgresql-x64-16`, port 5432, user `p
 
 `win` is set up for testing, not like a customer's PC.
 
-- **Defender antivirus is off.** For a test that depends on it (an installer, a first launch, a flagged binary), start the `defender` state: `vm start win defender`. Its definitions are of 2026-11-12; real-time protection comes on some seconds after SSH answers (wait for `ssh win-pwsh '(Get-MpComputerStatus).RealTimeProtectionEnabled'`).
+- **Defender antivirus is off.** For a test that depends on it (an installer, a first launch, a flagged binary), start with it on, from any state: `vm start win [state] --defender`. `vm start` returns once its definitions are up to date (downloaded once a week into the build cache), with real-time protection on. It stays on for that run (Windows does not let it be turned off from inside); `vm reset win --discard` or another state ends it. Saving such a run: [states.md](states.md).
 - **SmartScreen is on** in every state, but its "Windows protected your PC" box appears only for a file with the Mark-of-the-Web started through Explorer. A file built in the VM or copied in starts without it. To see what a download does, mark it first: `ssh win-pwsh "Set-Content -Path app.exe -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'"`, then `ssh win 'explorer.exe app.exe'`.
 - **Windows Update is off,** so `Add-WindowsCapability` and the Store fail: use winget or GitHub MSIs. When a result depends on Windows Update, say in your report that the VM could not show it.
 

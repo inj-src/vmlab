@@ -174,6 +174,12 @@ the old icon for as long as it is open.
   - `0012`: every key goes to the guest while the window has the keyboard ("Keyboard and
     pointer" above).
   - `0013`: a press on the title bar gives the desktop its shortcuts back (the same place).
+  - `0014`: `VMLAB_WINDOW_HIDDEN` makes the window without showing it; `VMLAB_WINDOW_CONTROL`
+    names a FIFO QEMU reads `show` and `hide` lines from, and with it the title bar has a hide
+    button left of full screen; `VMLAB_WINDOW_STATE_FILE` gets `shown` or `hidden` ("The
+    hidden window" below). A hidden window shares no clipboard. Checked 2026-11-15 in the rig
+    without a guest: no window and no dock entry while hidden; `show` maximizes it; the hide
+    button hides it and the picture comes back at the next `show`.
   Checked 2026-11-12: `0001` to `0013` on the release's sources give the built files byte for
   byte.
     To try a window change without a guest: `build/qemu-system-x86_64 -L build/pc-bios
@@ -263,7 +269,8 @@ were right, which is why dynamic buffers, index buffers and `gl_VertexID` draws 
   get what a commit changes: in the ready state `install`, restart Windows, stop,
   `vm commit win --keep-states`; then for each state `vm start win NAME`, `install`, restart
   Windows, stop, `vm save win NAME --replace "<its note>"`. Done so on 2026-11-13 with
-  patches 9001 and 9002 (`defender`, `pebble`, `office-wip`); about 2 minutes a state.
+  patches 9001 and 9002 (`defender`, `pebble`, and `office-wip`, deleted the same evening);
+  about 2 minutes a state.
 - Tests, in the guest: `node page-shot.mjs file:///C:/Users/dev/gl-vertex.html out.png 6` (18
   ways to feed vertices; the static-buffer ones fail on the release DLL) and `gl-features.html`
   (72 cases). Both pass with the fix. The first Chrome start after swapping the DLL once failed
@@ -486,9 +493,34 @@ their marks in `/vmlab/run/win-venus/trial-states`, away from the real ones.
 The Mac keeps its states as snapshots inside its one disk file, beside `clean`
 (`reims/mac26.sh state …`); each is a whole disk of its own, and a commit leaves them alone.
 
-One state of `win` belongs to the lab: `defender`, the clean state with Defender antivirus
-switched on again (`win/enable-defender.ps1`). A commit with `--drop-states` or a new ready
-state deletes it; `win/README-defender.txt` has the steps that build it again.
+**Sizes in `vm states`** (2026-11-15, the user's request): the default state (`clean` here and
+in the launchers, `default` in what `vm` shows; `vm start NAME clean` still works) shows
+everything it takes: Windows' base and ready layers, the Mac's `clean` snapshot. Every other
+state shows what it takes beside the default: Windows' state file, and for a Mac snapshot the
+disk clusters it uses that `clean` does not (`qcow2-sizes.py`, which reads the snapshots' L1
+and L2 tables: qemu-img tells no snapshot's size). Clusters two named states share count for
+both, so the sizes may add up to more than the disk takes.
+
+**Defender on for a run** (`vm start win [state] --defender`, 2026-11-15, the user's request,
+in place of the lab's saved state `defender`): `win3d/defender-on.sh` gives Defender's
+services back Windows 11's start types in the stopped disk's SYSTEM hive, before QEMU starts,
+so any state can be started with it on. Offline, tamper protection has no say; once Windows has
+run Defender it refuses the way back, which is why the run and a state saved from it keep it.
+It needs no sudo and no host change: `qemu-storage-daemon` shows Windows' partition as a file
+(a FUSE export, through the setuid `fusermount3`), `ntfscat` and `ntfscp` read and write a
+file inside that image (ntfs-3g's mount would need root), and `hivexregedit --merge` edits the
+hive (hivex keeps the header's two sequence numbers equal, so Windows replays no log over the
+edit). 0.6 s, about 15 MB of the run's disk. `ntfscp` without `-f` refuses a volume Windows did
+not shut down cleanly (the lab has Fast Startup off: `HiberbootEnabled` 0), so a disk is never
+written under a dirty NTFS log. Then `vm` runs `win/update-defender.ps1` over SSH: once
+`WinDefend` runs, Microsoft's offline package `mpam-fe.exe` (Windows Update stays off), kept in
+the build cache's `C:\cache\defender` and downloaded again only at a week old, its
+Authenticode signature checked each time. Marks: `states/win/.defender` (the run's disk has it
+on) and `NAME.defender` beside a state; save and load carry it, reset drops it, a commit
+refuses it (the default state keeps Defender off). Checked 2026-11-16 on the real VM: 95 s from
+`vm start` to its return, the first download included, 5 s for the definitions step once the
+package is cached; real-time and tamper protection on; the EICAR test file found on write and
+every read of it refused. The lab's `defender` state was deleted then (10 GB of the SSD).
 
 ### The ready state (`$W setup`)
 
@@ -586,6 +618,92 @@ Without the limit (`--disable-gpu-vsync --disable-frame-rate-limit`, the benchma
 - The render server's own `install.sh` exits silently on this host (a `pipefail` on `ldconfig -p |
   awk … exit`); `opt/virgl/libexec/virgl_render_server` was copied by hand.
 
+## The hidden window and the tray icon (both VMs)
+
+Every start makes the VM's real window, shown with `--window` and hidden otherwise, so a VM an
+agent started can be watched at any time in the same window a person would use (the user's
+request, 2026-11-15; a VNC viewer resized Windows and broke an agent's clicks, and a headless
+Mac could not be watched at all). `window.sh` holds what the two launchers share.
+
+| | Windows (`win3d/win-venus.sh`) | macOS (`reims/mac26.sh`) |
+|---|---|---|
+| Window | QEMU's GTK window, `qemu-patches/0014` | reims' SDL window, `reims/patches/window-shown-and-hidden-on-request.dev.patch` |
+| Opens hidden with | `VMLAB_WINDOW_HIDDEN=1` | `REIMS_VGPU_WINDOW_HIDDEN=1` |
+| Size while hidden | 1920×1080, 100% (`VMLAB_WINDOW_HIDDEN_SIZE`, `qemu-patches/0015`) | 1920×1080 (`REIMS_VGPU_WINDOW_HIDDEN_MODE`, `reims/patches/window-hidden-mode.dev.patch`) |
+| Size while shown | the window's pixels, the screen's scaling (`=first`, the scale helper) | the window's pixels (`REIMS_VGPU_WINDOW_MODE=first`) |
+| Sound | only with `--window` | always (PipeWire) |
+| No window at all | `WIN_VENUS_HIDDEN_WINDOW=off`, or no desktop to reach | `MAC26_HIDDEN_WINDOW=off`, or no desktop to reach |
+
+- **Control**: the window reads `show` and `hide` lines from a FIFO in the VM's run directory
+  (`window.ctl`, `VMLAB_WINDOW_CONTROL`) and writes `shown` or `hidden` to `window.state`
+  (`VMLAB_WINDOW_STATE_FILE`). The reader opens the FIFO for reading and writing, so it never
+  sees an end. Each launcher has `show`, `hide` and `window` (prints shown, hidden or none).
+- **`vm`**: `vm view NAME` shows the window, `vm hide NAME` hides it, `vm restart NAME` restarts
+  the guest's OS (the VM process stays; it waits for SSH to drop and come back), `vm stop` shuts
+  it down as before.
+- **The title bar's hide button** (`view-restore-symbolic`, the user's pick, left of full
+  screen) writes `hide` to the same FIFO: the VM keeps running. Closing still shuts it down.
+  The Mac's title bar (`reims/libdecor-vmlab`) also has the Windows one's hover states.
+- **Clipboard**: none shared while hidden, on both (nobody is looking, and the guest has no
+  business reading the host's clipboard). The Windows side guards in `gtk-clipboard.c`, the
+  Mac's in `native/linux/agent.rs`.
+- **The tray icon** (`~/.local/bin/vm-tray`, the user's request, 2026-11-15): while a VM with a
+  window runs, the desktop's top bar has its icon. Its menu: the VM's name, Show or Hide,
+  Restart, Shut down (each through `vm`); a middle click shows or hides. Python with Ayatana
+  AppIndicator, drawn by GNOME's AppIndicator extension. It runs as `vmlab-tray-win` or
+  `vmlab-tray-mac`, a user unit bound to the VM's, so it goes when the VM ends; its errors go
+  to `tray.log` in the VM's run directory. `VMLAB_TRAY=off`: none. None for a VM in the test
+  rig's nested desktop either: the tray is the real session's D-Bus.
+  - **Icons**: `icons/vmlab-win11-symbolic.svg` (the four squares, no tile) and
+    `icons/vmlab-macos26-symbolic.svg` (the tile with "26" cut out, traced to one even-odd
+    path), the user's picks from four drawn sets. Symbolic icons: the extension recolours them
+    for the panel, light or dark, by overriding the fill of every `rect`, `circle` and `path`,
+    so they must be plain filled shapes (a mask or a stroke comes out as a solid block).
+- **Old builds**: a launcher makes a hidden window only if the binary has the switch
+  (`grep -a` for `VMLAB_WINDOW_HIDDEN` in the QEMU, `REIMS_VGPU_WINDOW_HIDDEN` in reims'
+  current QEMU); otherwise it starts as before (no window, no FIFO, no tray), since the
+  working tree is live and an older binary would show its window.
+- **Sizes** (2026-11-16, the user's request): hidden, the guest is at 1920×1080 (Windows at
+  100% too), the size an agent's run expects. Shown (`vm view`, the tray), it takes the
+  window's pixels, as a start with `--window` does: a guest pixel to a screen pixel, no bars
+  and no scaling; Windows' scaling follows the screen again (the `vmlab-win-venus-scale` unit
+  runs for every window now, and sets 100% while it is hidden). Hidden again, 1920×1080 again.
+  Before, a VM started hidden kept 1920×1080 when shown: the maximized window (1920×1042 under
+  its title bar) shrank it between black bars, text came out soft, and Windows' scaling no
+  longer followed the screen (the helper ran only for `--window`). Each change of size moves
+  and resizes the guest's windows: an agent that clicks by pixels while the user shows the
+  window may miss once (the GUI tools find elements by name). QEMU offers the window's size
+  0.3 s and 1.5 s after showing (the window's size settles after it is mapped); reims pins it
+  once the window has filled its screen for 0.4 s.
+  Checked on 2026-11-16 in the rig (a 1920×1080 screen), both VMs, measured inside the guest:
+  hidden 1920×1080; shown at 100% 1920×1008, at 125% 1920×990 (Windows' scaling 100% → 125%);
+  hidden again 1920×1080 (125% → 100%); the shown window filled to its edges, no bars. The
+  Mac takes the sizes; its scaling stays 1× (macOS has no 125%).
+- **Costs**: a window ties the VM to the desktop's session, so if GNOME Shell crashes or the
+  user logs out, an agent's VM ends with it. Each time the
+  window shows, GNOME asks "Allow inhibiting shortcuts" until the app has an Allow (a Deny
+  holds only for that window).
+- **The tray's commands run in units of their own** (`systemd-run --wait`, on the user's bus):
+  the tray's unit is bound to the VM's, so a shutdown stops it, and a `vm stop` among its own
+  processes was killed half way (Windows' network helper left running).
+- **`vm restart mac`** asks `sudo -n true` first and then ignores the restart's exit status:
+  macOS drops the SSH connection before `shutdown -r now` returns.
+- Checked 2026-11-15 on the real VMs, in the rig (`rig/nested.sh`) with a tray on the rig's
+  bus, each VM on its `pebble` disk:
+  - both start hidden (FIFO and state file, no window, no dock entry); `vm view` shows the
+    window maximized; the title bar's hide button hides it with the VM running; the Mac's
+    title bar buttons hover;
+  - the tray menu (Windows 11 / macOS 26 Tahoe, Show or Hide, Restart, Shut down): Show and
+    Hide follow and set the state; Restart takes Windows 28 s and the Mac 29 s, the label
+    reads "Restarting…" meanwhile and the window stays shown; Shut down ends the VM in 9 to
+    14 s and the tray icon and helpers with it;
+  - the clipboard, text through `wl-copy`/`wl-paste` in the rig: on Windows both ways shared
+    when shown, neither way while hidden, shared again once shown; on the Mac the same,
+    guest to host (the Mac's own clipboard is not read);
+  - on the real desktop, a plain `vm start` of each: hidden, and its item
+    (`/org/ayatana/NotificationItem/vmlab_win`, `vmlab_mac`) registered with the top bar;
+    gone after `vm stop`.
+
 ## macOS: `reims/mac26.sh` (reims-vgpu)
 
 [reims-vgpu](https://github.com/steelbrain/reims-vgpu) gives a macOS guest Metal, translated to
@@ -620,7 +738,7 @@ of guest memory into video memory every frame, whether or not it changed (measur
 
 ```sh
 M=/vmlab/tools/vmlab/gpu/reims/mac26.sh
-$M start                # no window; returns when SSH answers (about 20 s)
+$M start                # a hidden window ("The hidden window" above); returns when SSH answers (about 20 s)
 $M ssh 'sw_vers'        # dev@127.0.0.1, port 2227
 $M gui shot /tmp/s.png  # also: click X Y | type 'text' | key cmd+q   (pixels of that screenshot)
 $M stop
@@ -696,7 +814,8 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     - The agent in a state must match: one saved before 2026-11-13 has the old agent, which
       waits for a serial port that is no longer there, and its clipboard is dead until
       `mac/install-spice-agent.sh` has run in it (done for `clean`, `mine`, `pebble`,
-      `office-wip`).
+      `office-wip`; since 2026-11-13 evening only `clean` and `pebble` remain: `mine` was
+      deleted and the Mac's `office-wip` became `pebble`).
     - **Why**: the link was a virtio serial port (`com.redhat.spice.0`), and macOS stopped
       reading it at random. It stops offering receive buffers on the port's queue
       (`x-query-virtio-queue-status`, queue 4: last-avail = shadow-avail = used) while the
@@ -745,7 +864,10 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
     mode it can still set).
   - The title bar is libdecor's cairo plugin with `libdecor-vmlab/vmlab-titlebar.patch`: it
     matches the Windows window's GTK title bar (Yaru dark, the desktop's font, the same
-    buttons).
+    buttons, the same hover look, and the hide button with `VMLAB_WINDOW_CONTROL`). The bar is
+    a desynchronized sub-surface: synced, its redraws waited for the window's next commit,
+    which reims makes only for a new guest frame, and an idle Mac sends almost none, so the
+    buttons showed no hover (fixed 2026-11-15; checked with libdecor's demo in the rig).
 - **A person at the screen**: `$M start --window` (also "macOS 26 Tahoe" in the app grid,
   `~/.local/share/applications/vmlab-macos26.desktop`, icon `icons/vmlab-macos26.svg`). The
   window opens maximized (asked for by the user, for both VMs, with a resolution that does not

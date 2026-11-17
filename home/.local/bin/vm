@@ -24,7 +24,8 @@ die(){ echo "vm: $*" >&2; exit 1; }
 need(){ [[ -n ${RUN[$1]:-} ]] || die "unknown VM '$1' (use: ${!RUN[*]})"; }
 state_of(){ systemctl --user is-active --quiet "${UNIT[$1]}" && echo running || echo shutoff; }
 running_vms(){ for n in "${!RUN[@]}"; do [[ $(state_of "$n") == running ]] && echo "$n"; done; true; }
-has_window(){ systemctl --user show "${UNIT[$1]}" -p Environment | grep -q -E 'VMLAB_WINDOW=|REIMS_VGPU_WINDOW_MAXIMIZED='; }
+# The running VM's window: shown, hidden, or none (started where no desktop could be reached)
+window_of(){ "${RUN[$1]}" window 2>/dev/null || echo none; }
 
 # Lab-only power: the performance profile while a VM runs, and only on the full-power barrel
 # charger (ACAD). The USB-C charger cannot keep up with it. vm stop puts the old profile back.
@@ -73,32 +74,48 @@ cmd_status(){
     s=$(state_of "$n")
     [[ $s == running ]] && addr=127.0.0.1:${PORT[$n]}
     [[ $s == running && -f $STATE/$n.owner ]] && owner=$(cat "$STATE/$n.owner")
-    local on; on=$(st_cur "$n"); st_chg "$n" && on+=", changed since"
+    local on; on=$(st_cur "$n"); st_chg "$n" && on+=", changed since"; st_def "$n" && on+=", Defender on"
     printf '%-4s %-8s %-15s %s\n' "$n" "$s" "$addr" "${owner:+started by $owner  }state: $on"
   done
 }
 
+# After vm start win --defender: Defender's definitions up to date (win/update-defender.ps1)
+defender_definitions(){
+  echo "win: Defender is on; bringing its definitions up to date (a download of 220 MB once a week)"
+  scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" \
+    -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR $MUX -P "${PORT[win]}" \
+    "$LAB/tools/vmlab/win/update-defender.ps1" "${GUSER[win]}@127.0.0.1:." || die "win: could not send update-defender.ps1"
+  guest_pwsh 'pwsh -NoProfile -File $HOME\update-defender.ps1' < /dev/null | sed -u 's/\r$//' ||
+    die "win runs with Defender on, but its definitions were not updated (above)"
+}
+
 cmd_start(){
-  local n=$1 window="" state="" a; shift; need "$n"
+  local n=$1 window="" defender="" state="" a; shift; need "$n"
   for a in "$@"; do case $a in
     --window) window=--window ;;
-    ''|-*) [[ -z $a ]] || die "usage: vm start <name> [state] [--window]" ;;
-    *) [[ -z $state ]] || die "usage: vm start <name> [state] [--window]"; state=$a ;;
+    --defender) defender=--defender ;;
+    ''|-*) [[ -z $a ]] || die "usage: vm start <name> [state] [--window] [--defender]" ;;
+    *) [[ -z $state ]] || die "usage: vm start <name> [state] [--window] [--defender]"; state=$a ;;
   esac; done
+  if [[ -n $defender ]]; then
+    [[ $n == win ]] || die "--defender is for win (Microsoft Defender is Windows' antivirus)"
+    [[ $(state_of "$n") != running ]] || die "$n is running already: Defender is turned on before Windows boots (vm stop $n, then start again)"
+  fi
   # A state: its disk becomes the VM's. The same state again goes on where the VM stopped:
   # start never drops what a run wrote, reset does.
   local other=""
   [[ $(state_of "$n") == running ]] || other=$(running_vms | grep -vx "$n" || true)
   [[ -z $other ]] || die "'$other' is running (one VM at a time). Leave it alone and ask the user, or the user can run: vm stop $other"
+  [[ $state == clean ]] && state=default
   if [[ -n $state ]]; then
     local cur; cur=$(st_cur "$n")
     if [[ $(state_of "$n") == running ]]; then
       [[ $cur == "$state" ]] || die "$n is running on '$cur' (vm stop $n first)"
     elif [[ $cur == "$state" ]]; then
-      if st_chg "$n" && [[ $state != clean ]]; then
+      if st_chg "$n" && [[ $state != default ]]; then
         echo "$n goes on from where it stopped: '$state' with changes not saved (for the state as saved: vm reset $n --discard, then start again)"
       fi
-    elif [[ $state == clean ]]; then "${RUN[$n]}" reset > /dev/null || exit 1
+    elif [[ $state == default ]]; then "${RUN[$n]}" reset > /dev/null || exit 1
     else "${RUN[$n]}" state load "$state" > /dev/null || exit 1
     fi
   fi
@@ -107,12 +124,13 @@ cmd_start(){
   if [[ $(state_of "$n") != running ]]; then
     power_up
     case $n in
-      win) "${RUN[win]}" start "$WIN_GPU" $window >/dev/null ;;
+      win) "${RUN[win]}" start "$WIN_GPU" $window $defender >/dev/null ;;
       mac) "${RUN[mac]}" start $window >/dev/null ;;
     esac || { power_restore; die "$n did not start (${RUN[$n]} status)"; }
     echo "${VM_OWNER:-$USER} $(date -Is)" > "$STATE/$n.owner"
   fi
   wait_ssh "$n" 600 || die "$n booted but SSH did not answer within 10 min (try: vm view $n)"
+  [[ -z $defender ]] || defender_definitions
   # macOS keeps the clock of its last run until it reaches a time server
   [[ $n == mac ]] && { guest mac "sudo -n date -u $(date -u +%m%d%H%M%Y.%S)" >/dev/null 2>&1 || true; }
   echo "$n running at 127.0.0.1 port ${PORT[$n]}"
@@ -139,16 +157,16 @@ cmd_reset(){
   [[ -z $flag || $flag == --discard ]] || die "usage: vm reset <name> [--discard]"
   [[ $(state_of "$n") != running ]] || die "stop $n first (vm stop $n)"
   "${RUN[$n]}" reset $flag >/dev/null || exit 1
-  echo "$n reset to its clean state"
+  echo "$n reset to its default state"
 }
 
 cmd_commit(){
-  # Make the stopped VM's disk as it is now the clean state that reset returns to.
+  # Make the stopped VM's disk as it is now the default state that reset returns to.
   local n=$1 flag=${2:-}; need "$n"
   [[ $flag =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: vm commit <name> [--keep-states|--drop-states]"
   [[ $(state_of "$n") != running ]] || die "stop $n first"
   "${RUN[$n]}" commit $flag >/dev/null || exit 1
-  echo "$n: its disk as it is now is the clean state"
+  echo "$n: its disk as it is now is the default state"
 }
 
 # vm ssh <name> [command...]: the same as `ssh win` / `ssh mac` (the guests put every session on
@@ -229,12 +247,40 @@ cmd_port(){ need "$1"; echo "${PORT[$1]}"; }
 cmd_view(){
   local n=$1; need "$n"
   if [[ $(state_of "$n") != running ]]; then cmd_start "$n" --window; return; fi
-  if has_window "$n"; then echo "$n is running in a window on the desktop"; return; fi
+  # Every start makes the window, hidden without --window (gpu/window.sh): it only needs showing
+  if [[ $(window_of "$n") != none ]]; then "${RUN[$n]}" show > /dev/null && echo "$n's window is on the desktop"; return; fi
+  # A run started before that (2026-11-15) with --window: shown, and nothing to ask it
+  if systemctl --user show "${UNIT[$n]}" -p Environment | grep -q -E 'VMLAB_WINDOW=|REIMS_VGPU_WINDOW_MAXIMIZED='; then
+    echo "$n is running in a window on the desktop"; return
+  fi
   case $n in
     win) setsid "${RUN[win]}" view >/dev/null 2>&1 < /dev/null &
       echo "win was started without a window, so this is a plain viewer of its screen. For its real window: vm stop win, then vm view win" ;;
     mac) die "mac runs without a window: vm stop mac, then vm view mac" ;;
   esac
+}
+
+cmd_hide(){
+  local n=$1; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running"
+  [[ $(window_of "$n") != none ]] || die "$n has no window (started where no desktop could be reached)"
+  "${RUN[$n]}" hide > /dev/null && echo "$n's window is hidden; $n keeps running (vm view $n shows it)"
+}
+
+# Restarts the guest's OS; the VM, its window and its tray icon stay. Back when SSH answers.
+cmd_restart(){
+  local n=$1; need "$n"
+  [[ $(state_of "$n") == running ]] || die "$n is not running"
+  case $n in
+    win) guest win 'shutdown.exe -r -t 0' > /dev/null 2>&1 ;;
+    # macOS drops the SSH connection before shutdown returns, so its exit status says nothing
+    mac) guest mac 'sudo -n true' > /dev/null 2>&1 && { guest mac 'sudo -n shutdown -r now' > /dev/null 2>&1 || true; } ;;
+  esac || die "$n did not take the restart (no SSH yet?)"
+  # SSH goes away as the guest shuts down, then comes back
+  local deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )) && guest "$n" exit 2>/dev/null; do sleep 2; done
+  wait_ssh "$n" 600 || die "$n restarted but SSH did not answer within 10 min"
+  echo "$n restarted"
 }
 
 cmd_tunnel(){
@@ -349,8 +395,10 @@ cmd_cache(){
 # ---- Named states: a VM's disk kept under a name (the launchers do the keeping: gpu/states.sh).
 # The marks and the notes are files in $STATES_DIR/<vm>/.
 STATES_DIR=$LAB/images/states
-st_cur(){ cat "$STATES_DIR/$1/.current" 2>/dev/null || echo clean; }
+# The default state: what reset returns to. The launchers and the disks call it clean
+st_cur(){ local c; c=$(cat "$STATES_DIR/$1/.current" 2>/dev/null || echo clean); [[ $c == clean ]] && c=default; echo "$c"; }
 st_chg(){ [[ -e $STATES_DIR/$1/.changed ]]; }
+st_def(){ [[ -e $STATES_DIR/$1/${2:-}.defender ]]; }   # st_def VM [STATE]: Defender on in the VM's disk, or in that state
 st_has(){ "${RUN[$1]}" state list | cut -f1 | grep -qx -- "$2"; }
 st_size(){ [[ $1 == - ]] && echo - || numfmt --to=iec --format=%.1f "$1"; }
 st_when(){ [[ $1 == - ]] && echo - || date -d "@$1" '+%Y-%m-%d %H:%M'; }
@@ -358,16 +406,18 @@ ask(){ local a; read -r -p "$1 [y/N] " a < /dev/tty; [[ $a == [yY]* ]]; }
 tty_both(){ [[ -t 0 && -t 1 ]]; }
 
 # One line a state, tabs between: vm, state, bytes or -, time saved (epoch) or -, "loaded" where
-# the VM's disk is that state, "changed" where it ran since, the note. The clean state is first.
+# the VM's disk is that state, "changed" where it ran since, the note. The default state is first.
 state_rows(){
   local n name bytes when cur
   for n in win mac; do
     cur=$(st_cur "$n")
-    printf '%s\tclean\t-\t-\t%s\t%s\t%s\n' "$n" "$([[ $cur == clean ]] && echo loaded || echo -)" \
-      "$([[ $cur == clean ]] && st_chg "$n" && echo changed || echo -)" "what vm reset $n returns to"
+    printf '%s\tdefault\t%s\t-\t%s\t%s\t%s\n' "$n" "$("${RUN[$n]}" state default-size 2>/dev/null || echo -)" \
+      "$([[ $cur == default ]] && echo loaded || echo -)" \
+      "$([[ $cur == default ]] && st_chg "$n" && echo changed || echo -)" "what vm reset $n returns to"
     while IFS=$'\t' read -r name bytes when; do
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$name" "$bytes" "$when" "$([[ $cur == "$name" ]] && echo loaded || echo -)" \
-        "$([[ $cur == "$name" ]] && st_chg "$n" && echo changed || echo -)" "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)"
+        "$([[ $cur == "$name" ]] && st_chg "$n" && echo changed || echo -)" \
+        "$(st_def "$n" "$name" && printf 'Defender on. ')$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)"
     done < <("${RUN[$n]}" state list | sort)
   done
 }
@@ -400,7 +450,7 @@ state_lines(){
     [[ $cur == loaded && $(state_of "$n") == running ]] && W[i]=running C[i]=$'\e[32m'
     [[ $when == - ]] || M[i]="saved $(st_day "$when")"
     [[ $bytes == - ]] || R[i]=$(st_room "$bytes")
-    [[ $name == clean ]] && T[i]="what a reset returns to"
+    [[ $name == default ]] && T[i]="what a reset returns to"
     (( ${#name} > wn )) && wn=${#name}; (( ${#W[i]} > ww )) && ww=${#W[i]}
     (( ${#M[i]} > wm )) && wm=${#M[i]}; (( ${#R[i]} > wr )) && wr=${#R[i]}
   done < <(state_rows)
@@ -453,18 +503,18 @@ state_do(){
   [[ $act != new ]] || read -r -e -p "Name for $n as it is now: " new < /dev/tty || true
   (
     case $act in
-      save) [[ $name != clean ]] || die "the clean state is not saved over (vm commit $n changes it)"
+      save) [[ $name != default ]] || die "the default state is not saved over (vm commit $n changes it)"
         ask1 "Save $n as it is now over '$name'?" || exit 3
         stop_for_save "$n" && cmd_save "$n" "$name" --replace ;;
       new) [[ -n $new ]] || exit 3
-        [[ $new =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $new != clean ]] || die "a name is up to 16 lower-case letters, digits and . _ -"
+        [[ $new =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $new != clean && $new != default ]] || die "a name is up to 16 lower-case letters, digits and . _ - (not default or clean)"
         ! st_has "$n" "$new" || die "$n has a state '$new' already"
         read -r -e -p "Note (may be empty): " note < /dev/tty
         stop_for_save "$n" && cmd_save "$n" "$new" $note ;;
-      note) [[ $name != clean ]] || die "the clean state has no note"
+      note) [[ $name != default ]] || die "the default state has no note"
         read -r -e -i "$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)" -p "Note on '$name': " note < /dev/tty
         cmd_note "$n" "$name" "$note" ;;
-      clear) [[ $name != clean ]] || die "the clean state cannot be deleted"
+      clear) [[ $name != default ]] || die "the default state cannot be deleted"
         ask1 "Delete $n's state '$name'? This cannot be undone." || exit 3
         cmd_clear "$n" "$name" -y ;;
     esac
@@ -489,14 +539,20 @@ cmd_states(){
     *) die "usage: vm states [--plain|--json]" ;;
   esac
 }
-# vm save <name> <state> [--replace] [note...]
+# vm save <name> <state> [--replace] [--defender] [note...]
 cmd_save(){
-  local n=$1 name=${2:-} replace=0 a note=(); need "$n"; shift 2 || die "usage: vm save <name> <state> [--replace] [note...]"
-  for a in "$@"; do [[ $a == --replace ]] && replace=1 || note+=("$a"); done
+  local n=$1 name=${2:-} replace=0 defender=0 a note=(); need "$n"; shift 2 || die "usage: vm save <name> <state> [--replace] [--defender] [note...]"
+  for a in "$@"; do case $a in --replace) replace=1 ;; --defender) defender=1 ;; *) note+=("$a") ;; esac; done
   [[ $(state_of "$n") != running ]] || die "$n is running: vm stop $n first (a state is the disk of a VM that is shut down)"
   if (( ! replace )) && st_has "$n" "$name"; then
     if tty_both; then ask "$n has a state '$name' already. Replace it?" || die "not saved"
     else die "$n has a state '$name' already: vm save $n $name --replace writes over it"; fi
+  fi
+  # A run started with --defender, over a state without it: Windows does not let Defender be
+  # turned off again from inside, so the state would have it on for good
+  if st_def "$n" && st_has "$n" "$name" && ! st_def "$n" "$name" && (( ! defender )); then
+    if tty_both; then ask "$n runs with Defender on, and '$name' has it off. Save it with Defender on over '$name'?" || die "not saved"
+    else die "$n runs with Defender on (started with --defender), and '$name' has it off: saved over it, '$name' would have Defender on for good. A new name keeps both; vm save $n $name --replace --defender writes over it all the same"; fi
   fi
   "${RUN[$n]}" state save "$name" > /dev/null || exit 1
   (( ${#note[@]} )) && echo "${note[*]}" > "$STATES_DIR/$n/$name.note"
@@ -520,13 +576,19 @@ cmd_clear(){
 
 cmd_help(){ cat <<'EOF'
 vm status                      which VM is running, where its SSH is, who started it
-vm start <win|mac> [state] [--window]
+vm start <win|mac> [state] [--window] [--defender]
                                boot (refuses if the other VM is running) and wait for SSH.
                                With a state (vm states): that state's disk, or the VM as it
                                stopped if it is on that state already.
                                --window: in a window on the desktop (full screen: its title
                                bar's button or Ctrl+Alt+F; shared clipboard; files dropped on
-                               it land on the guest's desktop). Without: no window
+                               it land on the guest's desktop). Without: the same window,
+                               hidden, at 1920x1080 (vm view shows it, at its own size). Either way the VM has
+                               an icon in the desktop's tray: show or hide, restart, shut down.
+                               --defender (win): Microsoft Defender on, as on a customer's PC
+                               (the lab keeps it off), turned on in the disk before Windows
+                               boots, with its definitions brought up to date. Stays on in
+                               that run and in states saved from it ("Defender on" in vm states)
 ssh <win|mac> "<command>"      plain ssh (hosts from install.sh): a command on the VM's desktop
                                as dev. win: Git Bash with admin rights (ssh win-pwsh: the same
                                in PowerShell 7); mac: a zsh login shell, sudo without a
@@ -556,20 +618,24 @@ vm gui <name> type 'text' | key ctrl+s [ret ...] | size
                                The guest takes them for a person's (Windows does not mark
                                them as injected). Key names: win (= cmd), alt, ctrl, shift
                                and QEMU's (ret, esc, tab, f4, up, delete, a, 1)
-vm view <name>                 start it in its window; if it already runs without one, win
-                               opens a plain viewer and mac has to be stopped first
+vm view <name>                 show its window (a stopped VM starts in it)
+vm hide <name>                 hide its window; the VM keeps running (also the title bar's
+                               button left of full screen)
+vm restart <name>              restart the guest's OS, and wait for SSH
 vm ip <name>, vm port <name>   where the VM's SSH is: 127.0.0.1 and a port (win 2222, mac 2227)
 Shared folder: /vmlab/share on this machine is C:\share on win and ~/share on mac.
 vm stop <name>                 graceful shutdown (forced after 2 min)
-vm reset <name> [--discard]    discard all changes since the clean state (VM must be stopped).
+vm reset <name> [--discard]    discard all changes since the default state (VM must be stopped).
                                A VM that ran on a named state and was not saved since is
                                only reset with --discard
-vm commit <name>               make the current state the new clean state (VM must be stopped).
-                               win: its named states stand on the clean state.
+vm commit <name>               make the current state the new default state (VM must be stopped).
+                               win: its named states stand on the default state.
                                --keep-states moves them to the new one, each as it was;
                                --drop-states deletes them
 vm save <name> <state> [note]  keep the stopped VM's disk as it is under a name, beside the
-                               clean state. --replace writes over a state of that name
+                               default state. --replace writes over a state of that name.
+                               A run started with --defender is saved over a state without
+                               Defender only with --defender
 vm note <name> <state> text    the line of text the list shows beside a state
 vm states                      the states of both VMs. In a terminal: a list to work in (start,
                                save, note, delete). --plain: a table. --json: for programs
@@ -581,11 +647,11 @@ EOF
 sub=${1:-help}; shift || true
 case $sub in
   status|help) "cmd_$sub" ;;
-  start) [[ $# -ge 1 ]] || die "usage: vm start <name> [state] [--window]"; cmd_start "$@" ;;
-  stop|ip|port|view) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
+  start) [[ $# -ge 1 ]] || die "usage: vm start <name> [state] [--window] [--defender]"; cmd_start "$@" ;;
+  stop|ip|port|view|hide|restart) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   reset|commit) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$@" ;;
   states) cmd_states "$@" ;;
-  save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--replace] [note...]"; cmd_save "$@" ;;
+  save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--replace] [--defender] [note...]"; cmd_save "$@" ;;
   note) [[ $# -ge 3 ]] || die "usage: vm note <name> <state> <text>"; cmd_note "$@" ;;
   clear) [[ $# -ge 2 ]] || die "usage: vm clear <name> <state>... | --all  [-y]"; cmd_clear "$@" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;

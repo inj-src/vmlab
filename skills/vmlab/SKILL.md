@@ -12,16 +12,16 @@ Two disposable VMs on this laptop, each with a GPU, internet and an admin user `
 | `win` | Windows 11 Pro 26300, x64 | Git Bash and PowerShell 7, Git, Node 26 with pnpm and fnm, PostgreSQL 16, Python 3.12 with uv, Rust 1.99 (MSVC, VS 2022 Build Tools), VS Code, Chrome, 7-Zip |
 | `mac` | macOS Tahoe 26.7, x64 (Intel) | zsh, Xcode Command Line Tools (not Xcode), Node 26, Python 3.12 with uv, Rust 1.99, VS Code, Chrome |
 
-Each has 6 CPUs, 8 GB and a 1920×1080 screen. `mac` runs only x64 builds: for Apple Silicon use a GitHub Actions `macos-15` runner.
+Each has 6 CPUs, 8 GB and a 1920×1080 screen while its window is hidden. `mac` runs only x64 builds: for Apple Silicon use a GitHub Actions `macos-15` runner.
 
 ## Rules
 
 - **One VM at a time.** If `vm status` shows a VM you did not start, leave it alone and ask the user: another agent or the user may be in the middle of something.
-- **Start without a window** (`vm start <name>`). A window on the user's desktop takes their keyboard when clicked; open one only when the user wants to watch.
-- **Clean up:** when done, `vm stop <name>`, then `vm reset <name>` (back to the clean state; the build cache stays). A setup you would redo after every reset belongs in a saved state.
-- **States you did not make are not yours.** `pebble` on each VM is the user's, `defender` on `win` the lab's: start them, never save over or delete them. Pass `vm reset --discard` only after a run you started. `vm commit` changes the clean state for everyone: only when the user asks. → [states.md](states.md)
+- **Start hidden** (`vm start <name>`): the VM's window exists but is hidden, and a tray icon on the user's desktop shows it. Shown (`vm view`, `--window`, the tray), it takes the user's keyboard when clicked: show it only when the user wants to watch.
+- **Clean up:** when done, `vm stop <name>`, then `vm reset <name>` (back to the default state; the build cache stays). A setup you would redo after every reset belongs in a saved state.
+- **States you did not make are not yours.** `pebble` on each VM is the user's: start it, never save over or delete it. Pass `vm reset --discard` only after a run you started. `vm commit` changes the default state for everyone: only when the user asks. → [states.md](states.md)
 - **Check outcomes inside the VM** over `ssh` (files written, processes, app state), not from a screenshot or a tool's "success" alone.
-- **The user may take over the VM window at any time.** Unexpected input or focus changes: stop and ask.
+- **The user may show the VM's window or take it over at any time.** Shown, the guest takes the window's size (about 1920×1008) and, on `win`, the screen's scaling; hidden again, 1920×1080 at 100%. Its windows move then: find elements by name, not by remembered pixels. Unexpected input or focus changes: stop and ask.
 - **Disk:** VM data goes on `/vmlab`. The system disk holds only the two build caches (25 GB each); ask the user before needing more.
 
 ## Commands
@@ -30,13 +30,13 @@ Each has 6 CPUs, 8 GB and a 1920×1080 screen. `mac` runs only x64 builds: for A
 
 ```
 vm status                    which VM runs, and who started it
-vm start <win|mac> [state]   boot (without a window) and wait for SSH
+vm start <win|mac> [state]   boot (window hidden) and wait for SSH; win: --defender
 vm stop <name>, vm reset <name>
 vm push <name> <dir> [dest]  mirror a git work tree into the VM's build cache
 vm tunnel <name> <port> [lp] the VM's 127.0.0.1:<port> on localhost:<lp>
 vm forward <name> <port>...  this machine's localhost:<port> on the VM's localhost
 vm gui <name> shot <f.png>   a picture of the VM's screen
-vm view <name>               the VM in a window, for the user
+vm view <name>, vm hide <name>  show its window to the user, hide it again
 vm states --plain            saved states of both VMs
 ```
 

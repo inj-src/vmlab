@@ -1,0 +1,295 @@
+diff --git a/crates/reims-vgpu-window/features.md b/crates/reims-vgpu-window/features.md
+index d7f0135a..777c3399 100644
+--- a/crates/reims-vgpu-window/features.md
++++ b/crates/reims-vgpu-window/features.md
+@@ -19,6 +19,7 @@ them; its `manual` checks are on a Linux host's guest boot.
+ | variable | effect |
+ |---|---|
+ | `REIMS_VGPU_WINDOW=0` | QEMU stays headless under `-display none` (QEMU reads it) |
++| `REIMS_VGPU_WINDOW_HIDDEN=1` | vmlab, Linux: windows open hidden, to show on request ("Shown and hidden on request" below) |
+ | `REIMS_VGPU_WINDOW_BORDERLESS=1` | borderless windows that fill their screens |
+ | `REIMS_VGPU_WINDOW_SCREENS=1,0` | display i opens on the host screen the list's i-th entry names |
+ | `resolution=2560x1600` | the mode the window opens for, and the guest is offered until the window's pixels are known (QEMU's reims-graphics-pci property; 1920x1080 by default) |
+@@ -459,6 +460,17 @@ runtime's own device. The switches above apply, and `resolution=` too.
+   `test: env::the_close_command_is_the_variables_text_or_none`,
+   `manual`
+ 
++- Shown and hidden on request (vmlab): `VMLAB_WINDOW_CONTROL` names a FIFO
++  whose lines `show` and `hide` show (raised, maximized where asked) or hide
++  every window; the lab's title bar has a hide button that writes `hide`
++  there. The VM runs on either way, and close still shuts it down; a window
++  closed or ended does not show again. `VMLAB_WINDOW_STATE_FILE` gets `shown`
++  or `hidden` as a window opens and after each request. With
++  `REIMS_VGPU_WINDOW_HIDDEN=1` windows open hidden. While no window shows, no
++  clipboard is shared either way.
++  `test: native::linux::control::a_control_line_is_show_or_hide`,
++  `manual`
++
+ Not on Linux: a menu bar, Dock icon or ⌘Tab entry (the compositor's task
+ bar shows the window, as `reims-vgpu`), the camera-housing fit, and trackpad
+ gesture phases and momentum.
+diff --git a/crates/reims-vgpu-window/src/env.rs b/crates/reims-vgpu-window/src/env.rs
+index a4ff6b21..5a1ca2ea 100644
+--- a/crates/reims-vgpu-window/src/env.rs
++++ b/crates/reims-vgpu-window/src/env.rs
+@@ -24,6 +24,8 @@ pub const IMPL_VAR: &str = "REIMS_VGPU_WINDOW_IMPL";
+ pub const MAXIMIZED_VAR: &str = "REIMS_VGPU_WINDOW_MAXIMIZED";
+ /// The pinned mode's variable (vmlab).
+ pub const MODE_VAR: &str = "REIMS_VGPU_WINDOW_MODE";
++/// The hidden start's variable (vmlab).
++pub const HIDDEN_VAR: &str = "REIMS_VGPU_WINDOW_HIDDEN";
+ /// The close command's variable (vmlab).
+ pub const CLOSE_COMMAND_VAR: &str = "REIMS_VGPU_WINDOW_CLOSE_COMMAND";
+ 
+@@ -214,6 +216,14 @@ pub fn maximized() -> bool {
+     *MAXIMIZED.get_or_init(|| std::env::var(MAXIMIZED_VAR).is_ok_and(|value| parse_switch(&value)))
+ }
+ 
++/// Whether windows open hidden (vmlab; Linux): `REIMS_VGPU_WINDOW_HIDDEN` set to `1`, `true`,
++/// `yes` or `on`. A window made hidden shows on request (`native::linux::control`), maximized
++/// where `REIMS_VGPU_WINDOW_MAXIMIZED` says. Read once per process.
++pub fn hidden() -> bool {
++    static HIDDEN: OnceLock<bool> = OnceLock::new();
++    *HIDDEN.get_or_init(|| std::env::var(HIDDEN_VAR).is_ok_and(|value| parse_switch(&value)))
++}
++
+ /// The command that shuts the guest down when the person closes a window (vmlab; Linux):
+ /// `REIMS_VGPU_WINDOW_CLOSE_COMMAND`, a line for `/bin/sh -c`. The window hides and the command
+ /// runs, in place of telling the host, which powers the VM off; the host is told only where the
+diff --git a/crates/reims-vgpu-window/src/native/linux.rs b/crates/reims-vgpu-window/src/native/linux.rs
+index daded316..fffc9e6f 100644
+--- a/crates/reims-vgpu-window/src/native/linux.rs
++++ b/crates/reims-vgpu-window/src/native/linux.rs
+@@ -8,6 +8,7 @@
+ //! lists them.
+ 
+ mod agent;
++pub(crate) mod control;
+ mod input;
+ mod keymap;
+ mod render;
+diff --git a/crates/reims-vgpu-window/src/native/linux/agent.rs b/crates/reims-vgpu-window/src/native/linux/agent.rs
+index a1dec2b5..673a677b 100644
+--- a/crates/reims-vgpu-window/src/native/linux/agent.rs
++++ b/crates/reims-vgpu-window/src/native/linux/agent.rs
+@@ -352,6 +352,8 @@ fn message(link: &mut Link, kind: u32, data: &[u8]) {
+             link.shared = None;
+             host_changed(link);
+         }
++        // vmlab: no clipboard is shared while no window shows (`super::control`)
++        MSG_GRAB if !super::control::shown() => {}
+         MSG_GRAB => {
+             link.wanted = [TYPE_TEXT, TYPE_PNG]
+                 .into_iter()
+@@ -471,9 +473,10 @@ unsafe extern "C" fn guest_data(
+     found
+ }
+ 
+-/// The host's clipboard may have changed: read it, and offer it where it is not the one shared.
++/// The host's clipboard may have changed: read it, and offer it where it is not the one shared;
++/// nothing while no window shows (`super::control`).
+ fn host_changed(link: &mut Link) {
+-    if !link.agent {
++    if !link.agent || !super::control::shown() {
+         return;
+     }
+     let clip = read_host();
+diff --git a/crates/reims-vgpu-window/src/native/linux/control.rs b/crates/reims-vgpu-window/src/native/linux/control.rs
+new file mode 100644
+index 00000000..72a92bf7
+--- /dev/null
++++ b/crates/reims-vgpu-window/src/native/linux/control.rs
+@@ -0,0 +1,105 @@
++//! vmlab: the windows shown and hidden on request, so a VM started without anyone watching can be
++//! shown later in its real window, and hidden again with the VM still running.
++//!
++//! `VMLAB_WINDOW_CONTROL` names a FIFO whose lines `show` and `hide` show or hide every window of
++//! the process (`crate::sdl::shell::show_on_request`); the title bar's hide button (the lab's
++//! libdecor plugin, in this process) writes `hide` to the same FIFO. `VMLAB_WINDOW_STATE_FILE`
++//! gets `shown` or `hidden` as a window opens and after each request, for the lab's `vm` to read.
++//! With `REIMS_VGPU_WINDOW_HIDDEN` the windows open hidden (`crate::env::hidden`).
++//!
++//! While no window shows, no clipboard is shared (`super::agent`): nobody is looking at the VM,
++//! and the guest has no business reading the host's clipboard or setting it.
++//!
++//! A reader thread opens the FIFO for reading and writing, so it never reads an end when a
++//! writer closes, and posts each request to the UI thread.
++
++use std::io::{BufRead, BufReader};
++use std::sync::atomic::{AtomicBool, Ordering};
++
++use super::ui;
++use crate::sdl::shell;
++
++/// The control FIFO's variable.
++const CONTROL_VAR: &str = "VMLAB_WINDOW_CONTROL";
++/// The state file's variable.
++const STATE_VAR: &str = "VMLAB_WINDOW_STATE_FILE";
++
++/// Whether the windows show, as last opened or asked.
++static SHOWN: AtomicBool = AtomicBool::new(false);
++
++/// Whether the windows show (the module doc).
++pub(crate) fn shown() -> bool {
++    SHOWN.load(Ordering::Relaxed)
++}
++
++/// Records whether the windows show, in [`SHOWN`] and the state file.
++pub(crate) fn set_shown(shown: bool) {
++    SHOWN.store(shown, Ordering::Relaxed);
++    let Some(path) = std::env::var_os(STATE_VAR).filter(|path| !path.is_empty()) else {
++        return;
++    };
++    if let Err(error) = std::fs::write(&path, if shown { "shown\n" } else { "hidden\n" }) {
++        log::warn!(target: "reims_vgpu_window", "vmlab: the window's state file: {error}");
++    }
++}
++
++/// What a control line asks: to show the windows (`true`) or hide them (`false`); `None` for
++/// anything else.
++fn request(line: &str) -> Option<bool> {
++    match line.trim() {
++        "show" => Some(true),
++        "hide" => Some(false),
++        _ => None,
++    }
++}
++
++/// Starts the reader thread where `VMLAB_WINDOW_CONTROL` names a FIFO (the module doc). On the
++/// UI thread, once SDL's video runs.
++pub(crate) fn start() {
++    let Some(path) = std::env::var_os(CONTROL_VAR).filter(|path| !path.is_empty()) else {
++        return;
++    };
++    let spawned = std::thread::Builder::new()
++        .name("vmlab.window-control".into())
++        .spawn(move || {
++            let fifo = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
++                Ok(fifo) => fifo,
++                Err(error) => {
++                    log::warn!(
++                        target: "reims_vgpu_window",
++                        "vmlab: no window control ({}: {error})",
++                        path.display()
++                    );
++                    return;
++                }
++            };
++            for line in BufReader::new(fifo).lines() {
++                let Ok(line) = line else { return };
++                match request(&line) {
++                    Some(show) => ui::post(move || shell::show_on_request(show)),
++                    None => log::warn!(
++                        target: "reims_vgpu_window",
++                        "vmlab: window control: {line:?} is neither show nor hide"
++                    ),
++                }
++            }
++        });
++    if let Err(error) = spawned {
++        log::warn!(target: "reims_vgpu_window", "vmlab: no window control thread: {error}");
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// A control line is `show` or `hide`, blanks around it allowed; anything else asks nothing
++    #[test]
++    fn a_control_line_is_show_or_hide() {
++        assert_eq!(request("show"), Some(true));
++        assert_eq!(request(" hide \r"), Some(false));
++        assert_eq!(request(""), None);
++        assert_eq!(request("Show"), None);
++        assert_eq!(request("shown"), None);
++    }
++}
+diff --git a/crates/reims-vgpu-window/src/native/linux/sdl.rs b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+index d5a531f6..334e6252 100644
+--- a/crates/reims-vgpu-window/src/native/linux/sdl.rs
++++ b/crates/reims-vgpu-window/src/native/linux/sdl.rs
+@@ -188,10 +188,16 @@ pub(crate) fn open(window: &Arc<Window>, borderless: bool, _taken: &[Frame]) ->
+         if borderless {
+             SDL_SetWindowFullscreen(sdl, true);
+         }
+-        SDL_ShowWindow(sdl);
++    }
++    // vmlab: `REIMS_VGPU_WINDOW_HIDDEN` leaves it hidden until asked to show (`super::control`)
++    let shown = !crate::env::hidden();
++    if shown {
++        // SAFETY: as above.
++        unsafe { SDL_ShowWindow(sdl) };
+     }
+     window.surface().set_target(Target(sdl));
+-    window.surface().set_visible(true);
++    window.surface().set_visible(shown);
++    super::control::set_shown(shown);
+     log::debug!(
+         target: "reims_vgpu_window",
+         "window {:?} on screen {}",
+@@ -426,6 +432,21 @@ pub(crate) fn hide(shell: &mut Shell) {
+     unsafe { SDL_HideWindow(shell.sdl) };
+ }
+ 
++/// vmlab: the window shows on request (`super::control`), raised, so it comes up over the others
++/// and the compositor may give it the keyboard.
++pub(crate) fn show(shell: &mut Shell) {
++    // SAFETY: the window is SDL's, on this thread.
++    unsafe {
++        SDL_ShowWindow(shell.sdl);
++        SDL_RaiseWindow(shell.sdl);
++    }
++}
++
++/// vmlab: records that the windows show or not after a request (`super::control`).
++pub(crate) fn requested(shown: bool) {
++    super::control::set_shown(shown);
++}
++
+ /// vmlab: starts the close command `command` (`crate::env::close_command`) for window `id`,
+ /// which shuts the guest down: whether it started. Where it did not, the caller tells the host.
+ /// Where it ends in anything but success, the host is told on the UI thread
+diff --git a/crates/reims-vgpu-window/src/native/linux/ui.rs b/crates/reims-vgpu-window/src/native/linux/ui.rs
+index df4720bb..dd7b2176 100644
+--- a/crates/reims-vgpu-window/src/native/linux/ui.rs
++++ b/crates/reims-vgpu-window/src/native/linux/ui.rs
+@@ -219,6 +219,7 @@ fn run() {
+     snapshot_screens();
+     QUEUE.lock().phase = Phase::Running;
+     super::agent::start();
++    super::control::start();
+     loop {
+         run_jobs();
+         // SAFETY: an all-zero event is a valid one for SDL to fill.
+diff --git a/crates/reims-vgpu-window/src/sdl/shell.rs b/crates/reims-vgpu-window/src/sdl/shell.rs
+index 7ef9c894..606908e9 100644
+--- a/crates/reims-vgpu-window/src/sdl/shell.rs
++++ b/crates/reims-vgpu-window/src/sdl/shell.rs
+@@ -188,6 +188,26 @@ pub(crate) fn open(window: &Arc<Window>) {
+     );
+ }
+ 
++/// vmlab (Linux): shows or hides every open window on request
++/// (`crate::native::linux::control`). A window the person closed, or whose display ended, stays
++/// hidden. A shown one is drawn again once SDL says it shows ([`batch_over`]); a hidden one stops
++/// being drawn at once.
++#[cfg(target_os = "linux")]
++pub(crate) fn show_on_request(show: bool) {
++    let ids = each_open(|s| (!s.closed && !s.leaving).then(|| s.window.id()));
++    for id in ids {
++        with_shell(id, |shell| {
++            if show {
++                os::show(shell);
++            } else {
++                shell.window.surface().set_visible(false);
++                os::hide(shell);
++            }
++        });
++    }
++    os::requested(show);
++}
++
+ /// Window `id`'s display ended: its input lets go ([`ended`]) and it hides; SDL's window goes
+ /// once its OS lets it go ([`os::close`]).
+ pub(crate) fn close(id: u64) {

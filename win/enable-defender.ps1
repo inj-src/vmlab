@@ -1,6 +1,7 @@
-# enable-defender.ps1: Microsoft Defender Antivirus back on, as on a customer's PC. For the saved
-# state `defender` only (vm start win defender): the clean state keeps it off, where it would
-# scan every file a build writes. Run over SSH as dev, then restart Windows.
+# enable-defender.ps1: Microsoft Defender Antivirus back on, as on a customer's PC, from inside a
+# running Windows. `vm start win --defender` does the same before Windows boots
+# (gpu/win3d/defender-on.sh) and is the usual way; the default state keeps it off, where it
+# would scan every file a build writes. Run over SSH as dev, then restart Windows.
 #
 # The lab switched it off by disabling its services (win/disable-defender-update.reg, written
 # into the image before the first boot). These are Windows 11's own start types. While the

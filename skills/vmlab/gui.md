@@ -31,9 +31,9 @@ A second way, for checks of the page alone: start the app in the VM with `--remo
 ## Windows specifics
 
 - **A tray icon:** Windows 11 hides a new icon under the "Show Hidden Icons" arrow. Once the app has shown it, `ssh win-pwsh 'C:\vmlab\tray.ps1 <part of its program name>'` puts it beside the clock.
-- **Display scaling:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once.
+- **Display scaling:** `/vmlab/tools/vmlab/gpu/win3d/win-venus.sh scale 125` (or 150, 100) sets it at once. It holds until the user shows or hides the window, which sets the screen's scaling (shown) or 100% (hidden).
 - `win` shows a "Test Mode" watermark: its GPU driver is test-signed.
 
 ## The VM window, when the user wants one
 
-`vm start <name> --window` or `vm view <name>` opens it maximized and unscaled. While it is the active window every key goes to the guest, the desktop's shortcuts too. Copied text and pictures paste across, and files dropped on it land on the guest's desktop. Closing it shuts the guest down cleanly (the VM about 10 s after the window).
+Every run has a window, hidden unless asked, and a tray icon on the user's desktop (show or hide it, restart, shut down). `vm start <name> --window` or `vm view <name>` shows it maximized and unscaled: the guest takes the window's pixels, and on `win` the screen's scaling. `vm hide <name>` hides it again; the guest goes back to 1920×1080 at 100% and keeps running. While it is the active window every key goes to the guest, the desktop's shortcuts too. Copied text and pictures paste across, and files dropped on it land on the guest's desktop. Closing it shuts the guest down cleanly (the VM about 10 s after the window).

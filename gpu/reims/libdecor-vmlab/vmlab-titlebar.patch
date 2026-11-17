@@ -1,10 +1,17 @@
-libdecor-cairo: vmlab: the title bar looks like GTK's Yaru-dark header bar, with a full screen button
+libdecor-cairo: vmlab: the title bar looks like GTK's Yaru-dark header bar, with full screen and hide buttons
 
 For the Mac VM's window (mac26.sh), whose title bar this plugin draws: the same height, colours,
 title font (VMLAB_DECOR_FONT, a Pango font name, in bold; VMLAB_DECOR_FONT_AA=rgba for subpixel
 text), round buttons and icons (vmlab-icons.h, made by ../gen-icons.py from the desktop's icon
 theme) as the Windows VM's GTK title bar, so the two windows match. One more button, left of
 minimize, makes the window full screen. No title bar is drawn while the window is full screen.
+
+With VMLAB_WINDOW_CONTROL (a FIFO the window reads "show" and "hide" lines from), a hide button
+stands left of full screen; a click writes "hide" there, and the VM keeps running.
+
+The title bar is a desynchronized sub-surface, so a button's hover look shows at once: synced,
+its redraws waited for the window's next commit, which reims makes only for a new guest frame,
+and an idle Mac sends almost none (the buttons had no hover look).
 
 Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 
@@ -19,7 +26,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  #include <wayland-cursor.h>
  
  #include "libdecor-plugin.h"
-@@ -47,20 +49,41 @@
+@@ -47,20 +49,46 @@
  
  #include "common/libdecor-cairo-blur.h"
  
@@ -35,6 +42,10 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 + *
 + * Left of the window's buttons is a round one that makes the window full screen. A full
 + * screen window has no title bar: the way back is the window's program's (a key).
++ *
++ * VMLAB_WINDOW_CONTROL   a pipe (FIFO) that takes "show" and "hide" from the VM's launcher;
++ *                        with it, a round button left of full screen writes "hide" there,
++ *                        and the window's program hides the window, the VM still running
 + */
  static const size_t SHADOW_MARGIN = 24;	/* graspable part of the border */
 -static const size_t TITLE_HEIGHT = 24;
@@ -56,6 +67,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +/* centres of the buttons, from the bar's right edge and from its top */
 +static const int CLOSE_CENTRE = 18;
 +static const int FULLSCREEN_CENTRE = 129;
++static const int HIDE_CENTRE = 167;
 +static const double BUTTON_CENTRE_Y = 19;
 +static const double WINDOW_BUTTON_RADIUS = 11;
 +static const double ROUND_BUTTON_RADIUS = 15;
@@ -74,15 +86,16 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  
  static const uint32_t DOUBLE_CLICK_TIME_MS = 400;
  
-@@ -123,6 +146,7 @@
+@@ -123,6 +151,8 @@
  	BUTTON_MIN,
  	BUTTON_MAX,
  	BUTTON_CLOSE,
 +	BUTTON_FULLSCREEN,
++	BUTTON_HIDE,
  };
  
  enum composite_mode {
-@@ -137,7 +161,6 @@
+@@ -137,7 +167,6 @@
  
  	struct wl_seat *wl_seat;
  	struct wl_pointer *wl_pointer;
@@ -90,15 +103,16 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  	struct wl_surface *cursor_surface;
  	struct wl_cursor *current_cursor;
  	int cursor_scale;
-@@ -247,6 +270,7 @@
+@@ -247,6 +276,8 @@
  		struct border_component min;
  		struct border_component max;
  		struct border_component close;
 +		struct border_component fullscreen;
++		struct border_component hide;	/* only with VMLAB_WINDOW_CONTROL */
  	} title_bar;
  
  	/* store pre-processed shadow tile */
-@@ -279,6 +303,7 @@
+@@ -279,6 +310,7 @@
  	int cursor_size;
  
  	PangoFontDescription *font;
@@ -106,7 +120,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  };
  
  static const char *libdecor_cairo_proxy_tag = "libdecor-cairo";
-@@ -352,6 +377,9 @@
+@@ -352,6 +384,9 @@
  update_local_cursor(struct seat *seat);
  
  static void
@@ -116,17 +130,69 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  libdecor_plugin_cairo_destroy(struct libdecor_plugin *plugin)
  {
  	struct libdecor_plugin_cairo *plugin_cairo =
-@@ -454,6 +482,9 @@
+@@ -428,6 +463,31 @@
+ 	border_component->type = type;
+ }
+ 
++/* vmlab: the window can be hidden, through the pipe its program reads (VMLAB_WINDOW_CONTROL) */
++static bool
++vmlab_can_hide(void)
++{
++	const char *path = getenv("VMLAB_WINDOW_CONTROL");
++
++	return path && *path;
++}
++
++/* vmlab: the hide button's click: "hide" down the pipe, without waiting for a reader */
++static void
++vmlab_hide(void)
++{
++	int fd = open(getenv("VMLAB_WINDOW_CONTROL"), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
++
++	if (fd < 0) {
++		fprintf(stderr, "libdecor-cairo (vmlab): the window's control pipe: %s\n",
++			strerror(errno));
++		return;
++	}
++	if (write(fd, "hide\n", 5) != 5)
++		fprintf(stderr, "libdecor-cairo (vmlab): could not ask for the window to hide\n");
++	close(fd);
++}
++
+ static void
+ init_client_component(struct border_component *border_component,
+ 		      struct border_component *parent,
+@@ -454,6 +514,13 @@
  	init_client_component(&frame_cairo->title_bar.close,
  			      &frame_cairo->title_bar.title,
  			      BUTTON_CLOSE);
 +	init_client_component(&frame_cairo->title_bar.fullscreen,
 +			      &frame_cairo->title_bar.title,
 +			      BUTTON_FULLSCREEN);
++	if (vmlab_can_hide())
++		init_client_component(&frame_cairo->title_bar.hide,
++				      &frame_cairo->title_bar.title,
++				      BUTTON_HIDE);
  	init_server_component(&frame_cairo->shadow,
  			      SHADOW);
  }
-@@ -1029,7 +1060,8 @@
+@@ -994,6 +1061,15 @@
+ 			wl_surface_add_listener(cmpnt->server.wl_surface,
+ 						&surface_listener,
+ 						frame_cairo);
++			/*
++			 * vmlab: the title bar shows a new picture of itself at once (a button
++			 * under the pointer, held down), not at the window's next frame: the Mac
++			 * VM's window presents only when macOS draws something new, and an idle
++			 * desktop draws nothing for a long time. Its place still moves with the
++			 * window's frames (a sub-surface's position always waits for its parent).
++			 */
++			if (cmpnt == &frame_cairo->title_bar.title)
++				wl_subsurface_set_desync(cmpnt->server.wl_subsurface);
+ 		}
+ 		break;
+ 	case COMPOSITE_CLIENT:
+@@ -1029,7 +1105,8 @@
  static void
  ensure_title_bar_surfaces(struct libdecor_frame_cairo *frame_cairo)
  {
@@ -136,7 +202,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  	ensure_component(frame_cairo, &frame_cairo->title_bar.title);
  
  	frame_cairo->title_bar.min.opaque = true;
-@@ -1042,6 +1074,26 @@
+@@ -1042,6 +1119,28 @@
  	ensure_component(frame_cairo, &frame_cairo->title_bar.close);
  }
  
@@ -155,6 +221,8 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +		return width - CLOSE_CENTRE - 2 * (int)BUTTON_WIDTH;
 +	case BUTTON_FULLSCREEN:
 +		return width - FULLSCREEN_CENTRE;
++	case BUTTON_HIDE:
++		return width - HIDE_CENTRE;
 +	default:
 +		return 0;
 +	}
@@ -163,7 +231,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  static void
  calculate_component_size(struct libdecor_frame_cairo *frame_cairo,
  			 enum component component,
-@@ -1075,23 +1127,27 @@
+@@ -1075,23 +1174,28 @@
  		*component_width = content_width;
  		*component_height = TITLE_HEIGHT;
  		return;
@@ -196,6 +264,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +		*component_height = TITLE_HEIGHT - 3;
 +		return;
 +	case BUTTON_FULLSCREEN:
++	case BUTTON_HIDE:
 +		*component_x = button_centre_x(frame_cairo, component)
 +			       - (int)ROUND_BUTTON_RADIUS;
 +		*component_y = (int)(BUTTON_CENTRE_Y - ROUND_BUTTON_RADIUS);
@@ -204,7 +273,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  		return;
  	}
  
-@@ -1111,73 +1167,221 @@
+@@ -1111,73 +1215,225 @@
  	return 0;
  }
  
@@ -300,20 +369,6 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  		return;
  
 -	layout = pango_cairo_create_layout(cr);
--
--	pango_layout_set_text(layout,
--			      title,
--			      -1);
--	pango_layout_set_font_description(layout, frame_cairo->plugin_cairo->font);
--	pango_layout_get_size(layout, &text_extents_width, &text_extents_height);
--
--	/* set text position and dimensions */
--	text_width = text_extents_width / PANGO_SCALE;
--	text_height = text_extents_height / PANGO_SCALE;
--	text_x = *title_width / 2.0 - text_width / 2.0;
--	text_x += MIN(0.0, ((*title_width - fade_width) - (text_x + text_width)));
--	text_x = MAX(text_x, BUTTON_WIDTH);
--	text_y = TITLE_HEIGHT / 2.0 - text_height / 2.0;
 +	layout = create_text_layout(frame_cairo->plugin_cairo, cr,
 +				    frame_cairo->plugin_cairo->font, title);
 +	pango_layout_get_pixel_size(layout, &text_width, &text_height);
@@ -329,6 +384,20 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +	text_x = MAX(text_x, margin);
 +	text_y = ((int)TITLE_HEIGHT - 1 - text_height) / 2;
  
+-	pango_layout_set_text(layout,
+-			      title,
+-			      -1);
+-	pango_layout_set_font_description(layout, frame_cairo->plugin_cairo->font);
+-	pango_layout_get_size(layout, &text_extents_width, &text_extents_height);
+-
+-	/* set text position and dimensions */
+-	text_width = text_extents_width / PANGO_SCALE;
+-	text_height = text_extents_height / PANGO_SCALE;
+-	text_x = *title_width / 2.0 - text_width / 2.0;
+-	text_x += MIN(0.0, ((*title_width - fade_width) - (text_x + text_width)));
+-	text_x = MAX(text_x, BUTTON_WIDTH);
+-	text_y = TITLE_HEIGHT / 2.0 - text_height / 2.0;
+-
 -	/* draw title text */
  	cairo_move_to(cr, text_x, text_y);
 -	cairo_set_rgba32(cr, &col_title_text);
@@ -439,7 +508,8 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +	const struct palette *palette = active ? &PALETTE_ACTIVE : &PALETTE_BACKDROP;
 +	double radius =
 +		frame_cairo->decoration_type == DECORATION_TYPE_ALL ? CORNER_RADIUS : 0;
-+	int leftmost = button_centre_x(frame_cairo, BUTTON_FULLSCREEN) -
++	int leftmost = button_centre_x(frame_cairo,
++				       vmlab_can_hide() ? BUTTON_HIDE : BUTTON_FULLSCREEN) -
 +		       (int)ROUND_BUTTON_RADIUS;
 +
 +	/* a light line along the top edge, the bar's grey from one row below it */
@@ -461,6 +531,9 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 -	g_object_unref(layout);
 +	draw_round_button(frame_cairo, cr, &frame_cairo->title_bar.fullscreen,
 +			  vmlab_icon_fullscreen, palette, scale);
++	if (vmlab_can_hide())
++		draw_round_button(frame_cairo, cr, &frame_cairo->title_bar.hide,
++				  vmlab_icon_hide, palette, scale);
 +
 +	draw_window_button(frame_cairo, cr, &frame_cairo->title_bar.min,
 +			   vmlab_icon_minimize, minimizable(frame_cairo),
@@ -477,7 +550,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  }
  
  static void
-@@ -1187,60 +1391,23 @@
+@@ -1187,60 +1443,23 @@
  		       int component_height,
  		       enum component component)
  {
@@ -548,7 +621,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  	cr = cairo_create(surface);
  	cairo_save(cr);
  	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
-@@ -1248,135 +1415,22 @@
+@@ -1248,135 +1467,22 @@
  	cairo_paint(cr);
  	cairo_restore(cr);
  
@@ -600,11 +673,11 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 -		cairo_paint(cr);
 -		break;
 -	}
- 
+-
 -	/* button symbols */
 -	/* https://www.cairographics.org/FAQ/#sharp_lines */
 -	cairo_set_line_width(cr, 1);
--
+ 
 -	switch (component) {
 -	case TITLE:
 -		draw_title_text(frame_cairo,cr, &component_width, active);
@@ -692,7 +765,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  		calculate_component_size(frame_cairo, component,
  					 &component_x, &component_y,
  					 &component_width, &component_height);
-@@ -1458,124 +1512,24 @@
+@@ -1458,124 +1564,24 @@
  }
  
  static void
@@ -821,7 +894,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  	calculate_component_size(frame_cairo, component,
  				 &component_x, &component_y,
  				 &component_width, &component_height);
-@@ -1583,44 +1537,29 @@
+@@ -1583,44 +1589,29 @@
  	set_component_input_region(frame_cairo, border_component);
  
  	scale = border_component_get_scale(border_component);
@@ -883,11 +956,12 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  }
  
  static void
-@@ -2364,7 +2303,11 @@
+@@ -2364,7 +2355,12 @@
  			case BUTTON_MIN:
  			case BUTTON_MAX:
  			case BUTTON_CLOSE:
 +			case BUTTON_FULLSCREEN:
++			case BUTTON_HIDE:
  				frame_cairo->grab = frame_cairo->active;
 +				/* the look of a button held down */
 +				draw_decoration(frame_cairo);
@@ -895,7 +969,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  				break;
  			default:
  				break;
-@@ -2396,6 +2339,10 @@
+@@ -2396,6 +2392,13 @@
  					if (closeable(frame_cairo))
  						libdecor_frame_close(&frame_cairo->frame);
  					break;
@@ -903,10 +977,13 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +					libdecor_frame_set_fullscreen(&frame_cairo->frame,
 +								      NULL);
 +					break;
++				case BUTTON_HIDE:
++					vmlab_hide();
++					break;
  				default:
  					break;
  				}
-@@ -2701,6 +2648,7 @@
+@@ -2701,6 +2704,7 @@
  {
  	struct libdecor_plugin_cairo *plugin_cairo;
  	struct wl_display *wl_display;
@@ -914,7 +991,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  
  	plugin_cairo = zalloc(sizeof *plugin_cairo);
  	libdecor_plugin_init(&plugin_cairo->plugin,
-@@ -2719,11 +2667,14 @@
+@@ -2719,11 +2723,14 @@
  		plugin_cairo->cursor_size = 24;
  	}
  
@@ -935,7 +1012,7 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
  	plugin_cairo->wl_registry = wl_display_get_registry(wl_display);
 --- a/src/plugins/cairo/vmlab-icons.h
 +++ b/src/plugins/cairo/vmlab-icons.h
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,963 @@
 +/* made by gen-icons.py: alpha masks of the symbolic icons, 16 units at scales 1 to 3 */
 +#define VMLAB_ICON_UNITS 16
 +#define VMLAB_ICON_SCALES 3
@@ -1739,3 +1816,163 @@ Apply with patch -p1 in libdecor-0.2.2 (the tarball beside this file, unpacked).
 +	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 +};
 +static const unsigned char *const vmlab_icon_fullscreen[3] = { vmlab_icon_fullscreen_1, vmlab_icon_fullscreen_2, vmlab_icon_fullscreen_3 };
++/* view-restore-symbolic, /usr/share/icons/Yaru/scalable/actions/view-restore-symbolic.svg */
++static const unsigned char vmlab_icon_hide_1[256] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,64,207,0,0,0,0,0,0,0,0,0,0,218,0,0,64,233,64,0,
++	0,0,0,0,0,0,0,0,0,255,0,60,233,66,0,0,0,0,0,0,0,0,0,0,
++	0,255,60,233,66,0,0,0,0,0,0,0,0,0,0,0,0,255,233,64,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,241,255,255,255,218,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,218,255,255,255,242,0,0,0,0,0,0,0,0,0,0,0,0,0,64,233,255,0,
++	0,0,0,0,0,0,0,0,0,0,0,60,233,66,255,0,0,0,0,0,0,0,0,0,
++	0,0,60,233,66,0,255,0,0,0,0,0,0,0,0,0,0,63,233,64,0,0,218,0,
++	0,0,0,0,0,0,0,0,0,207,64,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_hide_2[1024] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,22,198,195,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,22,211,255,203,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,197,196,0,0,0,0,0,22,211,255,211,22,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,0,21,210,255,215,24,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,0,0,0,21,
++	210,255,215,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,255,255,0,0,21,210,255,215,24,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,255,255,0,21,210,255,215,24,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,21,210,255,215,
++	24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,255,255,211,255,211,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,255,255,255,215,24,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,255,255,255,255,255,255,
++	255,255,255,196,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,200,255,255,255,255,255,255,255,255,194,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,197,255,255,255,255,255,255,255,255,200,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,195,255,255,255,255,255,255,255,255,255,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,21,210,255,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,22,211,255,211,255,255,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,210,255,215,24,255,255,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,210,
++	255,215,24,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,21,210,255,215,24,0,0,255,255,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,21,210,255,215,24,0,0,0,255,255,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,21,210,255,215,24,
++	0,0,0,0,255,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,22,211,255,211,22,0,0,0,0,0,195,194,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,204,255,211,22,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,195,198,22,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++
++static const unsigned char vmlab_icon_hide_3[2304] = {
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,145,244,133,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,157,255,255,242,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,157,255,255,255,144,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,134,244,133,0,0,0,0,0,0,0,0,2,157,255,255,255,157,2,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,249,255,248,0,0,0,0,0,0,0,2,157,255,255,255,157,2,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,0,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,1,151,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,157,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,255,255,255,255,255,255,255,255,255,255,255,255,255,249,133,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,251,255,255,255,255,255,255,255,255,255,255,255,255,255,242,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,137,252,255,255,255,255,255,255,255,255,255,255,255,249,132,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,134,249,255,255,255,255,255,255,255,255,255,255,255,251,138,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,243,255,255,255,255,255,255,255,255,255,255,255,255,255,251,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,133,249,255,255,255,255,255,255,255,255,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,2,156,255,255,255,157,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,1,151,255,255,255,157,2,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,1,150,255,255,255,157,2,0,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,1,150,255,255,255,158,2,0,0,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,1,150,255,255,255,158,2,0,0,0,0,0,0,255,255,255,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,2,156,255,255,255,157,2,0,0,0,0,0,0,0,249,255,248,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,2,156,255,255,255,157,2,0,0,0,0,0,0,0,0,133,243,132,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,144,255,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,243,255,255,157,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,132,244,145,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++};
++static const unsigned char *const vmlab_icon_hide[3] = { vmlab_icon_hide_1, vmlab_icon_hide_2, vmlab_icon_hide_3 };
