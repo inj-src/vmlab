@@ -1,0 +1,4 @@
+{
+  "about": "vmlab-mcp, the lab's own server (both VMs, a machine argument), as built after the tool-description trim of 2026-11-17: /vmlab/tmp/vmlab-mcp-bench/after",
+  "server": {"type": "stdio", "command": "/vmlab/tmp/vmlab-mcp-bench/after", "args": []}
+}

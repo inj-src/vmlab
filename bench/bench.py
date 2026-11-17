@@ -274,7 +274,8 @@ def bench(os_, mcp, task_names, reps, model, max_turns, tag=""):
             t["cleanup"]()
             row = dict(os=os_, mcp=mcp, task=name, rep=rep, model=model, ok=ok, secs=round(dt, 1),
                        turns=j.get("num_turns"), cost=j.get("total_cost_usd"), detail=detail,
-                       answer=ans[-200:], error=j.get("is_error"), ts=time.strftime("%F %T"))
+                       answer=ans[-200:], error=j.get("is_error"), ts=time.strftime("%F %T"),
+                       usage={k: v for k, v in (j.get("usage") or {}).items() if k.endswith("tokens")})
             if tag:
                 row["tag"] = tag
             with RESULTS.open("a") as f:
