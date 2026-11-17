@@ -214,7 +214,9 @@ impl Catalog {
             if !seen.insert(name.to_string()) {
                 continue;
             }
-            out.push(match (find(win, name), find(mac, name)) {
+            let (mut w, mut m) = (find(win, name), find(mac, name));
+            crate::descriptions::OVERRIDES.apply(name, &mut w, &mut m);
+            out.push(match (w, m) {
                 (Some(w), Some(m)) => merge_both(w, m),
                 (Some(w), None) => only_on(w, Machine::Win),
                 (None, Some(m)) => only_on(m, Machine::Mac),
@@ -227,13 +229,8 @@ impl Catalog {
 
 fn machine_property(only: Option<Machine>) -> Value {
     let desc = match only {
-        None => "Which VM to run this on: \"win\" (Windows 11) or \"mac\" (macOS). The VM must already be running (`vm start <name>`).".to_string(),
-        Some(m) => format!(
-            "Which VM to run this on. This tool exists only on {} (\"{}\"); \"{}\" returns an error.",
-            m.label(),
-            m.name(),
-            m.other().name()
-        ),
+        None => "The VM: \"win\" (Windows 11) or \"mac\" (macOS).".to_string(),
+        Some(m) => format!("The VM: only \"{}\" ({}) has this tool.", m.name(), m.label()),
     };
     json!({"type": "string", "enum": ["win", "mac"], "description": desc})
 }
@@ -550,7 +547,7 @@ mod tests {
         let m = by_name(&u, "mac_only")["description"].as_str().unwrap();
         assert!(m.starts_with("[macOS only"), "{m}");
         let mp = &by_name(&u, "mac_only")["inputSchema"]["properties"]["machine"]["description"];
-        assert!(mp.as_str().unwrap().contains("exists only on macOS"));
+        assert!(mp.as_str().unwrap().contains("only \"mac\" (macOS) has this tool"));
         assert!(by_name(&u, "a")["description"] == "A.");
     }
 

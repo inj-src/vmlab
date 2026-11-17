@@ -6,7 +6,8 @@ A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and 
 
 - **One tool list for both VMs.** It is Cua's list, with a required `machine` argument (`"win"` or `"mac"`) added to every tool. The argument is removed before the call is forwarded.
   - A tool only one VM has says so in its description (today only `debug_window_info`, which is win only). Calling it for the other VM returns a tool error.
-  - When the two VMs describe a tool or one of its properties differently, the description gives both texts. Input properties only one VM has are marked `(win only)` or `(mac only)`; a field only one VM requires is not required and says `(required on win)`.
+  - **Descriptions are the lab's own** (`descriptions.md`, compiled in): one text per tool and parameter for both VMs, marking where they differ, with the lab's trial results (Electron typing needs `delivery_mode: "foreground"`, and similar). Each entry carries a fingerprint of Cua's two definitions it was written against; when Cua changes a tool, that tool falls back to Cua's text, with a warning in the log, until the entry is updated. `vmlab-mcp --fingerprints` lists every tool's fingerprint and whether its entry is `ok` or `STALE`, and `cargo test` fails while one is stale against `seed/`.
+  - Without an entry (or with a stale one), when the two VMs describe a tool or one of its properties differently, the description gives both texts. Input properties only one VM has are marked `(win only)` or `(mac only)`; a field only one VM requires is not required and says `(required on win)`.
   - Other schema keywords the VMs disagree on (a default, a minimum) are dropped, and enums are joined, so the merged schema accepts what either VM accepts. Cua on the target VM still validates the call.
   - Behaviour hints are merged conservatively: read-only and idempotent only if both VMs say so, destructive and open-world if either does.
   - Ten Cua tools are left out (`HIDDEN` in `src/catalog.rs`): driver upkeep (`check_for_update`, `install_extension`, `install_ffmpeg`), deprecated or legacy ones (`escalate_session`, `get_session_state`, `page`), the agent cursor's styling (`set_agent_cursor_*`) and `replay_trajectory`. A call to one is refused as an unknown tool. To bring one back, delete its line and reinstall.
@@ -46,7 +47,10 @@ Environment variables:
 cargo test                      # unit tests + stdio integration tests against tests/fake_cua.py
 cargo build --release && install -m755 target/release/vmlab-mcp ~/.local/bin/vmlab-mcp
 scripts/update-seed.sh          # after connecting to both VMs: refresh seed/ from the cache
+vmlab-mcp --fingerprints        # after a Cua update: which descriptions.md entries are stale
 ```
+
+After a Cua update: refresh `seed/`, run `--fingerprints`, read Cua's new text for each `STALE` tool (`On Windows:` and `On macOS:` in its served description), fix the entry and copy the new fingerprint into its `## name fp=` line.
 
 ssh expands `%` and splits on spaces in some of its paths, so a home or cache path with spaces, quotes or `%` is refused with an error.
 
@@ -55,6 +59,7 @@ Build output stays in `target/`, inside this repo on the spare SSD (`.cargo/conf
 ## Layout
 
 - `src/catalog.rs`: cache and seed, the unified list (schema rewrite, merge), routing.
+- `src/descriptions.rs` and `descriptions.md`: the lab's tool descriptions, their fingerprints, and how they are applied before the merge.
 - `src/upstream.rs`: VM checks, ssh arguments, the remote command, connect and reconnect.
 - `src/child.rs`: the upstream child process as an rmcp transport, with the line-length cap and the stop sequence (stdin EOF, SIGTERM, SIGKILL).
 - `src/server.rs`: the MCP server (list, call, cancel, progress).

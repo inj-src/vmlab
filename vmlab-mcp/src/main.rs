@@ -5,6 +5,7 @@
 
 mod catalog;
 mod child;
+mod descriptions;
 mod server;
 mod upstream;
 
@@ -22,6 +23,10 @@ use crate::upstream::{Config, Slot};
 async fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).is_some_and(|a| a == "--version" || a == "-V") {
         println!("vmlab-mcp {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if std::env::args().nth(1).is_some_and(|a| a == "--fingerprints") {
+        print_fingerprints();
         return Ok(());
     }
     tracing_subscriber::fmt()
@@ -58,4 +63,30 @@ async fn main() -> anyhow::Result<()> {
     }
     // tokio's stdin reader may still be parked in a blocking read; don't wait for it.
     std::process::exit(0);
+}
+
+/// `--fingerprints`: each tool's fingerprint in the current tool lists (cache, else seed), and
+/// whether descriptions.md's entry for it matches. For updating descriptions.md after Cua changes.
+fn print_fingerprints() {
+    let cfg = Config::from_env();
+    let [win, mac] = [Machine::Win, Machine::Mac].map(|m| catalog::load(&cfg.cache_dir, m));
+    let mut names: Vec<String> = Vec::new();
+    for t in win.iter().chain(mac.iter()) {
+        let n = t["name"].as_str().unwrap_or_default().to_string();
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    fn find<'a>(l: &'a [serde_json::Value], n: &str) -> Option<&'a serde_json::Value> {
+        l.iter().find(|t| t["name"] == n)
+    }
+    for n in names {
+        let fp = descriptions::fingerprint(find(&win, &n), find(&mac, &n));
+        let state = match descriptions::OVERRIDES.tools.get(&n) {
+            Some(o) if o.fp == fp => "ok",
+            Some(_) => "STALE",
+            None => "-",
+        };
+        println!("{n:24} {fp}  {state}");
+    }
 }
