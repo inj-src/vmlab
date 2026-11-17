@@ -27,23 +27,6 @@ running_vms(){ for n in "${!RUN[@]}"; do [[ $(state_of "$n") == running ]] && ec
 # The running VM's window: shown, hidden, or none (started where no desktop could be reached)
 window_of(){ "${RUN[$1]}" window 2>/dev/null || echo none; }
 
-# Lab-only power: the performance profile while a VM runs, and only on the full-power barrel
-# charger (ACAD). The USB-C charger cannot keep up with it. vm stop puts the old profile back.
-power_up(){
-  command -v powerprofilesctl >/dev/null || return 0
-  [[ $(cat /sys/class/power_supply/ACAD/online 2>/dev/null) == 1 ]] || return 0
-  local cur; cur=$(powerprofilesctl get 2>/dev/null) || return 0
-  [[ $cur == performance ]] && return 0
-  [[ -f $STATE/power.prev ]] || echo "$cur" > "$STATE/power.prev"
-  powerprofilesctl set performance 2>/dev/null || true
-}
-power_restore(){
-  [[ -f $STATE/power.prev && -z $(running_vms) ]] || return 0
-  # Keep power.prev if the switch fails, so a later vm stop can still put the profile back
-  powerprofilesctl set "$(cat "$STATE/power.prev")" 2>/dev/null && rm -f "$STATE/power.prev"
-  return 0
-}
-
 # One SSH connection per VM, shared by the calls of the next two minutes (ControlMaster): a call
 # then starts in 0.3 s in place of 0.5 s. The shared connection ends with the VM.
 # vm tunnel and vm forward keep their own connection: on the shared one a forward would end two
@@ -122,11 +105,10 @@ cmd_start(){
   # Asked for a window while it runs already: show it, the way vm view does
   if [[ -n $window && $(state_of "$n") == running ]]; then cmd_view "$n"; return; fi
   if [[ $(state_of "$n") != running ]]; then
-    power_up
     case $n in
       win) "${RUN[win]}" start "$WIN_GPU" $window $defender >/dev/null ;;
       mac) "${RUN[mac]}" start $window >/dev/null ;;
-    esac || { power_restore; die "$n did not start (${RUN[$n]} status)"; }
+    esac || { die "$n did not start (${RUN[$n]} status)"; }
     echo "${VM_OWNER:-$USER} $(date -Is)" > "$STATE/$n.owner"
   fi
   wait_ssh "$n" 600 || die "$n booted but SSH did not answer within 10 min (try: vm view $n)"
@@ -145,10 +127,9 @@ cmd_start(){
 
 cmd_stop(){
   local n=$1; need "$n"
-  [[ $(state_of "$n") == running ]] || { power_restore; echo "$n already stopped"; return; }
+  [[ $(state_of "$n") == running ]] || { echo "$n already stopped"; return; }
   "${RUN[$n]}" stop >/dev/null
   rm -f "$STATE/$n.owner"
-  power_restore
   echo "$n stopped"
 }
 
