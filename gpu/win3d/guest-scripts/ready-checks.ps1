@@ -9,8 +9,8 @@ $driver = (Get-PnpDevice -Class Display -PresentOnly | Where-Object FriendlyName
 "hwcursor=" + (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$driver" -ErrorAction SilentlyContinue).HWCursor
 "umd=" + (Get-FileHash "$env:WINDIR\System32\viogpu_d3d10.dll" -Algorithm SHA256).Hash.ToLower()
 "kmd=" + (Get-FileHash ((Get-CimInstance Win32_SystemDriver | Where-Object Name -eq VioGpu3D).PathName) -Algorithm SHA256).Hash.ToLower()
-# d3d12: the package's bridge is unsigned (NotSigned); d3d12chromium: Microsoft's, which the lab's
-# Direct3D driver loads first in a Chromium GPU process (d3d12-mode.ps1)
+# d3d12: Microsoft's is signed (Valid, the lab's default), the package's bridge is not (NotSigned);
+# d3d12chromium: the bridge mode's copy of Microsoft's file for Chromium GPU processes (d3d12-mode.ps1)
 "d3d12=" + (Get-AuthenticodeSignature "$env:WINDIR\System32\d3d12.dll").Status
 "d3d12chromium=" + (("System32", "SysWOW64" | ForEach-Object {
     $f = "$env:WINDIR\$_\vmlab-win3d\native\d3d12.dll"

@@ -50,11 +50,12 @@
 #                                       With a window it follows the screen by itself (the
 #                                       vmlab-win-venus-scale unit, log /vmlab/run/win-venus/scale.log)
 #   win-venus.sh d3d12 [bridge|native|status]
-#                                       which d3d12.dll the guest has. bridge (the lab's default):
-#                                       the driver package's, so a native Direct3D 12 program gets
-#                                       a device, and Microsoft's beside it for Chromium's GPU
-#                                       process. native: Microsoft's alone, no Direct3D 12
-#                                       (guest-scripts/d3d12-mode.ps1). Restart Windows after a change
+#                                       which d3d12.dll the guest has. native (the lab's default):
+#                                       Microsoft's, so Direct3D 12 programs get its software
+#                                       adapter (WARP). bridge: the driver package's (vkd3d-proton);
+#                                       a program gets a device on this GPU, but nothing that needs a
+#                                       composition swap chain draws (guest-scripts/d3d12-mode.ps1).
+#                                       Restart Windows after a change
 #   win-venus.sh reset [--discard]      drop this run's changes: the next start is the ready state
 #   win-venus.sh commit [--keep-states|--drop-states]
 #                                       make the stopped VM's disk the ready state (reset's

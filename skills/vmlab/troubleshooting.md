@@ -18,7 +18,7 @@ The user's word (2026-11-12): when the work needs something the VMs don't have, 
 
 Known cases on `win`:
 
-- **Direct3D 12** comes from a bridge to Vulkan (vkd3d-proton) as `System32\d3d12.dll`. Native programs get a device and a queue, but the lab has drawn nothing through it: check your app's picture and say what you saw. `win-venus.sh d3d12 native` takes the bridge out (no Direct3D 12 at all), `d3d12 bridge` puts it back; restart Windows after either.
+- **Direct3D 12** is Microsoft's `d3d12.dll`. The VM's GPU has no Direct3D 12, so D3D12 programs (Rune and other wgpu apps) draw on WARP, Microsoft's software adapter: expect "Microsoft Basic Render Driver" and CPU-speed drawing. `win-venus.sh d3d12 bridge` swaps in a bridge to Vulkan (vkd3d-proton) that gives a device on the GPU, but a DirectComposition swap chain fails there, so transparent or Rune windows draw nothing; `d3d12 native` puts Microsoft's back. Restart Windows after either, and switch back before saving a state.
 - **Chromium** (Chrome, Edge, Electron, WebView2) gets Microsoft's `d3d12.dll` instead, so WebGL works, but WebGPU gets no GPU adapter (SwiftShader on the CPU with `--enable-unsafe-webgpu`) and no hardware video encoder is offered.
 
 The lab's sources, for a deeper fix: [/vmlab/tools/vmlab/docs/lab.md](/vmlab/tools/vmlab/docs/lab.md), "Sources".

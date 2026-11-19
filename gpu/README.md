@@ -316,11 +316,19 @@ WINWORD.EXE … coverage=passes` says the patched path drew.
 
 ### Direct3D 12: the package's `d3d12.dll`, and Microsoft's for Chromium (`$W d3d12`, `guest-patches/9004`)
 
-> **Where this is (2026-11-14):** in the clean state and in both saved states (`pebble`,
+> **Since 2026-11-19 the lab's default is `native`** (Microsoft's `d3d12.dll`; `setup-ready.sh`,
+> the clean state and `sasthotech`). The bridge never drew anything here: a composition swap chain,
+> which Rune and every transparent DirectComposition window need, goes to DXVK 3.1.1's DXGI and
+> fails (`DxgiFactory::CreateSwapChainForComposition: Not implemented`, E_NOTIMPL, in the app's
+> `*_dxgi.log`), so the Sastho Tech consent notice drew nothing. WARP draws it. Chromium never
+> used the bridge (below), so nothing the lab uses lost speed. The rest of this section is the
+> bridge, kept as `$W d3d12 bridge` for a test that wants it.
+>
+> **Where this was (2026-11-14):** in the clean state and in both saved states (`pebble`,
 > `defender`), installed and tested in each: `ready-checks.ps1` says `d3d12=NotSigned
 > d3d12chromium=Valid,Valid`. Defender, on with tamper protection in `defender`, blocked nothing.
 > A new driver build goes the same way: start the state, `build-guest-umd.sh install`,
-> `build-guest-kmd.sh install`, `$W d3d12 bridge`, restart Windows, then `vm commit win
+> `build-guest-kmd.sh install`, `$W d3d12 native`, restart Windows, then `vm commit win
 > --keep-states` for the clean state or `vm save … --replace` for a saved one.
 
 The driver package replaces Windows' `d3d12.dll` with an unsigned bridge (Direct3D 12 through
@@ -342,7 +350,7 @@ programs:
 
 The lab keeps the bridge and gives that one kind of process Microsoft's file:
 
-- `$W d3d12 bridge` (`guest-scripts/d3d12-mode.ps1`, the default) runs the package's task and
+- `$W d3d12 bridge` (`guest-scripts/d3d12-mode.ps1`, the default until 2026-11-19) runs the package's task and
   copies the package's `vmlab-win3d\d3d12-native.dll` (Microsoft's file) to
   `vmlab-win3d\native\d3d12.dll`, in System32 and in SysWOW64.
 - The lab's Direct3D driver loads that copy when it opens the adapter in a process whose command
@@ -360,7 +368,7 @@ The lab keeps the bridge and gives that one kind of process Microsoft's file:
   `yttrium-user.log`; look at its modules instead (`(Get-Process -Id <pid>).Modules`:
   `…\vmlab-win3d\native\d3d12.dll`).
 - `$W d3d12 native` puts Microsoft's file into System32 and turns the boot task off (no Direct3D
-  12 at all, as the lab had until 2026-11-13); `$W d3d12` says which is there. Restart Windows
+  12 on the GPU, as the lab had until 2026-11-13 and again since 2026-11-19); `$W d3d12` says which is there. Restart Windows
   after a change. WebGPU has no adapter either way: Chrome's own Direct3D 12 use goes to
   Microsoft's file, and this driver has no Direct3D 12 for it.
 
@@ -396,7 +404,7 @@ Limits: a Chromium GPU process that loads `d3d12.dll` without ever opening this 
 preload. `--use-angle=d3d11on12` is that case: it draws on the CPU, as it would with Microsoft's
 file in System32 (this driver has no Direct3D 12 for it); the two software modes above load
 neither file. A hardware video encoder is not offered (`hardware H.264 encoder supported:
-false`). After a Windows update that brings a new `d3d12.dll`, run `$W d3d12 bridge` again: it
+false`). In bridge mode, after a Windows update that brings a new `d3d12.dll`, run `$W d3d12 bridge` again: it
 renews a copy that differs.
 
 Reading a GPU process dump: the failed load's record (`DelayLoadInfo`, 72 bytes) is on the
@@ -533,7 +541,7 @@ layer. What it does:
 1. The driver package from the CD (`D:\Install.cmd`, `win3d-guest.iso`). It restarts Windows
    twice; its state is `C:\ProgramData\vmlab-win3d\state.json`, its log `journal.log` there.
 2. `build-guest-umd.sh install`, `build-guest-kmd.sh install` (the pointer; it sets
-   `HWCursor=1`) and `$W d3d12 bridge` (Direct3D 12, and Chromium's own copy, above), then a
+   `HWCursor=1`) and `$W d3d12 native` (Microsoft's `d3d12.dll`, above), then a
    restart.
 3. `net accounts /lockoutthreshold:0`. **Chrome locks the account otherwise**: every Chrome
    start with a new profile tries a logon with an empty password (Security event 4625), and

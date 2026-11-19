@@ -1,10 +1,13 @@
 # d3d12-mode.ps1 [bridge|native|status]: which d3d12.dll Windows has. Run it elevated in Windows
 # PowerShell (win-venus.sh d3d12 ... does), then restart Windows.
 #
+#   native   Microsoft's own in System32: the lab's default. No Direct3D 12 on this GPU (the
+#            driver has none), so D3D12 programs get WARP, Microsoft's software adapter.
 #   bridge   the driver package's (Direct3D 12 through vkd3d-proton) in System32, and Microsoft's
-#            own as vmlab-win3d\native\d3d12.dll beside it: the lab's default. A native D3D12
-#            program gets a device on this GPU, and Chrome and Electron work.
-#   native   Microsoft's own in System32. No Direct3D 12 on this GPU (the driver has none).
+#            own as vmlab-win3d\native\d3d12.dll beside it. A native D3D12 program gets a device
+#            on this GPU, and Chrome and Electron work, but a composition swap chain fails
+#            (DXVK 3.1.1's CreateSwapChainForComposition returns E_NOTIMPL), so a Rune or other
+#            DirectComposition window draws nothing. Opt-in only.
 #   status   which one is there now
 #
 # Why the second copy: the bridge is unsigned, and a Chromium GPU process takes only
