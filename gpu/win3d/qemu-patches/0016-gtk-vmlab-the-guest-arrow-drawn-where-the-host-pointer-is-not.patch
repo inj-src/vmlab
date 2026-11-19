@@ -1,0 +1,416 @@
+gtk: vmlab: the guest's arrow drawn into the picture where the host's pointer is not on it
+
+0004 puts the guest's arrow on the host's pointer, with no drawn copy in the picture. When
+something inside the guest moved the arrow (Remote Desktop, an agent's injected input), or the
+host's pointer was off the window, the window showed no arrow at all, where a monitor shows
+it. Now the arrow is drawn into the picture at the place the guest gives (the driver gives the
+image's top-left; the host's pointer is the tip, so the two compare through the hot spot):
+- the host's pointer off the picture: the arrow is drawn;
+- the host's pointer moved within the last 250 ms: it drives the arrow and wears it, as before
+  (the guest's reports lag the pointer by a few ms, so they are not compared then);
+- the host's pointer still for longer: it wears the arrow while the guest has the arrow under
+  it (2 pixels either way); elsewhere the arrow is drawn and the host's pointer is blank.
+On the Wayland sub-surface (0007) the arrow is blended into the frame buffer, and each buffer
+copies the picture back over where it had the arrow: two 64x64 squares a move. Where GTK
+draws the picture, the arrow is painted on it. VNC and screenshots are unchanged: the arrow
+is only in the window.
+
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index e3102a4..d3b1509 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -256,6 +256,7 @@ void vmlab_wl_uncover(VirtualConsole *vc);
+ void vmlab_wl_cover(VirtualConsole *vc);
+ void vmlab_wl_keys_to_guest(VirtualConsole *vc);
+ void vmlab_wl_keys_to_desktop(void);
++bool vmlab_wl_arrow(VirtualConsole *vc, QEMUCursor *c, bool premultiplied, int x, int y);
+ /* and what it asks of ui/gtk.c */
+ void gd_vmlab_rescale(VirtualConsole *vc);
+ void gd_vmlab_layout_changed(VirtualConsole *vc);
+diff --git a/ui/gtk-vmlab-wl.c b/ui/gtk-vmlab-wl.c
+index d70b6ba..fc9a379 100644
+--- a/ui/gtk-vmlab-wl.c
++++ b/ui/gtk-vmlab-wl.c
+@@ -40,6 +40,7 @@ typedef struct VmlabBuffer {
+     int w, h;
+     bool busy;                  /* the compositor has it */
+     int x1, y1, x2, y2;         /* what changed since it was last filled */
++    int ax1, ay1, ax2, ay2;     /* where the guest's arrow is drawn into it */
+ } VmlabBuffer;
+ 
+ static struct {
+@@ -69,10 +70,74 @@ static struct {
+     guint rescale_timer;
+     bool uncovered;             /* the picture is off the window (vmlab_wl_uncover) */
+     guint cover_timer;
++    QEMUCursor *arrow;          /* the guest's arrow, drawn into the picture (vmlab_wl_arrow) */
++    bool arrow_premultiplied;
++    int arrow_x, arrow_y;       /* its top-left in the picture */
+ } wl = { .scale120 = 120 };
+ 
+ static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h);
+ 
++/* adds that rectangle to what is to be filled again in that buffer */
++static void grow(VmlabBuffer *b, int x1, int y1, int x2, int y2)
++{
++    if (x2 <= x1 || y2 <= y1) {
++        return;
++    }
++    if (b->x2 <= b->x1 || b->y2 <= b->y1) {
++        b->x1 = x1;
++        b->y1 = y1;
++        b->x2 = x2;
++        b->y2 = y2;
++    } else {
++        b->x1 = MIN(b->x1, x1);
++        b->y1 = MIN(b->y1, y1);
++        b->x2 = MAX(b->x2, x2);
++        b->y2 = MAX(b->y2, y2);
++    }
++}
++
++/* where the guest's arrow goes in the picture; false: nowhere */
++static bool arrow_rect(int *x1, int *y1, int *x2, int *y2)
++{
++    if (!wl.arrow) {
++        return false;
++    }
++    *x1 = MAX(wl.arrow_x, 0);
++    *y1 = MAX(wl.arrow_y, 0);
++    *x2 = MIN(wl.arrow_x + wl.arrow->width, wl.fbw);
++    *y2 = MIN(wl.arrow_y + wl.arrow->height, wl.fbh);
++    return *x2 > *x1 && *y2 > *y1;
++}
++
++/* draws the guest's arrow over that part of the buffer, which holds the picture there */
++static void arrow_blend(VmlabBuffer *b, int x1, int y1, int x2, int y2)
++{
++    QEMUCursor *c = wl.arrow;
++    int row, col, sh;
++
++    for (row = y1; row < y2; row++) {
++        uint32_t *d = (uint32_t *)b->data + (size_t)row * b->w;
++        const uint32_t *s = c->data + (size_t)(row - wl.arrow_y) * c->width - wl.arrow_x;
++
++        for (col = x1; col < x2; col++) {
++            uint32_t p = s[col], a = p >> 24, q = d[col], o = 0;
++
++            if (!a) {
++                continue;
++            }
++            for (sh = 0; sh < 24; sh += 8) {
++                uint32_t sc = (p >> sh) & 0xff, dc = (q >> sh) & 0xff;
++
++                if (!wl.arrow_premultiplied) {
++                    sc = sc * a / 255;
++                }
++                o |= MIN(255, sc + dc * (255 - a) / 255) << sh;
++            }
++            d[col] = o;
++        }
++    }
++}
++
+ /* registry */
+ 
+ static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
+@@ -606,7 +671,8 @@ void vmlab_wl_layout(VirtualConsole *vc)
+ static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h)
+ {
+     VmlabBuffer *b = NULL;
+-    int fbw, fbh, stride, i, row;
++    int fbw, fbh, stride, i, row, ax1, ay1, ax2, ay2;
++    bool arrow;
+     uint8_t *src;
+ 
+     if (!vmlab_wl_active(vc) || !vc->gfx.ds || !wl.w) {
+@@ -631,18 +697,8 @@ static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h)
+         if (o->wl && (o->w != fbw || o->h != fbh)) {
+             buffer_free(o);
+         }
+-        if (o->wl && w > 0 && h > 0) {
+-            if (o->x2 <= o->x1 || o->y2 <= o->y1) {
+-                o->x1 = x;
+-                o->y1 = y;
+-                o->x2 = x + w;
+-                o->y2 = y + h;
+-            } else {
+-                o->x1 = MIN(o->x1, x);
+-                o->y1 = MIN(o->y1, y);
+-                o->x2 = MAX(o->x2, x + w);
+-                o->y2 = MAX(o->y2, y + h);
+-            }
++        if (o->wl) {
++            grow(o, x, y, x + w, y + h);
+         }
+     }
+     for (i = 0; i < VMLAB_BUFFERS && !b; i++) {
+@@ -660,6 +716,12 @@ static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h)
+         return;
+     }
+ 
++    /* the arrow this buffer had is copied over, and drawn where it is now */
++    grow(b, b->ax1, b->ay1, b->ax2, b->ay2);
++    arrow = arrow_rect(&ax1, &ay1, &ax2, &ay2);
++    if (arrow) {
++        grow(b, ax1, ay1, ax2, ay2);
++    }
+     b->x1 = MAX(b->x1, 0);
+     b->y1 = MAX(b->y1, 0);
+     b->x2 = MIN(b->x2, fbw);
+@@ -670,12 +732,22 @@ static void vmlab_wl_present(VirtualConsole *vc, int x, int y, int w, int h)
+                    src + (size_t)row * stride + (size_t)b->x1 * 4,
+                    (size_t)(b->x2 - b->x1) * 4);
+         }
++        if (arrow) {
++            arrow_blend(b, ax1, ay1, ax2, ay2);
++        }
+         wl_surface_damage_buffer(wl.surface, b->x1, b->y1, b->x2 - b->x1, b->y2 - b->y1);
+     }
+     wl_surface_attach(wl.surface, b->wl, 0, 0);
+     wl_surface_commit(wl.surface);
+     b->busy = true;
+     b->x1 = b->y1 = b->x2 = b->y2 = 0;
++    b->ax1 = b->ay1 = b->ax2 = b->ay2 = 0;
++    if (arrow) {
++        b->ax1 = ax1;
++        b->ay1 = ay1;
++        b->ax2 = ax2;
++        b->ay2 = ay2;
++    }
+ }
+ 
+ /*
+@@ -770,6 +842,29 @@ void vmlab_wl_switch(VirtualConsole *vc)
+     vmlab_wl_layout(vc);
+ }
+ 
++/*
++ * The guest's arrow, drawn into the picture with its top-left at (x, y); NULL: none. False:
++ * GTK draws the picture, and gd_draw_event the arrow on it.
++ */
++bool vmlab_wl_arrow(VirtualConsole *vc, QEMUCursor *c, bool premultiplied, int x, int y)
++{
++    if (c) {
++        cursor_ref(c);
++    }
++    cursor_unref(wl.arrow);
++    wl.arrow = c;
++    wl.arrow_premultiplied = premultiplied;
++    wl.arrow_x = x;
++    wl.arrow_y = y;
++    if (!vmlab_wl_active(vc)) {
++        return false;
++    }
++    if (!wl.uncovered) {
++        vmlab_wl_present(vc, 0, 0, 0, 0);   /* else shown when the picture is back */
++    }
++    return true;
++}
++
+ #else /* no Wayland, or no protocol headers at build time */
+ 
+ bool vmlab_wl_active(VirtualConsole *vc)
+@@ -822,4 +917,9 @@ void vmlab_wl_keys_to_desktop(void)
+ {
+ }
+ 
++bool vmlab_wl_arrow(VirtualConsole *vc, QEMUCursor *c, bool premultiplied, int x, int y)
++{
++    return false;
++}
++
+ #endif
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 9ceb668..32bb63c 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -158,6 +158,23 @@ static bool vmlab_first_taken;
+ static QEMUCursor *vmlab_cursor;
+ static double vmlab_cursor_zoom;
+ static int vmlab_cursor_buffer_scale;
++/*
++ * vmlab: the guest's arrow where the host's pointer is not driving it. While the host's pointer
++ * moves the guest's, it wears the guest's arrow (above). When something in the guest moves the
++ * arrow instead (Remote Desktop, an agent's input), or the host's pointer is off the picture,
++ * the arrow is drawn into the picture where the guest has it, as a monitor shows it, and the
++ * host's pointer over the picture is blank.
++ */
++#define VMLAB_ARROW_HOST_US 250000  /* the host's pointer drives the arrow this long after a move */
++static struct {
++    bool known;                 /* the guest has said where its arrow is */
++    int x, y;                   /* the arrow's top-left in the picture, as the guest says */
++    bool inside;                /* the host's pointer is over the picture */
++    int64_t host_moved;         /* when it last moved the guest's (g_get_monotonic_time) */
++    bool drawn;                 /* the arrow is drawn into the picture */
++    bool premultiplied;         /* its colour is multiplied by its alpha */
++    guint recheck;              /* for when the host's pointer has been still long enough */
++} vmlab_arrow;
+ 
+ static void gd_grab_pointer(VirtualConsole *vc, const char *reason);
+ static void gd_ungrab_pointer(GtkDisplayState *s);
+@@ -244,7 +261,8 @@ static void gd_update_cursor(VirtualConsole *vc)
+          * draw it into the frame: the host's pointer wears it, which is
+          * instant where the frame is a few behind.
+          */
+-        if (s->guest_cursor_hidden) {
++        if (s->guest_cursor_hidden || vmlab_arrow.drawn) {
++            /* (drawn: the arrow is in the picture, elsewhere than the host's pointer) */
+             GdkCursor *blank = gdk_cursor_new_for_display(
+                 gdk_window_get_display(window), GDK_BLANK_CURSOR);
+             gdk_window_set_cursor(window, blank);
+@@ -500,6 +518,88 @@ static GdkDevice *gd_get_pointer(GdkDisplay *dpy)
+     return gdk_seat_get_pointer(gdk_display_get_default_seat(dpy));
+ }
+ 
++/* vmlab: the arrow is drawn into the picture or not, and where (vmlab_arrow above) */
++static gboolean vmlab_arrow_recheck(gpointer opaque);
++
++static void vmlab_arrow_update(VirtualConsole *vc, bool changed)
++{
++    GtkDisplayState *s = vc->s;
++    QEMUCursor *c = vmlab_cursor;
++    int64_t still = g_get_monotonic_time() - vmlab_arrow.host_moved;
++    bool drawn = false;
++
++    if (qemu_input_is_absolute(vc->gfx.dcl.con) && s->guest_cursor && c &&
++        vmlab_arrow.known && !s->guest_cursor_hidden) {
++        if (!vmlab_arrow.inside) {
++            drawn = true;
++        } else if (still < VMLAB_ARROW_HOST_US) {
++            /* the host's pointer drives it, and what the guest says lags behind the pointer */
++            if (!vmlab_arrow.recheck) {
++                vmlab_arrow.recheck = g_timeout_add((VMLAB_ARROW_HOST_US - still) / 1000 + 10,
++                                                    vmlab_arrow_recheck, vc);
++            }
++        } else {
++            /* the driver says where the arrow's top-left is, the host's pointer is its tip */
++            drawn = abs(vmlab_arrow.x + c->hot_x - s->last_x) > 2 ||
++                    abs(vmlab_arrow.y + c->hot_y - s->last_y) > 2;
++        }
++    }
++    if (drawn != vmlab_arrow.drawn) {
++        vmlab_arrow.drawn = drawn;
++        gd_update_cursor(vc);
++    } else if (!drawn || !changed) {
++        return;
++    }
++    if (!vmlab_wl_arrow(vc, drawn ? c : NULL, vmlab_arrow.premultiplied,
++                        vmlab_arrow.x, vmlab_arrow.y)) {
++        gtk_widget_queue_draw(vc->gfx.drawing_area);
++    }
++}
++
++static gboolean vmlab_arrow_recheck(gpointer opaque)
++{
++    vmlab_arrow.recheck = 0;
++    vmlab_arrow_update(opaque, false);
++    return G_SOURCE_REMOVE;
++}
++
++/* vmlab: the host's pointer moved, over the picture or off it */
++static void vmlab_arrow_host(VirtualConsole *vc, bool inside)
++{
++    bool was = vmlab_arrow.inside;
++
++    vmlab_arrow.inside = inside;
++    if (inside) {
++        vmlab_arrow.host_moved = g_get_monotonic_time();
++    }
++    if (inside != was || vmlab_arrow.drawn) {
++        vmlab_arrow_update(vc, false);
++    }
++}
++
++/* vmlab: the arrow onto GTK's drawing of the picture, at (x, y) in the picture's pixels */
++static void vmlab_arrow_paint(cairo_t *cr, double x, double y)
++{
++    QEMUCursor *c = vmlab_cursor;
++    int i, n = c->width * c->height;
++    uint32_t *px = g_new(uint32_t, n);
++    cairo_surface_t *image;
++
++    for (i = 0; i < n; i++) {
++        uint32_t p = c->data[i], a = p >> 24;
++
++        px[i] = vmlab_arrow.premultiplied ? p :
++            a << 24 | (((p >> 16) & 0xff) * a / 255) << 16 |
++            (((p >> 8) & 0xff) * a / 255) << 8 | (p & 0xff) * a / 255;
++    }
++    image = cairo_image_surface_create_for_data((unsigned char *)px, CAIRO_FORMAT_ARGB32,
++                                                c->width, c->height, c->width * 4);
++    cairo_set_source_surface(cr, image, x, y);
++    cairo_paint(cr);
++    cairo_surface_destroy(image);
++    g_free(px);
++}
++
+ static void gd_mouse_set(DisplayChangeListener *dcl,
+                          int x, int y, bool visible)
+ {
+@@ -511,11 +611,18 @@ static void gd_mouse_set(DisplayChangeListener *dcl,
+         return;
+     }
+     if (qemu_input_is_absolute(dcl->con)) {
+-        /* vmlab: the host's pointer is the pointer; only follow "hidden" */
++        /* vmlab: the host's pointer wears the arrow, or it is drawn into the picture */
++        bool changed = !vmlab_arrow.known || x != vmlab_arrow.x || y != vmlab_arrow.y;
++
++        vmlab_arrow.known = true;
++        vmlab_arrow.x = x;
++        vmlab_arrow.y = y;
+         if (vc->s->guest_cursor_hidden != !visible) {
+             vc->s->guest_cursor_hidden = !visible;
+             gd_update_cursor(vc);
++            changed = true;
+         }
++        vmlab_arrow_update(vc, changed);
+         return;
+     }
+ 
+@@ -555,6 +662,7 @@ static void gd_cursor_define(DisplayChangeListener *dcl,
+             break;
+         }
+     }
++    vmlab_arrow.premultiplied = premultiplied;
+     rgba = g_malloc(n * 4);
+     for (i = 0; i < n; i++) {
+         uint32_t p = c->data[i], a = p >> 24;
+@@ -614,6 +722,7 @@ static void gd_cursor_define(DisplayChangeListener *dcl,
+     vc->s->guest_cursor = cursor;
+     if (qemu_input_is_absolute(dcl->con)) {
+         gd_update_cursor(vc);
++        vmlab_arrow_update(vc, true);
+     } else {
+         gdk_window_set_cursor(gtk_widget_get_window(vc->gfx.drawing_area), cursor);
+     }
+@@ -1254,6 +1363,10 @@ static gboolean gd_draw_event(GtkWidget *widget, cairo_t *cr, void *opaque)
+                              wx_offset / vc->gfx.scale_x,
+                              wy_offset / vc->gfx.scale_y);
+     cairo_paint(cr);
++    if (vmlab_arrow.drawn && vmlab_cursor) {
++        vmlab_arrow_paint(cr, wx_offset / vc->gfx.scale_x + vmlab_arrow.x,
++                          wy_offset / vc->gfx.scale_y + vmlab_arrow.y);
++    }
+ 
+     return TRUE;
+ }
+@@ -1306,8 +1419,10 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
+         if (fbx < 0 || fby < 0 ||
+             fbx >= surface_width(vc->gfx.ds) ||
+             fby >= surface_height(vc->gfx.ds)) {
++            vmlab_arrow_host(vc, false);
+             return TRUE;
+         }
++        vmlab_arrow_host(vc, true);
+         qemu_input_queue_abs(vc->gfx.dcl.con, INPUT_AXIS_X, fbx,
+                              0, surface_width(vc->gfx.ds));
+         qemu_input_queue_abs(vc->gfx.dcl.con, INPUT_AXIS_Y, fby,
+@@ -2236,6 +2351,7 @@ static gboolean gd_leave_event(GtkWidget *widget, GdkEventCrossing *crossing,
+     if (gd_grab_on_hover(s)) {
+         gd_ungrab_keyboard(s);
+     }
++    vmlab_arrow_host(vc, false);
+     return TRUE;
+ }
+ 

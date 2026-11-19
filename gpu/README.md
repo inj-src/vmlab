@@ -180,6 +180,8 @@ the old icon for as long as it is open.
     hidden window" below). A hidden window shares no clipboard. Checked 2026-11-15 in the rig
     without a guest: no window and no dock entry while hidden; `show` maximizes it; the hide
     button hides it and the picture comes back at the next `show`.
+  - `0016`: the guest's arrow is drawn into the picture where the host's pointer is not driving
+    it ("The pointer" below).
   Checked 2026-11-12: `0001` to `0013` on the release's sources give the built files byte for
   byte.
     To try a window change without a guest: `build/qemu-system-x86_64 -L build/pc-bios
@@ -213,6 +215,14 @@ before 2026-11-11 the pointer trailed the mouse:
 - **QEMU's window wears it** (`qemu-patches/0004`). With an absolute pointer QEMU's GTK window hid
   the host's pointer; now it shows the guest's cursor on it, hides it when the guest does, and
   puts it back after grabs.
+- **Where the host's pointer is not driving it, the arrow is in the picture**
+  (`qemu-patches/0016`, 2026-11-19). With `0004` alone, an arrow moved from inside Windows
+  (Remote Desktop, an agent's input) showed nowhere: the user saw the Remote Desktop tag move
+  with no arrow at its tip. Now the window draws Windows' arrow into the picture at the place
+  the driver gives whenever the host's pointer is off the picture, or has been still for 250 ms
+  with Windows' arrow elsewhere; then the host's pointer over the picture is blank, so one
+  arrow shows. A move of the host's pointer gives the arrow back to it. The arrow is only in the
+  window: `$W shot` and VNC still have none.
 - **The mouse is the USB tablet.** The clipboard channel (`-chardev qemu-vdagent`) also offers
   itself as a mouse and QEMU preferred it, so every move went through the SPICE agent program
   inside Windows. `mouse=off` on that chardev (in `win-venus.sh`) leaves the tablet.
