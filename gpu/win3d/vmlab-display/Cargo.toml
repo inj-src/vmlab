@@ -1,0 +1,12 @@
+[package]
+name = "vmlab-display"
+version = "0.1.0"
+edition = "2021"
+description = "The Windows VM's resolution and display scaling, set in one call (scale-watch in win-venus.sh)"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

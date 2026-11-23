@@ -123,8 +123,17 @@ die(){ echo "win-venus: $*" >&2; exit 1; }
 # alive NAME: the process in $S/NAME.pid runs and is the QEMU that wrote it (-pidfile with that
 # path on its command line). A pid file left by a QEMU that ended without `stop` can name an
 # unrelated process after a reboot, and `stop` and `kill` must never signal that one.
-alive(){ local p; p=$(cat "$S/$1.pid" 2>/dev/null) && [[ $p =~ ^[0-9]+$ ]] &&
-  tr '\0' '\n' 2>/dev/null < "/proc/$p/cmdline" | grep -qxF "$S/$1.pid"; }
+# (builtins only, no fork: scale-watch asks four times a second)
+alive(){ local p='' a=() x
+  { read -r p < "$S/$1.pid"; } 2>/dev/null || true
+  [[ $p =~ ^[0-9]+$ ]] || return 1
+  { mapfile -d '' -t a < "/proc/$p/cmdline"; } 2>/dev/null || return 1
+  for x in "${a[@]}"; do [[ $x == "$S/$1.pid" ]] && return 0; done
+  return 1; }
+# get VAR FILE: VAR is FILE's first line, '' where there is none, without a fork. Not
+# VAR=$(<FILE): bash 5.2 reads that without a fork too, but ends a set -e script where FILE is
+# missing, || or not (and $(<FILE 2>/dev/null) forks, and gives nothing).
+get(){ printf -v "$1" ''; { read -r "$1" < "$2"; } 2>/dev/null || true; }
 qmp(){ # qmp '<json command>': one command over the QMP socket
   python3 -I - "$S/qmp.sock" "$1" <<'EOF'
 import json, socket, sys
@@ -349,17 +358,44 @@ scp_guest(){ scp -q "${MUX[@]}" -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -
 MUX=()
 MUX_SOCK=$S/ssh-pwsh-$SSH_PORT
 mux_on(){ MUX=(-o ControlMaster=auto -o "ControlPath=$MUX_SOCK" -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=3); }
-mux_close(){ [[ -S $MUX_SOCK ]] || return 0; ssh -o "ControlPath=$MUX_SOCK" -O exit dev@127.0.0.1 > /dev/null 2>&1 || true; rm -f "$MUX_SOCK"; }
+# ssh_bash, scp_bash: Git Bash, for vmlab-display.exe (scale-watch, where guest-bin/ has it).
+# Git Bash because a session must have a shell (vmshell starts one for each), the program needs
+# none of PowerShell, and Git Bash is the cheap one: its start is a few tens of milliseconds,
+# pwsh's most of a second. vmshell gives Git Bash to a session without VMLAB_SHELL; over MUX's
+# connection every session would get pwsh, the shell that connection was opened with, so this
+# is a second shared connection of its own, opened without SetEnv (as `vm` keeps
+# ssh-%p and ssh-pwsh-%p apart).
+BASH_SOCK=$S/ssh-bash-$SSH_PORT
+BASH_MUX=(-o ControlMaster=auto -o "ControlPath=$BASH_SOCK" -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
+ssh_bash(){ ssh "${BASH_MUX[@]}" -i "$KEY" -p "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" \
+  -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR dev@127.0.0.1 "$@"; }
+scp_bash(){ scp -q "${BASH_MUX[@]}" -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR "$@"; }
+mux_close(){ local s
+  for s in "$MUX_SOCK" "$BASH_SOCK"; do
+    [[ -S $s ]] || continue
+    ssh -o "ControlPath=$s" -O exit dev@127.0.0.1 > /dev/null 2>&1 || true; rm -f "$s"
+  done; return 0; }
 
-# guest_display SIZE PERCENT ALWAYS (scale-watch): set-mode.ps1 SIZE and then
-# set-scale.ps1 PERCENT in one SSH command, run in the SSH session itself: since desktop-ssh
-# (346efb2) that is dev's desktop session, so no scheduled task (run-interactive.ps1) is needed.
+# guest_display SIZE PERCENT ALWAYS (scale-watch): the mode SIZE and then the scaling PERCENT in
+# one SSH command, run in the SSH session itself: since desktop-ssh (346efb2) that is dev's
+# desktop session, so no scheduled task (run-interactive.ps1) is needed. With DISPLAY_EXE set
+# (scale-watch copied guest-bin/vmlab-display.exe to C:\vmlab) that program does both, through
+# Git Bash (ssh_bash): about 50 ms for a call that changes nothing, 0.2 s for a new scaling.
+# Else set-mode.ps1 and set-scale.ps1 in pwsh, about 3.6 s in Windows either way.
 # Empty SIZE or PERCENT: that part is not run; the scale runs after the mode only when ALWAYS
 # is set or the mode was set (Windows keeps a scaling for each size). It prints "@mode RC LINE"
-# and "@scale RC LINE" (the script's exit code and last line), or "@desktop no" where the
+# and "@scale RC LINE" (the step's exit code and last line), or "@desktop no" where the
 # session is not on the desktop (an older state), and scale-watch goes back to the task.
+DISPLAY_EXE=''
 guest_display(){
   [[ $1 =~ ^([0-9]+x[0-9]+)?$ && $2 =~ ^[0-9]*$ && $3 =~ ^1?$ ]] || return 2
+  if [[ -n $DISPLAY_EXE ]]; then
+    local a=()
+    [[ -z $1 ]] || a+=(--mode "$1")
+    [[ -z $2 ]] || a+=(--scale "$2")
+    [[ -z $3 ]] || a+=(--scale-always)
+    ssh_bash C:/vmlab/vmlab-display.exe "${a[@]}"; return
+  fi
   ssh_guest <<PS1
 if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { '@desktop no'; exit 3 }
 \$rcs = @{}
@@ -376,6 +412,12 @@ if ('$2' -and ('$3' -or \$rcs['mode'] -eq 0)) { Step scale C:\vmlab\set-scale.ps
 exit 0
 PS1
 }
+# nap SECONDS: sleep, without a fork once NAP_FD is open (scale-watch: a pipe nobody writes,
+# which read waits on until it times out); sleep(1) where that read did not wait
+NAP_FD=''
+nap(){ local x
+  if [[ -n $NAP_FD ]]; then read -rt "$1" -u "$NAP_FD" x && return 0; (( $? > 128 )) && return 0; fi
+  sleep "$1"; }
 
 # firmware: the firmware's file. The system's OVMF with a quiet start (no TianoCore logo, so
 # Windows draws its own, and no "BdsDxe: loading" lines: firmware/make-firmware.py), made again
@@ -429,25 +471,41 @@ case ${1:-} in
   # screen's pixels of the window. This gives Windows the same scaling, so that things in it
   # are as large as on the host. It ends with QEMU.
   scale-watch)
-    applied='' copied='' sized='' tries=0 direct=''
-    # By default one shared SSH connection, and both scripts in one
-    # command on the desktop (guest_display), the scheduled task only where SSH is not there
-    # (measured 2026-11-23 in the nested rig at 125%: the scale follows a show or hide in
-    # 1.6-4.8 s, against 6.2-7.8 s through the task; most of it is the call in Windows, about
-    # 3.6 s for the mode and the scale). WIN_VENUS_SCALE_DIRECT=0: always the task, as before.
+    applied='' copied='' sized='' tries=0 direct='' exe=''
+    # By default one shared SSH connection, and the mode and the scale in one command on the
+    # desktop (guest_display), the scheduled task only where SSH is not there. The command is
+    # guest-bin/vmlab-display.exe where build.sh has made it (vmlab-display/), else the two
+    # scripts in pwsh (measured 2026-11-23 in the nested rig at 125%: the scale follows a show
+    # or hide in 1.6-4.8 s, against 6.2-7.8 s through the task; most of it is the call in
+    # Windows, about 3.6 s for the mode and the scale, where the program takes 0.05-0.2 s).
+    # WIN_VENUS_SCALE_DIRECT=0: always the task, as before.
     if [[ ${WIN_VENUS_SCALE_DIRECT:-1} == 1 ]]; then
       direct=1; mux_close; mux_on      # (a connection left by an earlier run would hang)
-      echo "$(date +%T) direct: one SSH connection, no scheduled task"
+      [[ -f $HERE/guest-bin/vmlab-display.exe ]] && exe=$HERE/guest-bin/vmlab-display.exe
+      exec {NAP_FD}<> <(:)             # (for nap)
+      echo "$(date +%T) direct: one SSH connection, no scheduled task, $([[ -n $exe ]] && echo vmlab-display.exe || echo 'the PowerShell scripts')"
     fi
     while alive qemu; do
+      # A check four times a second, with builtins only (get, alive, nap): a pass that finds
+      # nothing to do starts no process. After a call that left something to do (the mode
+      # not there yet, nobody signed in, no SSH yet while Windows starts) 2 s, as before, so
+      # a mode Windows lacks still has 20 tries over 40 s or more.
       if [[ -n $direct ]]; then
-        size=$(cat "$S/size" 2>/dev/null || true)
-        want=100; [[ $(cat "$S/window.state" 2>/dev/null) == hidden ]] || want=$(cat "$S/scale" 2>/dev/null || true)
+        get size "$S/size"; get shown "$S/window.state"; get screen "$S/scale"
+        want=100; [[ $shown == hidden ]] || want=$screen
         m=''; [[ $size =~ ^[0-9]+x[0-9]+$ && $size != "$sized" ]] && m=$size
         p=''; [[ $want =~ ^[0-9]+$ ]] && p=$want
         always=''; [[ -n $p && $p != "$applied" ]] && always=1
+        pause=0.25
         if [[ -n $m || -n $always ]]; then
-          [[ -n $copied ]] || { scp_guest "$HERE/guest-scripts/set-scale.ps1" "$HERE/guest-scripts/set-mode.ps1" dev@127.0.0.1:C:/vmlab/ 2>/dev/null && copied=1; }
+          # Once: the program (with Git Bash's connection, which then runs it) and the scripts,
+          # which the task needs if this state's SSH turns out not to be on the desktop
+          if [[ -z $copied && -n $exe ]]; then
+            scp_bash "$exe" "$HERE/guest-scripts/set-scale.ps1" "$HERE/guest-scripts/set-mode.ps1" dev@127.0.0.1:C:/vmlab/ 2>/dev/null && copied=1 DISPLAY_EXE=1
+          elif [[ -z $copied ]]; then
+            scp_guest "$HERE/guest-scripts/set-scale.ps1" "$HERE/guest-scripts/set-mode.ps1" dev@127.0.0.1:C:/vmlab/ 2>/dev/null && copied=1
+          fi
+          pause=2
           if [[ -n $copied ]]; then
             t0=${EPOCHREALTIME/./}
             out=$(guest_display "$m" "$p" "$always" 2>&1) || true
@@ -464,9 +522,10 @@ case ${1:-} in
               fi
             fi
             [[ $sline == '@scale 0 '* ]] && { applied=$p; echo "$(date +%T) screen scale $p%: ${sline#@scale 0 } ($took)"; }
+            [[ (-n $m && $m != "$sized") || (-n $p && $p != "$applied") ]] || pause=0.25
           fi
         fi
-        sleep 2; continue
+        nap "$pause"; continue
       fi
       # The size the window offered Windows ($S/size, VMLAB_WINDOW_SIZE_FILE), where Windows
       # did not take it by itself (set-mode.ps1 says why), before the scaling, which Windows

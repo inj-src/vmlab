@@ -66,12 +66,18 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   dropped: it gives up one fast core, and the build took 10% longer.
 - Logs: `/vmlab/run/win-venus/qemu.log` (QEMU and the render server). `WIN_VENUS_STRACE=FILE`
   records the system calls of QEMU's main thread.
-- **Scale helper's path**: scale-watch keeps one SSH connection (ControlMaster) and runs
-  `set-mode.ps1` and `set-scale.ps1` in one command on the desktop (pwsh 7, no scheduled task),
-  timing each in `scale.log`; where SSH is not on the desktop (a state from before desktop-ssh)
-  it goes back to `run-interactive.ps1`. The default since 2026-11-23: a show or hide reaches
-  Windows' scaling in 1.6-4.8 s, against 6.2-7.8 s through the task. `WIN_VENUS_SCALE_DIRECT=0`
-  always takes the task.
+- **Scale helper's path**: scale-watch keeps one SSH connection (ControlMaster) and sets the
+  mode and the scaling in one command on the desktop (no scheduled task), timing each in
+  `scale.log`. The command is `win3d/guest-bin/vmlab-display.exe` where it has been built
+  (`win3d/vmlab-display/build.sh`, in the running VM): a Rust program that does what
+  `set-mode.ps1` and `set-scale.ps1` do, run through Git Bash on a connection of its own (no
+  pwsh starts), measured by Gemini at about 50 ms for a call that changes nothing and 0.2 s for
+  a new scaling. Without it, the two scripts in pwsh 7 (about 3.6 s in Windows): a show or hide
+  reaches Windows' scaling in 1.6-4.8 s, against 6.2-7.8 s through the task. It looks for a
+  change four times a second, with no process started while nothing changes (2 s after a call
+  that left something to do). Where SSH is not on the desktop (a state from before
+  desktop-ssh) it goes back to `run-interactive.ps1`. The default since 2026-11-23;
+  `WIN_VENUS_SCALE_DIRECT=0` always takes the task.
 
 ### The window (`--window`)
 
