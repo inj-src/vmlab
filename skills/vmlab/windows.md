@@ -38,4 +38,4 @@ Chrome is the default browser, pinned at one version (updater off; policies turn
 
 ## Graphics
 
-Direct3D 9 to 11, OpenGL and Vulkan run on the GPU, so WebGL works, and screen capture with Desktop Duplication works (ffmpeg: `-f gdigrab -i desktop`; `ddagrab` fails). Direct3D 12 for native programs goes through a bridge to Vulkan, and Chromium gets no WebGPU adapter: see [troubleshooting.md](troubleshooting.md).
+Direct3D 9 to 11, OpenGL and Vulkan run on the GPU, so WebGL works, and screen capture with Desktop Duplication works (ffmpeg: `-f gdigrab -i desktop`; `ddagrab` fails). Direct3D 12 for native programs draws on WARP, Microsoft's software adapter (on the CPU), and Chromium gets no WebGPU adapter: see [troubleshooting.md](troubleshooting.md).

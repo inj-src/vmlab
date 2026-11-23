@@ -7,7 +7,7 @@ The VMs run on this Linux laptop (Ubuntu 24.04, 23 GB RAM, i5-12450HX, RTX 4050)
 ## How agents get the lab
 
 - **The skill** `skills/vmlab/` is linked into `~/.claude/skills/` and `~/.codex/skills/` by `./install.sh`. Its description is what every session sees; its files load when a task matches.
-- **vmlab-mcp** (`vmlab-mcp/`) is registered for Claude Code (user scope) and Codex (with `tool_timeout_sec = 180`: the first call after `vm start` can wait 90 s for the desktop), also by `./install.sh`. Antigravity is not set up (it skips linked skills). Build and install the binary as `vmlab-mcp/README.md` says. Its `INSTRUCTIONS` (`src/server.rs`) point to the skill.
+- **vmlab-mcp** (`vmlab-mcp/`) is registered for Claude Code (user scope) and Codex (with `tool_timeout_sec = 180`: the first call after `vm start` can wait 90 s for the desktop), also by `./install.sh`. Antigravity has vmlab-mcp (`~/.gemini/config/mcp_config.json`) but not the skill: it skips linked skills. Build and install the binary as `vmlab-mcp/README.md` says. Its `INSTRUCTIONS` (`src/server.rs`) point to the skill.
 - Nothing about the lab belongs in the global `CLAUDE.md` or `~/.codex/AGENTS.md`.
 
 ## Behaviour behind the skill

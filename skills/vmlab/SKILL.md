@@ -54,6 +54,7 @@ EOF
 ```
 
 - Exit code and UTF-8 output come back as from a Linux shell (Windows programs end lines with CRLF). `scp` and `sftp` work.
+- **`ssh win` is Git Bash, not PowerShell:** cmdlets and `$env:` go to `ssh win-pwsh`. A Windows switch needs a doubled slash (`setup.exe //S`, `taskkill //F //IM app.exe`) or `MSYS_NO_PATHCONV=1`, and a path inside a string (`node -e`, JSON, a config file) is written `C:/cache/...`: only whole arguments are converted from `/c/...`.
 - **No `-t`:** on `win` a session with a terminal exits 0 and loses the output.
 - **A long build:** run the `ssh` as a background command of your harness and act on its exit code. Run one project's builds one after another. When the harness cuts `ssh` off, the command ends with it.
 - **A program that stays** (a GUI app, a dev server): `nohup <command> > /tmp/app.log 2>&1 & echo $!` keeps it after the session; on `mac`, `open -a <App>`. Stop it with `kill <pid>`, `taskkill //T //F //IM app.exe` or `pkill -x <App>`.
@@ -64,7 +65,14 @@ Per OS, read the matching file before your first command: [windows.md](windows.m
 
 ## The GUI: vmlab MCP tools
 
-Anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer) is driven with the `vmlab` MCP tools (`mcp__vmlab__*`; a tool search for `vmlab` finds them). Every tool takes `machine: "win"` or `"mac"`; the VM must be running. Elements come from `get_window_state`; act on them by `element_token`, and read the window again after each step that changes it.
+Anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer) is driven with the `vmlab` MCP tools (`mcp__vmlab__*`; a tool search for `vmlab` finds them). Every tool takes `machine: "win"` or `"mac"`; the VM must be running. Elements come from `get_window_state`; act on them by `element_token`. Several actions in a row go in one `run_steps` call, which can read the window after the last step; a re-read with `since: "latest"` returns only what changed.
+
+The traps that cost agents the most turns:
+
+- **Electron or Chromium windows:** type and press keys with `delivery_mode: "foreground"`. In the background `win` refuses the keys and `mac` drops them while reporting them sent. Read a field back after typing.
+- **`foreground_unavailable` on `win`:** bring the window forward with `ssh win-pwsh 'C:\vmlab\focus.ps1 <part of its title, a process name or a pid>'`, then act again.
+- **A text field on `mac`:** click it by `x, y` in the foreground, not by `element_token` (`AXPress returned -25206`), then `type_text` in a second call.
+- **A coordinate action** (`click` at x, y, `drag`, `scroll`, `zoom`) needs a screenshot of that window first: `get_window_state` with `include_screenshot: true`.
 
 Before the first GUI step, read [gui.md](gui.md): Electron windows, text fields, save dialogs and `<select>` on each OS lose input or report false success unless driven its way. It also covers `vm gui` for input that must look like a person's (keyboard hooks, hotkeys) and Playwright for the page inside an Electron app.
 
