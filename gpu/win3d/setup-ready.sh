@@ -49,7 +49,7 @@ done
 # The trial files: the new ready state, and the run on it that commit folds into it
 export WIN_VENUS_READY=$NEW WIN_VENUS_DISK=${NEW%.qcow2}.run.qcow2
 rm -f "$NEW" "${NEW%.qcow2}.vars.fd" "$WIN_VENUS_DISK"
-qemu-img create -q -f qcow2 -b "$BASE" -F qcow2 "$NEW"
+qemu-img create -q -f qcow2 -o extended_l2=on -b "$BASE" -F qcow2 "$NEW"   # (win-venus.sh, NEW_QCOW2)
 "$W" reset > /dev/null                      # fresh firmware variables for this start
 finished=''
 trap '[[ -n $finished ]] || "$W" kill > /dev/null 2>&1 || true' EXIT     # a failed run leaves no VM behind

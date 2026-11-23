@@ -81,6 +81,10 @@ BASE=/vmlab/images/win11-base.qcow2
 READY=${WIN_VENUS_READY:-/vmlab/images/win11-ready.qcow2}   # on BASE; its firmware variables beside it
 READY_VARS=${READY%.qcow2}.vars.fd
 DISK=${WIN_VENUS_DISK:-/vmlab/images/win11-venus.qcow2}     # on READY
+# New overlays and the blank cache disk are made with extended_l2=on: a 4 KiB write to a
+# cluster the layer below holds copies 4 KiB of it, not the whole 64 KiB cluster. Files made
+# before keep their format; commit, rebase and reflink copies work across the two.
+NEW_QCOW2=(-f qcow2 -o extended_l2=on)
 S=/vmlab/run/win-venus            # sockets, pid files, logs, firmware variables
 # Named states: NAME.qcow2 is a run's disk kept as it was (the changes since READY, so each is
 # as large as what its run wrote) and NAME.vars.fd its firmware variables. Loading one copies
@@ -188,7 +192,7 @@ start(){
   { systemctl --user is-active --quiet vmlab-mac26 || systemctl --user is-active --quiet vmlab-mac26d; } && die "a mac26 VM is running: one VM at a time"
   mkdir -p "$S"
   [[ -f $READY ]] || die "no ready state ($READY): win-venus.sh setup"
-  [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"
+  [[ -f $DISK ]] || qemu-img create -q "${NEW_QCOW2[@]}" -F qcow2 -b "$READY" "$DISK"
   # .defender: the disk has Defender on (save and load carry it to and from NAME.defender)
   [[ -z $defender ]] || { "$HERE/defender-on.sh" "$DISK" >&2 && : > "$STATES/.defender"; } || die "Defender was not turned on: not started"
   st_ran
@@ -223,7 +227,7 @@ start(){
   if [[ $CACHE != off ]]; then
     mkdir -p "$CACHE"
     if [[ ! -f $CACHE/win.qcow2 ]]; then
-      if [[ -f $CACHE_EMPTY ]]; then cp "$CACHE_EMPTY" "$CACHE/win.qcow2"; else qemu-img create -q -f qcow2 "$CACHE/win.qcow2" 25G; fi
+      if [[ -f $CACHE_EMPTY ]]; then cp "$CACHE_EMPTY" "$CACHE/win.qcow2"; else qemu-img create -q "${NEW_QCOW2[@]}" "$CACHE/win.qcow2" 25G; fi
     fi
     cache=(-blockdev "driver=qcow2,node-name=cache0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename=$CACHE/win.qcow2"
       -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=io0,addr=2)
@@ -407,7 +411,7 @@ case ${1:-} in
   state) alive qemu && [[ ${2:-} != list && ${2:-} != rm && ${2:-} != default-size ]] && die "stop it first"
     case ${2:-} in
       save) st_valid "${3:-}"; mkdir -p "$STATES" "$S"
-        [[ -f $DISK ]] || qemu-img create -q -f qcow2 -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
+        [[ -f $DISK ]] || qemu-img create -q "${NEW_QCOW2[@]}" -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
         cp --reflink=auto "$DISK" "$STATES/$3.qcow2.new"; mv "$STATES/$3.qcow2.new" "$STATES/$3.qcow2"
         cp "$([[ -f $S/OVMF_VARS.fd ]] && echo "$S/OVMF_VARS.fd" || echo "$READY_VARS")" "$STATES/$3.vars.fd"
         if [[ -e $STATES/.defender ]]; then : > "$STATES/$3.defender"; else rm -f "$STATES/$3.defender"; fi
