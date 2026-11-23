@@ -120,7 +120,11 @@ CACHE_EMPTY=/vmlab/images/win-cache-empty.qcow2
 die(){ echo "win-venus: $*" >&2; exit 1; }
 . "$HERE/../states.sh"
 . "$HERE/../window.sh"
-alive(){ [[ -f $S/$1.pid ]] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
+# alive NAME: the process in $S/NAME.pid runs and is the QEMU that wrote it (-pidfile with that
+# path on its command line). A pid file left by a QEMU that ended without `stop` can name an
+# unrelated process after a reboot, and `stop` and `kill` must never signal that one.
+alive(){ local p; p=$(cat "$S/$1.pid" 2>/dev/null) && [[ $p =~ ^[0-9]+$ ]] &&
+  tr '\0' '\n' 2>/dev/null < "/proc/$p/cmdline" | grep -qxF "$S/$1.pid"; }
 qmp(){ # qmp '<json command>': one command over the QMP socket
   python3 -I - "$S/qmp.sock" "$1" <<'EOF'
 import json, socket, sys
