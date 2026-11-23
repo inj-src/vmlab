@@ -58,12 +58,16 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   as the Mac's), with the SSH port and the shared folder. Only SSH is forwarded.
   `WIN_VENUS_NET=helper` puts a second QEMU in front as the NAT box, as before 2026-11-23; the
   guest's NIC, MAC and slot are the same either way.
+- **CPUs**: 6 cores sharing the fast host CPUs 0-7, with Hyper-V enlightenments, among them
+  `hv-stimer-direct`, `hv-xmm-input` and `hv-tlbflush-ext` since 2026-11-23
+  (`WIN_VENUS_HV_EXTRA=0` leaves those three out). With them ten UI Automation reads of a window
+  took a median 449 ms against 615-688 ms, and a release build of ripgrep as long (29.4 s).
+  3 cores of 2 threads, each guest CPU on a host CPU of its own (0-5), was tried the same day and
+  dropped: it gives up one fast core, and the build took 10% longer.
 - Logs: `/vmlab/run/win-venus/qemu.log` (QEMU and the render server). `WIN_VENUS_STRACE=FILE`
   records the system calls of QEMU's main thread.
 - **Switches on trial** (each off by default until it is tested on the VM):
   - `WIN_VENUS_SCALE_DIRECT=1`: scale-watch keeps one SSH connection (ControlMaster) and runs `set-mode.ps1` and `set-scale.ps1` in one command on the desktop (pwsh 7, no scheduled task), timing each in `scale.log`; where SSH is not on the desktop (a state from before desktop-ssh) it goes back to `run-interactive.ps1`.
-  - `WIN_VENUS_TOPOLOGY=smt`: `-smp 6,sockets=1,cores=3,threads=2`, each guest CPU on a host CPU of its own, a guest core's two threads on one fast core's two (host CPUs 0-5, `pin.py --one-each`). Default `flat`: 6 cores sharing host CPUs 0-7.
-  - `WIN_VENUS_HV_EXTRA=1`: adds `hv-stimer-direct`, `hv-xmm-input` and `hv-tlbflush-ext` to `-cpu` (they need `hv_stimer` and `hv_tlbflush`, which are on already).
 
 ### The window (`--window`)
 
