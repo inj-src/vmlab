@@ -180,7 +180,9 @@ impl Proxy {
         ctx: &RequestContext<RoleServer>,
     ) -> Result<Result<(), String>, McpError> {
         let first = catalog::check_tool(&self.catalog(), machine, tool);
-        if first.is_ok() || self.slots[machine.index()].live_tools().is_some() {
+        // An opt-in tool this session does not show is refused whatever the VM has.
+        let opt_in = catalog::extra_group_hidden(tool).is_some();
+        if first.is_ok() || opt_in || self.slots[machine.index()].live_tools().is_some() {
             return Ok(first);
         }
         if self.connect(machine, ctx).await?.is_err() {

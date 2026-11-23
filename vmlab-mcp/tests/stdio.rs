@@ -124,7 +124,7 @@ fn vm_off() {
 
     c.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
     let tools = c.wait(1, 10)["result"]["tools"].as_array().unwrap().clone();
-    assert!(tools.len() >= 50, "seed union has {} tools", tools.len());
+    assert!(tools.len() >= 35, "seed union has {} tools", tools.len());
     assert!(tools.iter().all(|t| t["name"] != "install_ffmpeg"), "a hidden tool is listed");
     for t in &tools {
         assert_eq!(t["inputSchema"]["required"][0], "machine", "{}", t["name"]);
@@ -142,8 +142,20 @@ fn vm_off() {
     assert!(text(&r).contains("missing required argument `machine`"), "{r}");
     let r = c.call_wait(5, "no_such_tool", json!({"machine": "win"}));
     assert_eq!(text(&r), "unknown tool `no_such_tool`");
+    // Opt-in tools are neither listed nor callable by default.
+    assert!(tools.iter().all(|t| t["name"] != "start_recording"), "an opt-in tool is listed");
+    let r = c.call_wait(6, "start_recording", json!({"machine": "win"}));
+    assert!(text(&r).contains("VMLAB_MCP_EXTRA_TOOLS=recording"), "{r}");
     // Nothing was cached: no VM was reached.
     assert!(!cache.join("cua-tools-win.json").exists());
+    assert!(c.close().success());
+
+    // VMLAB_MCP_EXTRA_TOOLS brings a group back.
+    let mut c = Client::spawn(&[("VMLAB_VM", &vm), ("VMLAB_CACHE_DIR", &cache)], &[("VMLAB_MCP_EXTRA_TOOLS", "recording")]);
+    c.send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}));
+    let more = c.wait(1, 10)["result"]["tools"].as_array().unwrap().clone();
+    assert_eq!(more.len(), tools.len() + 3);
+    assert!(more.iter().any(|t| t["name"] == "start_recording"));
     assert!(c.close().success());
 }
 

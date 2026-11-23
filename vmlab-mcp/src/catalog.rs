@@ -131,9 +131,62 @@ pub const HIDDEN: &[&str] = &[
     "replay_trajectory",
 ];
 
+/// Cua tools agents almost never call (1 call in 2,715 in the lab's transcripts up to
+/// 2026-11-22), left out of the list unless `VMLAB_MCP_EXTRA_TOOLS` names their group (or
+/// `all`, or the tool itself). Unlike `HIDDEN`, they stay in the cache and in `--fingerprints`.
+pub const EXTRA_GROUPS: &[(&str, &[&str])] = &[
+    ("session", &["start_session", "list_sessions", "get_session", "end_session", "get_agent_cursor_state"]),
+    ("recording", &["start_recording", "stop_recording", "get_recording_state"]),
+    (
+        "admin",
+        &["set_config", "get_config", "debug_window_info", "health_report", "check_permissions", "get_guide"],
+    ),
+    ("vision", &["parse_visual_regions"]),
+];
+
+pub const EXTRA_ENV: &str = "VMLAB_MCP_EXTRA_TOOLS";
+
+/// The opt-in tools shown by a `VMLAB_MCP_EXTRA_TOOLS` value (comma or space separated group
+/// names, tool names or `all`), and the words in it that are neither.
+pub fn parse_extras(spec: &str) -> (std::collections::HashSet<&'static str>, Vec<String>) {
+    let mut shown = std::collections::HashSet::new();
+    let mut unknown = Vec::new();
+    for word in spec.split([',', ' ']).map(str::trim).filter(|w| !w.is_empty()) {
+        let mut hit = false;
+        for (group, tools) in EXTRA_GROUPS {
+            for t in tools.iter() {
+                if word == "all" || word == *group || word == *t {
+                    shown.insert(*t);
+                    hit = true;
+                }
+            }
+        }
+        if !hit {
+            unknown.push(word.to_string());
+        }
+    }
+    (shown, unknown)
+}
+
+static SHOWN_EXTRAS: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let (shown, unknown) = parse_extras(&std::env::var(EXTRA_ENV).unwrap_or_default());
+        if !unknown.is_empty() {
+            let groups: Vec<&str> = EXTRA_GROUPS.iter().map(|(g, _)| *g).collect();
+            tracing::warn!(?unknown, "{EXTRA_ENV}: not a group or tool; groups are {groups:?} or all");
+        }
+        shown
+    });
+
+/// The opt-in group of a tool that this session does not show, if it is one.
+pub fn extra_group_hidden(tool: &str) -> Option<&'static str> {
+    let (group, _) = EXTRA_GROUPS.iter().find(|(_, tools)| tools.contains(&tool))?;
+    (!SHOWN_EXTRAS.contains(tool)).then_some(*group)
+}
+
 /// Round-trip tools through rmcp's `Tool`, the form they are served in. Non-standard fields
 /// (Cua adds `capabilities` and `risk`) drop out, so lists from different sources compare equal.
-/// The `HIDDEN` tools drop out here too.
+/// The `HIDDEN` tools drop out here too; the opt-in ones are filtered when served (`Catalog`).
 pub fn normalize(tools: Vec<Value>) -> Vec<Value> {
     tools
         .into_iter()
@@ -199,11 +252,13 @@ pub struct Catalog {
 impl Catalog {
 
     pub fn has(&self, machine: Machine, tool: &str) -> bool {
-        self.lists[machine.index()].iter().any(|t| tool_name(t) == tool)
+        extra_group_hidden(tool).is_none()
+            && self.lists[machine.index()].iter().any(|t| tool_name(t) == tool)
     }
 
     /// The unified list served to the agent: every tool once, each with a required `machine`
-    /// argument. Order: the win list, then tools only mac has.
+    /// argument. Order: the win list, then tools only mac has. Opt-in tools this session does
+    /// not show are left out.
     pub fn unified(&self) -> Vec<Value> {
         let [win, mac] = [&self.lists[0][..], &self.lists[1][..]];
         let find = |list: &[Value], name: &str| list.iter().find(|t| tool_name(t) == name).cloned();
@@ -211,7 +266,7 @@ impl Catalog {
         let mut seen = std::collections::HashSet::new();
         for t in win.iter().chain(mac.iter()) {
             let name = tool_name(t);
-            if !seen.insert(name.to_string()) {
+            if !seen.insert(name.to_string()) || extra_group_hidden(name).is_some() {
                 continue;
             }
             let (mut w, mut m) = (find(win, name), find(mac, name));
@@ -481,6 +536,9 @@ pub fn route(
 /// Check that `tool` exists on `machine`, with an error message an agent can act on.
 /// An empty list means "unknown" (no cache, empty seed): the call is forwarded and Cua decides.
 pub fn check_tool(catalog: &Catalog, machine: Machine, tool: &str) -> Result<(), String> {
+    if let Some(group) = extra_group_hidden(tool) {
+        return Err(hidden_message(tool, group));
+    }
     if catalog.has(machine, tool) || catalog.lists[machine.index()].is_empty() {
         return Ok(());
     }
@@ -491,6 +549,13 @@ pub fn check_tool(catalog: &Catalog, machine: Machine, tool: &str) -> Result<(),
         ));
     }
     Err(format!("unknown tool `{tool}`"))
+}
+
+pub fn hidden_message(tool: &str, group: &str) -> String {
+    format!(
+        "tool `{tool}` is not served by default: start the agent with {EXTRA_ENV}={group} \
+         (or all) in vmlab-mcp's environment to use it"
+    )
 }
 
 #[cfg(test)]
@@ -526,7 +591,7 @@ mod tests {
 
     #[test]
     fn schema_without_properties_gets_machine() {
-        let c = catalog(vec![tool("health_report", "", json!({"type": "object"}))], vec![]);
+        let c = catalog(vec![tool("get_screen_size", "", json!({"type": "object"}))], vec![]);
         let s = &c.unified()[0]["inputSchema"];
         assert_eq!(s["required"], json!(["machine"]));
         assert!(s["properties"]["machine"].is_object());
@@ -666,6 +731,30 @@ mod tests {
         assert_eq!(normalize(vec![t, json!({"no": "name"})]), vec![json!({"name": "a", "inputSchema": {"type": "object"}})]);
         let hidden = json!({"name": "install_ffmpeg", "inputSchema": {"type": "object"}});
         assert_eq!(normalize(vec![hidden]), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn extras_are_opt_in() {
+        let (shown, unknown) = parse_extras("recording, admin nope");
+        assert!(shown.contains("start_recording") && shown.contains("get_config"));
+        assert!(!shown.contains("start_session"));
+        assert_eq!(unknown, ["nope"]);
+        let (shown, _) = parse_extras("all");
+        assert_eq!(shown.len(), EXTRA_GROUPS.iter().map(|(_, t)| t.len()).sum::<usize>());
+        let (shown, unknown) = parse_extras("get_session");
+        assert_eq!((shown.len(), unknown.len()), (1, 0));
+        assert!(parse_extras("").0.is_empty());
+
+        // Without the variable (as in `cargo test`), they are not served and a call is refused.
+        let e = json!({"type": "object"});
+        let c = catalog(vec![tool("start_session", "", e.clone()), tool("click", "", e)], vec![]);
+        let names: Vec<_> = c.unified().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["click"]);
+        assert!(!c.has(Machine::Win, "start_session"));
+        let err = check_tool(&c, Machine::Win, "start_session").unwrap_err();
+        assert!(err.contains("VMLAB_MCP_EXTRA_TOOLS=session"), "{err}");
+        // They stay in the normalized list (cache, fingerprints).
+        assert!(normalize(seed(Machine::Win)).iter().any(|t| t["name"] == "start_session"));
     }
 
     #[test]

@@ -5,12 +5,13 @@ A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and 
 ## Behaviour
 
 - **One tool list for both VMs.** It is Cua's list, with a required `machine` argument (`"win"` or `"mac"`) added to every tool. The argument is removed before the call is forwarded.
-  - A tool only one VM has says so in its description (today only `debug_window_info`, which is win only). Calling it for the other VM returns a tool error.
+  - A tool only one VM has says so in its description (today only `debug_window_info`, which is win only and opt-in). Calling it for the other VM returns a tool error.
   - **Descriptions are the lab's own** (`descriptions.md`, compiled in): one text per tool and parameter for both VMs, marking where they differ, with the lab's trial results (Electron typing needs `delivery_mode: "foreground"`, and similar). Each entry carries a fingerprint of Cua's two definitions it was written against; when Cua changes a tool, that tool falls back to Cua's text, with a warning in the log, until the entry is updated. `vmlab-mcp --fingerprints` lists every tool's fingerprint and whether its entry is `ok` or `STALE`, and `cargo test` fails while one is stale against `seed/`.
   - Without an entry (or with a stale one), when the two VMs describe a tool or one of its properties differently, the description gives both texts. Input properties only one VM has are marked `(win only)` or `(mac only)`; a field only one VM requires is not required and says `(required on win)`.
   - Other schema keywords the VMs disagree on (a default, a minimum) are dropped, and enums are joined, so the merged schema accepts what either VM accepts. Cua on the target VM still validates the call.
   - Behaviour hints are merged conservatively: read-only and idempotent only if both VMs say so, destructive and open-world if either does.
   - Ten Cua tools are left out (`HIDDEN` in `src/catalog.rs`): driver upkeep (`check_for_update`, `install_extension`, `install_ffmpeg`), deprecated or legacy ones (`escalate_session`, `get_session_state`, `page`), the agent cursor's styling (`set_agent_cursor_*`) and `replay_trajectory`. A call to one is refused as an unknown tool. To bring one back, delete its line and reinstall.
+  - Fifteen more are served only on request (`EXTRA_GROUPS`), because agents called them once in 2,715 calls: `session` (`start_session`, `list_sessions`, `get_session`, `end_session`, `get_agent_cursor_state`), `recording` (`start_recording`, `stop_recording`, `get_recording_state`), `admin` (`set_config`, `get_config`, `debug_window_info`, `health_report`, `check_permissions`, `get_guide`) and `vision` (`parse_visual_regions`). `VMLAB_MCP_EXTRA_TOOLS=recording,admin` (group names, tool names or `all`) in vmlab-mcp's environment serves them. Without it a call to one is refused with that advice. Cua's optional `session` argument on the other tools still works without the session tools.
 - **Cached tool list.** tools/list is served from `~/.cache/vmlab/cua-tools-<win|mac>.json`, which every successful connect rewrites. The files are re-read only when they change. When there is no cache yet, it falls back to `seed/`, which is compiled into the binary. The list is therefore complete with both VMs off.
   - Once this session has connected to a VM, the VM's live list is used for that VM, even if the cache file could not be written.
   - A call that the cached list rejects (unknown tool, or a tool the other VM has) connects first if this session has not seen the VM's live list yet, in case Cua was updated on the VM. If that connect fails, the original error is returned.
@@ -39,6 +40,7 @@ Environment variables:
 | `VMLAB_SSH_MUX=0` | turn ControlMaster sharing off |
 | `VMLAB_MCP_CONNECT_TIMEOUT` | bound on one connect, in seconds (default 120) |
 | `VMLAB_MCP_CALL_TIMEOUT` | bound on one tool call, in seconds (default 900) |
+| `VMLAB_MCP_EXTRA_TOOLS` | serve opt-in tools: `session`, `recording`, `admin`, `vision`, tool names or `all` |
 | `VMLAB_MCP_TEST_UPSTREAM` | tests only: run `sh -c "<cmd> <machine>"` instead of SSH |
 
 ## Build, test, install
