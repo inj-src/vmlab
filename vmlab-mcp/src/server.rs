@@ -217,7 +217,7 @@ fn hint(machine: Machine, text: &str) -> Option<&'static str> {
              screen pixels use scope \"desktop\" and get_desktop_state.",
         );
     }
-    if machine == Machine::Mac && text.contains("AXPress returned -25206") {
+    if machine == Machine::Mac && text.contains("AXPress) returned -25206") {
         return Some(
             "Hint: on macOS click a text field by x,y with delivery_mode \"foreground\", not by \
              element_token, then type_text in a second call.",
@@ -382,7 +382,7 @@ mod tests {
             assert!(text(&r).contains("include_screenshot true"));
         }
 
-        let mut r = err("AXPress returned -25206");
+        let mut r = err("AX action failed: AXUIElementPerformAction(AXPress) returned -25206");
         add_hint(Machine::Mac, &mut r);
         assert!(text(&r).ends_with("not by element_token, then type_text in a second call."), "{}", text(&r));
 
