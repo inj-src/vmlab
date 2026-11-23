@@ -243,7 +243,7 @@ start(){
   [[ $window == none || -z $hideable ]] || mkfifo -m 600 "$S/window.ctl"
   # Both run as transient user units, so they outlive the terminal or app that started them,
   # and QEMU's stderr (the render server's messages too) lands in qemu.log.
-  local smb= slirp net=()
+  local smb='' slirp='' net=()
   if [[ $SHARE != off && -x /usr/sbin/smbd ]]; then    # (../share-smbd.sh says why not smb=)
     mkdir -p "$SHARE"; rm -rf "$S/smb"; smb=",guestfwd=tcp:10.0.2.4:445-cmd:$HERE/../share-smbd.sh $SHARE $S/smb"
   fi
@@ -314,8 +314,8 @@ start(){
   # With a window, Windows' own scaling follows the screen the window is on while it is shown,
   # and is 100% while it is hidden (scale-watch below)
   # (a unit has none of this shell's environment: the switch is handed on)
-  local direct=(); [[ ${WIN_VENUS_SCALE_DIRECT:-} == 1 ]] && direct=(--setenv=WIN_VENUS_SCALE_DIRECT=1)
-  [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "${direct[@]}" "$0" scale-watch
+  local scale_env=(); [[ ${WIN_VENUS_SCALE_DIRECT:-} == 1 ]] && scale_env=(--setenv=WIN_VENUS_SCALE_DIRECT=1)
+  [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "${scale_env[@]}" "$0" scale-watch
   [[ $window == none || -z $hideable ]] || tray win vmlab-win-venus "$S/window.state"
   echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $window == none ]] || echo ", a window ($window)"), log $S/qemu.log"
 }
