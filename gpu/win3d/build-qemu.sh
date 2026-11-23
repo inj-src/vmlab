@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build-qemu.sh: build vmlab-win3d's patched QEMU again, here, with what their release build
-# leaves out: the GTK and SDL windows, user-mode networking, io_uring and PipeWire sound.
+# leaves out: the GTK and SDL windows, user-mode networking, io_uring, PipeWire sound and
+# vhost (for vhost-vsock-pci).
 # Output: opt/qemu-ui/ (opt/qemu/, their release binary, stays as it is). About 10 minutes.
 #
 #   build-qemu.sh            fetch (first time), configure and build
@@ -48,7 +49,7 @@ if [[ ${1:-} != rebuild ]]; then
   ./configure --prefix=/usr --target-list=x86_64-softmmu --with-pkgversion="vmlab ${COMMIT:0:12} +ui" \
     --without-default-features --enable-system --disable-user --disable-tools --disable-guest-agent --disable-docs \
     --enable-kvm --enable-tcg --enable-pixman --enable-opengl --enable-virglrenderer --enable-vnc \
-    --enable-tpm --enable-libusb --enable-vhost-user --enable-zstd --enable-hmp --enable-malloc-trim \
+    --enable-tpm --enable-libusb --enable-vhost-user --enable-vhost-kernel --enable-zstd --enable-hmp --enable-malloc-trim \
     --enable-gtk --enable-spice-protocol --enable-sdl --enable-slirp --enable-linux-io-uring --enable-linux-aio \
     --enable-pipewire --audio-drv-list=pipewire --enable-png \
     --disable-werror --extra-cflags="-march=native" --extra-ldflags="-Wl,-rpath,$OUT/lib" > "$WORK/configure.log"
@@ -58,7 +59,8 @@ fi
 cd "$WORK/qemu"
 make -j"$(nproc)" qemu-system-x86_64 > "$WORK/make.log" 2>&1 || { tail -40 "$WORK/make.log" >&2; exit 1; }
 mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/share"
-cp build/qemu-system-x86_64 "$OUT/bin/"
+# By rename, so a running VM keeps its binary (cp onto it fails: "Text file busy")
+cp build/qemu-system-x86_64 "$OUT/bin/.qemu-system-x86_64.new" && mv -f "$OUT/bin/.qemu-system-x86_64.new" "$OUT/bin/qemu-system-x86_64"
 cp "$HERE/opt/qemu/lib/libvirglrenderer.so.1" "$OUT/lib/"
 ln -sfn /usr/share/qemu "$OUT/share/qemu"
 "$OUT/bin/qemu-system-x86_64" --version | head -1

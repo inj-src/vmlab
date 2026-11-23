@@ -167,7 +167,8 @@ the old icon for as long as it is open.
     (`WIN_VENUS_WINDOW_X11=1`) there is none, and mutter 46 stretches the window on the panel
     (`xwayland-native-scaling` in its settings does nothing before mutter 47).
 - **QEMU is built here**: `build-qemu.sh` builds vmlab-win3d's patched QEMU at the release's
-  commit with a GTK window, user networking, io_uring and PipeWire, into `opt/qemu-ui/`
+  commit with a GTK window, user networking, io_uring, PipeWire and vhost (for
+  `vhost-vsock-pci`, the device of `../../vsock/`; since 2026-11-23), into `opt/qemu-ui/`
   (`opt/qemu/` is their release binary). `qemu-patches/`, applied in order:
   - `0001`: the window's title, application id (for the icon) and close-shuts-down
     (`VMLAB_WINDOW_TITLE`, `_APP_ID`, `_CLOSE_POWERS_DOWN`);
