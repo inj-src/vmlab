@@ -3,7 +3,8 @@
 # `vm commit mac`. Idempotent.
 # The host side is QEMU's private Samba server at //10.0.2.4/qemu (mac26.sh, MAC26_SHARE). A
 # LaunchAgent in the desktop session mounts it at login and every minute while it is not
-# mounted; SSH sessions see that mount too.
+# mounted; SSH sessions see that mount too. vm start and vm restart start it as soon as the
+# login session has it, without waiting out macOS' hold on login agents (mac_share_soon).
 #
 # One step is by hand, once: macOS keeps network volumes from SSH sessions ("Operation not
 # permitted", whoever mounted them) until System Settings > General > Sharing > Remote Login (i)
@@ -14,8 +15,16 @@ set -euo pipefail
 mkdir -p ~/share ~/Library/LaunchAgents ~/.local/bin
 cat > ~/.local/bin/vmlab-share <<'SH'
 #!/bin/sh
-# vmlab: mount the host's shared folder, QEMU's private SMB server, as a guest
-mount | grep -q " on $HOME/share (smbfs" || /sbin/mount_smbfs -N //guest@10.0.2.4/qemu "$HOME/share"
+# vmlab: mount the host's shared folder, QEMU's private SMB server, as a guest. Up to 10 tries,
+# 1 s apart: at login the network can come up just after this runs, and launchd's next try is a
+# minute away.
+i=0
+while :; do
+  mount | grep -q " on $HOME/share (smbfs" && exit 0
+  /sbin/mount_smbfs -N //guest@10.0.2.4/qemu "$HOME/share" && exit 0
+  i=$((i + 1)); [ "$i" -lt 10 ] || exit 1
+  sleep 1
+done
 SH
 chmod +x ~/.local/bin/vmlab-share
 cat > ~/Library/LaunchAgents/local.vmlab.share.plist <<PL
