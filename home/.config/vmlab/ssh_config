@@ -18,7 +18,9 @@ Host win win-pwsh mac
     UserKnownHostsFile ~/.cache/vmlab/known_hosts
     StrictHostKeyChecking accept-new
     BatchMode yes
-    ConnectTimeout 5
+    ConnectTimeout 10
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
     LogLevel ERROR
     ControlMaster auto
     ControlPath ~/.cache/vmlab/ssh-%p

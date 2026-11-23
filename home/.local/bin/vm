@@ -33,20 +33,29 @@ window_of(){ "${RUN[$1]}" window 2>/dev/null || echo none; }
 # minutes after the last call, and vm untunnel could not find it. (ssh takes the first value it
 # is given for an option, so their -o ControlPath=none stands before ssh_opts.)
 MUX="-o ControlMaster=auto -o ControlPath=$STATE/ssh-%p -o ControlPersist=120"
-ssh_opts(){ echo -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR $MUX -p "${PORT[$1]}"; }
+ssh_opts(){ echo -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o BatchMode=yes -o LogLevel=ERROR $MUX -p "${PORT[$1]}"; }
 guest(){ local n=$1; shift; ssh $(ssh_opts "$n") "${GUSER[$n]}@127.0.0.1" "$@"; }
 # win's sessions are Git Bash; one that sets VMLAB_SHELL=pwsh gets PowerShell 7 (win/vmshell).
 # It needs a connection of its own: a session shared over ControlMaster sends no SetEnv.
 # The same as ~/.config/vmlab/ssh_config's win-pwsh.
 PWSH_OPTS="-o SetEnv=VMLAB_SHELL=pwsh -o ControlPath=$STATE/ssh-pwsh-%p"
 guest_pwsh(){ ssh $PWSH_OPTS $(ssh_opts win) "${GUSER[win]}@127.0.0.1" "$@"; }
+# Ends the VM's shared connections, so the first call after a stop or a guest restart opens a
+# new one instead of waiting on a master whose guest end is gone
+close_mux(){
+  local n=$1 p
+  for p in "$STATE/ssh-${PORT[$n]}" "$STATE/ssh-pwsh-${PORT[$n]}"; do
+    [[ -S $p ]] || continue
+    ssh -o ControlPath="$p" -O exit "${GUSER[$n]}@127.0.0.1" >/dev/null 2>&1 || rm -f "$p"
+  done
+}
 
 wait_ssh(){
   local n=$1 deadline=$((SECONDS + ${2:-600}))
   while (( SECONDS < deadline )); do
     [[ $(state_of "$n") == running ]] || return 1
-    guest "$n" exit 2>/dev/null && return 0
-    sleep 5
+    ssh -o ConnectTimeout=3 $(ssh_opts "$n") "${GUSER[$n]}@127.0.0.1" exit 2>/dev/null && return 0
+    sleep 1
   done
   return 1
 }
@@ -129,6 +138,7 @@ cmd_stop(){
   local n=$1; need "$n"
   [[ $(state_of "$n") == running ]] || { echo "$n already stopped"; return; }
   "${RUN[$n]}" stop >/dev/null
+  close_mux "$n"
   rm -f "$STATE/$n.owner"
   echo "$n stopped"
 }
@@ -259,7 +269,8 @@ cmd_restart(){
   esac || die "$n did not take the restart (no SSH yet?)"
   # SSH goes away as the guest shuts down, then comes back
   local deadline=$((SECONDS + 120))
-  while (( SECONDS < deadline )) && guest "$n" exit 2>/dev/null; do sleep 2; done
+  while (( SECONDS < deadline )) && ssh -o ControlPath=none -o ConnectTimeout=3 $(ssh_opts "$n") "${GUSER[$n]}@127.0.0.1" exit 2>/dev/null; do sleep 1; done
+  close_mux "$n"
   wait_ssh "$n" 600 || die "$n restarted but SSH did not answer within 10 min"
   echo "$n restarted"
 }
@@ -287,8 +298,14 @@ cmd_forward(){
       die "$n's port ${BASH_REMATCH[1]} is forwarded already (vm unforward $n closes all of $n's)"
     args+=(-R "${BASH_REMATCH[1]}:127.0.0.1:${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}")
   done
-  ssh -o ControlMaster=no -o ControlPath=none $(ssh_opts "$n") -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "${args[@]}" "${GUSER[$n]}@127.0.0.1" ||
-    die "no forward: is a port taken in $n already (vm unforward $n)?"
+  # Its messages go to a file: ssh -f stays in the background holding what it writes to, and
+  # a pipe would never close
+  local err errf="$STATE/forward-$n.err"
+  if ! ssh -o ControlMaster=no -o ControlPath=none -o ConnectTimeout=20 $(ssh_opts "$n") -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "${args[@]}" "${GUSER[$n]}@127.0.0.1" >/dev/null 2>"$errf"; then
+    err=$(tr -d '\r' < "$errf" | tr '\n' ' '); rm -f "$errf"
+    [[ $err == *"forwarding failed"* ]] && die "no forward: a port is taken in $n already (vm unforward $n closes the lab's own): $err"
+    die "no forward: SSH to $n failed (${err:-no message}); it is not a port clash. Busy guest? Try again, or: ssh win-pwsh 'Get-Service sshd'"
+  fi
   echo "$n: localhost ports ${*} reach this machine (close with: vm unforward $n)"
 }
 cmd_unforward(){ need "$1"; pkill -f "^ssh .*-p ${PORT[$1]} .*-R [0-9]+:127\.0\.0\.1:" && echo "closed $1's forwards" || echo "$1 has no forwards"; }
@@ -308,8 +325,10 @@ cmd_gui(){
 # a git bundle over SSH, after the first time only what changed. In the guest, files that left
 # the tree are removed and ignored ones (build output) are kept, so builds stay incremental.
 # The snapshot is a commit of its own that no branch holds: the repository's index, branch and
-# work tree are not touched; refs/vmlab/push/<name> keeps the last one, so the next push can
-# send the difference.
+# work tree are not touched; refs/vmlab/push/<name> keeps the last one. Its parent is the
+# snapshot the guest has, so the bundle holds only what changed (git leaves out only what the
+# guest's commit reaches through history). Every PUSH_CHAIN snapshots the chain starts again
+# from a commit without a parent, so old snapshots can be collected.
 cmd_push(){
   local n=$1 src=$2 dest=${3:-} top; need "$n"
   [[ $(state_of "$n") == running ]] || die "$n is not running (vm start $n)"
@@ -324,31 +343,34 @@ cmd_push(){
   # The work tree as a tree object, through an index of its own (a copy, so unchanged files
   # are not read again)
   cp "$(git -C "$top" rev-parse --absolute-git-dir)/index" "$tmp/index" 2>/dev/null || true
-  local tree commit prev ref=refs/vmlab/push/$n
+  local tree commit prev ref=refs/vmlab/push/$n parent=()
   GIT_INDEX_FILE=$tmp/index git -C "$top" add -A
   tree=$(GIT_INDEX_FILE=$tmp/index git -C "$top" write-tree)
-  # The same tree gives the same commit: no parent, fixed name and date
-  commit=$(GIT_AUTHOR_NAME=vmlab GIT_AUTHOR_EMAIL=vmlab@localhost GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' \
-    GIT_COMMITTER_NAME=vmlab GIT_COMMITTER_EMAIL=vmlab@localhost GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
-    git -C "$top" commit-tree "$tree" -m "vm push") || { rm -rf "$tmp"; die "could not record the work tree"; }
-  git -C "$top" update-ref "$ref" "$commit"
 
-  # What the guest's checkout is at; a bundle of the difference where this repository still
-  # has that commit, of everything otherwise (first push, or the VM was reset)
+  # What the guest's checkout is at. Usable as the parent while this repository still has it
+  # (not after a VM reset or a guest that never had a push)
   prev=$(guest "$n" "git -C \"$dest\" rev-parse -q --verify refs/vmlab/pushed" 2>/dev/null | tr -d '\r\n' || true)
+  [[ $prev =~ ^[0-9a-f]{40,64}$ ]] && git -C "$top" cat-file -e "$prev^{commit}" 2>/dev/null || prev=""
   local sent="nothing to send"
-  if [[ $prev != "$commit" ]]; then
+  if [[ -n $prev && $(git -C "$top" rev-parse "$prev^{tree}") == "$tree" ]]; then
+    git -C "$top" update-ref "$ref" "$prev"
+  else
+    if [[ -n $prev ]] && (( $(git -C "$top" rev-list --count "$prev") < ${PUSH_CHAIN:-50} )); then parent=(-p "$prev"); fi
+    # Fixed name and date: the same tree on the same parent gives the same commit
+    commit=$(GIT_AUTHOR_NAME=vmlab GIT_AUTHOR_EMAIL=vmlab@localhost GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' \
+      GIT_COMMITTER_NAME=vmlab GIT_COMMITTER_EMAIL=vmlab@localhost GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+      git -C "$top" commit-tree "$tree" "${parent[@]}" -m "vm push") || { rm -rf "$tmp"; die "could not record the work tree"; }
+    git -C "$top" update-ref "$ref" "$commit"
     local -a range=("$ref")
-    [[ $prev =~ ^[0-9a-f]{40,64}$ ]] && git -C "$top" cat-file -e "$prev^{commit}" 2>/dev/null && range+=("^$prev")
+    [[ -n $prev ]] && range+=("^$prev")
     git -C "$top" bundle create -q "$tmp/push.bundle" "${range[@]}" || { rm -rf "$tmp"; die "could not pack the work tree"; }
     sent="$(du -h "$tmp/push.bundle" | cut -f1) sent"
     local -a o; read -r -a o <<< "$(ssh_opts "$n")"
     scp -q "${o[@]/#-p/-P}" "$tmp/push.bundle" "${GUSER[$n]}@127.0.0.1:$home/vm-push.bundle" || { rm -rf "$tmp"; die "could not copy the bundle to $n"; }
-    # One line that PowerShell 7 and zsh both run. autocrlf off: the guest gets the bytes the
-    # host has
-    guest "$n" "git init -q \"$dest\" && git -C \"$dest\" config core.autocrlf false && git -C \"$dest\" config core.longpaths true && git -C \"$dest\" fetch -q \"$home/vm-push.bundle\" $ref && git -C \"$dest\" checkout -q -f --detach FETCH_HEAD && git -C \"$dest\" clean -q -fd && git -C \"$dest\" update-ref refs/vmlab/pushed FETCH_HEAD && git -C \"$dest\" rev-parse -q --verify refs/vmlab/pushed" \
-      | tr -d '\r\n' | grep -qx "$commit" || { rm -rf "$tmp"; die "$n did not take the bundle (left in the guest: $home/vm-push.bundle)"; }
-    guest "$n" "rm \"$home/vm-push.bundle\"; git -C \"$dest\" gc -q --auto" >/dev/null 2>&1 || true
+    # One line that Git Bash and zsh both run. autocrlf off: the guest gets the bytes the host
+    # has. The bundle is removed in the same call; the last line printed is the new commit
+    guest "$n" "git init -q \"$dest\" && git -C \"$dest\" config core.autocrlf false && git -C \"$dest\" config core.longpaths true && git -C \"$dest\" fetch -q \"$home/vm-push.bundle\" $ref && git -C \"$dest\" checkout -q -f --detach FETCH_HEAD && git -C \"$dest\" clean -q -fd && git -C \"$dest\" update-ref refs/vmlab/pushed FETCH_HEAD && rm -f \"$home/vm-push.bundle\" && { git -C \"$dest\" gc -q --auto >/dev/null 2>&1; git -C \"$dest\" rev-parse -q --verify refs/vmlab/pushed; }" \
+      | tr -d '\r' | tail -n 1 | grep -qx "$commit" || { rm -rf "$tmp"; die "$n did not take the bundle (left in the guest: $home/vm-push.bundle)"; }
   fi
   rm -rf "$tmp"
   echo "$n: $dest is the work tree of $top ($sent)"
