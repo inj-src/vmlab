@@ -100,9 +100,15 @@ pub const NOT_READY_MARKER: &str = "vmlab-mcp: cua-driver daemon not running";
 /// The one remote command per session: wait for the Cua daemon in the desktop session, then
 /// become `cua-driver mcp`. Both run in the guest's default shell (Git Bash on win, zsh on
 /// mac): one command instead of a separate readiness probe saves a remote shell start.
-/// - The wait is bounded by wall-clock time (90 s, under the local connect timeout): the daemon
-///   is kicked after 12 s on win (the logon task) and kickstarted after 60 s on mac (the
-///   LaunchAgent), as `vm gui` did. Checks are 1 s apart.
+/// - The wait is bounded by wall-clock time (90 s, under the local connect timeout). Checks are
+///   1 s apart. On win the daemon is kicked after 12 s (the logon task), as `vm gui` did.
+/// - On mac, launchd holds the LaunchAgent in "pending spawn" for 25-35 s after login, while
+///   the gui domain is in on-demand-only mode. So once `launchctl print gui/<uid>` succeeds
+///   and the daemon is still down, it is kickstarted without -k, every 2 s, at most 10 times:
+///   Gemini measured boot-to-first-MCP going from 61 s to 35 s with that (n=3, 2026-11-23).
+///   After 35 s it is restarted with `kickstart -k` once. Each kickstart is tried without sudo,
+///   then with `sudo -n`: the session runs in dev's GUI login session (vmlab-ssh-session) or,
+///   in states older than that and before login, where sshd started it.
 /// - win checks the daemon with `cua-driver.exe status` on its pipe: rc 0 when it is up, rc 1
 ///   when it is down, about 75 ms either way (2026-11-23), against 0.25-0.45 s for the pwsh
 ///   pipe listing it replaced. It never hung, but `timeout 5` bounds it in case it does. Git
@@ -116,7 +122,7 @@ pub fn remote_command(machine: Machine) -> String {
             r#"c="${{LOCALAPPDATA//\\//}}/Programs/Cua/cua-driver/bin/cua-driver.exe"; up() {{ timeout 5 "$c" status --socket '\\.\pipe\cua-driver' </dev/null >/dev/null 2>&1; }}; ok=0; k=0; SECONDS=0; while :; do up && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 12 ] && {{ k=1; "$c" autostart kick </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec "$c" mcp --socket '\\.\pipe\cua-driver'"#
         ),
         Machine::Mac => format!(
-            r#"ok=0; k=0; SECONDS=0; while :; do ~/.local/bin/cua-driver status </dev/null >/dev/null 2>&1 && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 60 ] && {{ k=1; launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
+            r#"u=$(id -u); a=gui/$u/com.trycua.cua-driver; ok=0; k=0; n=0; t=0; SECONDS=0; while :; do ~/.local/bin/cua-driver status </dev/null >/dev/null 2>&1 && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $n -lt 10 ] && [ $SECONDS -ge $t ] && launchctl print gui/$u </dev/null >/dev/null 2>&1 && {{ n=$((n+1)); t=$((SECONDS+2)); launchctl kickstart $a </dev/null >/dev/null 2>&1 || sudo -n launchctl kickstart $a </dev/null >/dev/null 2>&1; }}; [ $k = 0 ] && [ $SECONDS -ge 35 ] && {{ k=1; launchctl kickstart -k $a </dev/null >/dev/null 2>&1 || sudo -n launchctl kickstart -k $a </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
         ),
     }
 }
@@ -590,9 +596,16 @@ mod tests {
     #[test]
     fn remote_probes_cannot_read_the_mcp_stream() {
         let mac = remote_command(Machine::Mac);
-        assert!(mac.contains("cua-driver status </dev/null >/dev/null"), "{mac}");
-        assert!(mac.contains("com.trycua.cua-driver </dev/null >/dev/null"), "{mac}");
+        assert!(mac.contains("cua-driver status </dev/null >/dev/null 2>&1"), "{mac}");
+        // Every launchctl call, sudo or not, gets an empty stdin and loses its output.
+        let calls: Vec<&str> = mac.match_indices("launchctl ").map(|(i, _)| &mac[i..]).collect();
+        assert_eq!(calls.len(), 5, "{mac}");
+        for c in calls {
+            let end = c.find(['|', ';', '&', '}']).unwrap();
+            assert!(c[..end].ends_with("</dev/null >/dev/null 2>"), "{}", &c[..end]);
+        }
         assert!(mac.contains("[ $SECONDS -ge 90 ] && break"), "{mac}");
+        assert!(mac.contains("exec ~/.local/bin/cua-driver mcp"), "{mac}");
         let win = remote_command(Machine::Win);
         assert!(win.contains(r#""$c" autostart kick </dev/null >/dev/null 2>&1"#), "{win}");
         assert!(!win.contains("//./pipe/"), "{win}");
@@ -657,6 +670,108 @@ mod tests {
         assert!(err.contains(NOT_READY_MARKER), "{err}");
         assert!(!log.contains("cua mcp"), "{log}");
         assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+    }
+
+    /// The mac command run by a local zsh, with stand-ins for cua-driver, launchctl and sudo.
+    /// `up_now`: whether the daemon is up from the start. `domain`: whether `launchctl print
+    /// gui/501` succeeds. `plain_kick`: whether launchctl may kickstart without sudo.
+    /// `kick_starts`: whether a kickstart brings the daemon up. The 90 s cap and the 35 s
+    /// restart become `cap` and `restart`.
+    fn mac_run(
+        up_now: bool,
+        domain: bool,
+        plain_kick: bool,
+        kick_starts: bool,
+        cap: u32,
+        restart: u32,
+    ) -> (Option<i32>, String, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let exe = |p: std::path::PathBuf, body: String| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let (log, up) = (d.join("log").display().to_string(), d.join("up").display().to_string());
+        exe(
+            d.join(".local/bin/cua-driver"),
+            format!("echo \"cua $*\" >> {log}\n[ \"$1\" = status ] && {{ [ -e {up} ]; exit; }}\nexit 0\n"),
+        );
+        exe(d.join("bin/id"), "echo 501\n".into());
+        exe(d.join("bin/sudo"), "[ \"$1\" = -n ] || exit 9\nshift\nSUDO=1 exec \"$@\"\n".into());
+        exe(
+            d.join("bin/launchctl"),
+            format!(
+                "echo \"${{SUDO:+sudo }}launchctl $*\" >> {log}\n\
+                 [ \"$1\" = print ] && exit {}\n\
+                 [ -z \"$SUDO\" ] && [ {} = 0 ] && exit 1\n\
+                 [ {} = 1 ] && touch {up}\nexit 0\n",
+                if domain { 0 } else { 113 },
+                u8::from(plain_kick),
+                u8::from(kick_starts),
+            ),
+        );
+        if up_now {
+            std::fs::write(&up, "").unwrap();
+        }
+        let cmd = remote_command(Machine::Mac)
+            .replace("[ $SECONDS -ge 90 ]", &format!("[ $SECONDS -ge {cap} ]"))
+            .replace("[ $SECONDS -ge 35 ]", &format!("[ $SECONDS -ge {restart} ]"));
+        let out = std::process::Command::new("zsh")
+            .args(["-f", "-c", &cmd])
+            .env("HOME", d)
+            .env("PATH", format!("{}:/usr/bin:/bin", d.join("bin").display()))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let log = std::fs::read_to_string(d.join("log")).unwrap_or_default();
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned(), log)
+    }
+
+    #[test]
+    fn mac_daemon_up_needs_no_launchctl() {
+        let (code, err, log) = mac_run(true, true, true, true, 90, 35);
+        assert_eq!((code, err.as_str(), log.as_str()), (Some(0), "", "cua status\ncua mcp\n"));
+    }
+
+    #[test]
+    fn mac_kickstarts_as_soon_as_the_gui_domain_exists() {
+        // launchctl may not kickstart on its own: sudo -n does it, without -k.
+        let (code, err, log) = mac_run(false, true, false, true, 90, 35);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "{log}");
+        assert_eq!(
+            log,
+            "cua status\nlaunchctl print gui/501\nlaunchctl kickstart gui/501/com.trycua.cua-driver\n\
+             sudo launchctl kickstart gui/501/com.trycua.cua-driver\ncua status\ncua mcp\n"
+        );
+        // It may: no sudo.
+        let (code, _, log) = mac_run(false, true, true, true, 90, 35);
+        assert_eq!(code, Some(0), "{log}");
+        assert!(!log.contains("sudo"), "{log}");
+    }
+
+    #[test]
+    fn mac_kickstarts_are_2_s_apart_then_k() {
+        // The daemon never comes up: plain kickstarts at 0 s and 2 s, -k at 3 s, the cap at 4 s.
+        let (code, err, log) = mac_run(false, true, true, false, 4, 3);
+        assert_eq!(code, Some(3), "{log}");
+        assert!(err.contains(NOT_READY_MARKER), "{err}");
+        let plain = log.lines().filter(|l| *l == "launchctl kickstart gui/501/com.trycua.cua-driver").count();
+        assert!((2..=3).contains(&plain), "{log}");
+        assert_eq!(log.matches("launchctl kickstart -k gui/501/com.trycua.cua-driver").count(), 1, "{log}");
+        assert!(!log.contains("cua mcp"), "{log}");
+    }
+
+    #[test]
+    fn mac_no_gui_domain_no_early_kickstart() {
+        // Before login only the -k restart runs, with sudo when launchctl alone is refused.
+        let (code, err, log) = mac_run(false, false, false, false, 2, 1);
+        assert_eq!(code, Some(3), "{log}");
+        assert!(err.contains(NOT_READY_MARKER), "{err}");
+        assert!(!log.contains("kickstart gui/"), "{log}");
+        assert!(log.contains("sudo launchctl kickstart -k gui/501/com.trycua.cua-driver"), "{log}");
+        assert!(!log.contains("cua mcp"), "{log}");
     }
 
     #[test]
