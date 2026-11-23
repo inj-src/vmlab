@@ -72,6 +72,9 @@
 # release build, opt/qemu/, has no user-mode network, so the system QEMU runs beside it as a
 # NAT box: its slirp backend and a socket backend share a hub, and the guest's NIC connects to
 # that socket. Guest: 10.0.2.15, host: 10.0.2.2. That arrangement is kept for both builds.
+# WIN_VENUS_NET=inproc (on trial): the lab's build has slirp, so the VM's own QEMU does the
+# network, the shared folder and the SSH port, and no NAT box runs. The guest's NIC is the same
+# (MAC, slot). The default, helper, is the NAT box.
 set -euo pipefail
 
 HERE=/vmlab/tools/vmlab/gpu/win3d
@@ -101,8 +104,9 @@ KEY=$HOME/.ssh/vmlab_ed25519
 ISO=$HERE/win3d-guest.iso
 SSH_PORT=2222 VNC_DISPLAY=11      # VNC on 127.0.0.1:5911
 VCPUS=0-7                         # host CPUs for the guest's CPUs: the fast cores (../pin.py)
-# The host folder both VMs see as \\10.0.2.4\qemu (in the guest: C:\share). The NAT helper's
-# QEMU starts a private smbd for it at each connection (../share-smbd.sh); the host's own
+# The host folder both VMs see as \\10.0.2.4\qemu (in the guest: C:\share). The QEMU that does
+# the network (the NAT helper, or the VM's own with WIN_VENUS_NET=inproc) starts a private
+# smbd for it at each connection (../share-smbd.sh); the host's own
 # Samba services are masked, so nothing serves it outside the VM. WIN_VENUS_SHARE=off: none.
 SHARE=${WIN_VENUS_SHARE:-/vmlab/share}
 # The build cache: a second disk, C:\cache in the guest, that `reset` and `commit` leave alone
@@ -189,6 +193,12 @@ start(){
       [[ -n ${WIN_VENUS_WINDOW_X11:-} ]] && env+=(--setenv=GDK_BACKEND=x11)
       ;;
   esac
+  local netmode=${WIN_VENUS_NET:-helper}
+  case $netmode in
+    helper) ;;
+    inproc) "$QEMU" -netdev help 2>/dev/null | grep -qx user || die "WIN_VENUS_NET=inproc: $QEMU has no user-mode network (build-qemu.sh --enable-slirp)" ;;
+    *) die "WIN_VENUS_NET is helper or inproc, not '$netmode'" ;;
+  esac
   [[ -n $node ]] || die "no $gpu render node"
   alive qemu && die "already running (win-venus.sh stop)"
   [[ $(virsh -c qemu:///system list --name | grep -c .) == 0 ]] || die "a libvirt VM is running: one VM at a time"
@@ -214,17 +224,24 @@ start(){
   [[ $window == none || -z $hideable ]] || mkfifo -m 600 "$S/window.ctl"
   # Both run as transient user units, so they outlive the terminal or app that started them,
   # and QEMU's stderr (the render server's messages too) lands in qemu.log.
-  local smb=
+  local smb= slirp net=()
   if [[ $SHARE != off && -x /usr/sbin/smbd ]]; then    # (../share-smbd.sh says why not smb=)
     mkdir -p "$SHARE"; rm -rf "$S/smb"; smb=",guestfwd=tcp:10.0.2.4:445-cmd:$HERE/../share-smbd.sh $SHARE $S/smb"
   fi
-  unit vmlab-win-venus-net "$S/net.log" \
-    /usr/bin/qemu-system-x86_64 -name win-venus-net -machine none -nodefaults -display none \
-    -netdev "user,id=u,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:$SSH_PORT-10.0.2.15:22$smb" \
-    -netdev "stream,id=s,server=on,addr.type=unix,addr.path=$S/net.sock" \
-    -netdev hubport,id=h0,hubid=0,netdev=u -netdev hubport,id=h1,hubid=0,netdev=s \
-    -pidfile "$S/net.pid"
-  up net || die "the NAT helper did not start: $(cat "$S/net.log")"
+  # The guest's network: slirp, with the SSH port and the shared folder (WIN_VENUS_NET above)
+  slirp="net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:$SSH_PORT-10.0.2.15:22$smb"
+  if [[ $netmode == inproc ]]; then
+    net=(-netdev "user,id=n,$slirp")
+  else
+    unit vmlab-win-venus-net "$S/net.log" \
+      /usr/bin/qemu-system-x86_64 -name win-venus-net -machine none -nodefaults -display none \
+      -netdev "user,id=u,$slirp" \
+      -netdev "stream,id=s,server=on,addr.type=unix,addr.path=$S/net.sock" \
+      -netdev hubport,id=h0,hubid=0,netdev=u -netdev hubport,id=h1,hubid=0,netdev=s \
+      -pidfile "$S/net.pid"
+    up net || die "the NAT helper did not start: $(cat "$S/net.log")"
+    net=(-netdev "stream,id=n,server=off,addr.type=unix,addr.path=$S/net.sock")
+  fi
 
   local cache=()
   if [[ $CACHE != off ]]; then
@@ -263,7 +280,7 @@ start(){
     -blockdev driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename="$DISK" \
     -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0,addr=1 "${cache[@]}" \
     "${cdrom[@]}" \
-    -netdev "stream,id=n,server=off,addr.type=unix,addr.path=$S/net.sock" \
+    "${net[@]}" \
     -device virtio-net-pci,netdev=n,mac=52:54:00:58:55:6c,addr=3 \
     -device virtio-serial-pci,addr=4 \
     -chardev socket,id=ga,path="$S/ga.sock",server=on,wait=off -device virtserialport,chardev=ga,name=org.qemu.guest_agent.0 \

@@ -58,6 +58,8 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   Only SSH is forwarded.
 - Logs: `/vmlab/run/win-venus/qemu.log` (QEMU and the render server). `WIN_VENUS_STRACE=FILE`
   records the system calls of QEMU's main thread.
+- **Switches on trial** (each off by default until it is tested on the VM):
+  - `WIN_VENUS_NET=inproc`: the VM's own QEMU does the network, SSH port and shared folder (as the Mac's does); no NAT box QEMU runs. Same NIC, MAC and slot. Default `helper`.
 
 ### The window (`--window`)
 
