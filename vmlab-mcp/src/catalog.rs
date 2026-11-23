@@ -134,13 +134,12 @@ pub const HIDDEN: &[&str] = &[
 /// Cua tools agents almost never call (1 call in 2,715 in the lab's transcripts up to
 /// 2026-11-22), left out of the list unless `VMLAB_MCP_EXTRA_TOOLS` names their group (or
 /// `all`, or the tool itself). Unlike `HIDDEN`, they stay in the cache and in `--fingerprints`.
+/// `get_guide` is as rare but stays: the texts of invoke_menu, drag, run_steps and the browser
+/// tools send agents to its topics.
 pub const EXTRA_GROUPS: &[(&str, &[&str])] = &[
     ("session", &["start_session", "list_sessions", "get_session", "end_session", "get_agent_cursor_state"]),
     ("recording", &["start_recording", "stop_recording", "get_recording_state"]),
-    (
-        "admin",
-        &["set_config", "get_config", "debug_window_info", "health_report", "check_permissions", "get_guide"],
-    ),
+    ("admin", &["set_config", "get_config", "debug_window_info", "health_report", "check_permissions"]),
     ("vision", &["parse_visual_regions"]),
 ];
 
