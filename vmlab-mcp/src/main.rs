@@ -7,6 +7,7 @@ mod catalog;
 mod child;
 mod descriptions;
 mod server;
+mod shot;
 mod upstream;
 
 use std::sync::Arc;

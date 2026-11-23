@@ -65,7 +65,7 @@ Per OS, read the matching file before your first command: [windows.md](windows.m
 
 ## The GUI: vmlab MCP tools
 
-Anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer) is driven with the `vmlab` MCP tools (`mcp__vmlab__*`; a tool search for `vmlab` finds them). Every tool takes `machine: "win"` or `"mac"`; the VM must be running. Elements come from `get_window_state`; act on them by `element_token`. Several actions in a row go in one `run_steps` call, which can read the window after the last step; a re-read with `since: "latest"` returns only what changed. To check or poll a window, read it with `include_screenshot: false`: the tree alone comes back in 35 ms in place of 420 on `win`, and in 31–57 ms in place of 124–320 on `mac`. Take the screenshot when you must see the pixels, and before a coordinate action.
+Anything a VM shows (an app's UI, a tray icon, a menu, a dialog, an installer) is driven with the `vmlab` MCP tools (`mcp__vmlab__*`; a tool search for `vmlab` finds them). Every tool takes `machine: "win"` or `"mac"`; the VM must be running. Elements come from `get_window_state`; act on them by `element_token`. Several actions in a row go in one `run_steps` call, which can read the window after the last step; a re-read with `since: "latest"` returns only what changed. To check or poll a window, read it with `include_screenshot: false`: the tree alone comes back in 35 ms in place of 420 on `win`, and in 31–57 ms in place of 124–320 on `mac`. Take the screenshot when you must see the window's pixels, and before a coordinate action; to look at the whole screen, `screenshot` (taken on the host, in milliseconds) is faster.
 
 The traps that cost agents the most turns:
 
@@ -78,4 +78,4 @@ Before the first GUI step, read [gui.md](gui.md): Electron windows, text fields,
 
 ## When something fails or is missing
 
-Read [troubleshooting.md](troubleshooting.md) before debugging from logs: start with `vm gui <name> shot`, then the known gotchas (clock drift, Electron's postinstall and pipes, GPU limits, process matching). When a VM lacks something the task needs (WebGPU and Direct3D 12 drawing on `win` are the known cases), you may work around it yourself; the file says how, and you tell the user what you changed.
+Read [troubleshooting.md](troubleshooting.md) before debugging from logs: start with a look at the screen (`screenshot`), then the known gotchas (clock drift, Electron's postinstall and pipes, GPU limits, process matching). When a VM lacks something the task needs (WebGPU and Direct3D 12 drawing on `win` are the known cases), you may work around it yourself; the file says how, and you tell the user what you changed.

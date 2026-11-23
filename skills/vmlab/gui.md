@@ -2,6 +2,13 @@
 
 The `vmlab` MCP tools are Cua Driver's computer-use tools for both VMs in one list, routed by the `machine` argument. Each agent session keeps its own connection per VM, so element tokens and Cua sessions last between calls until the VM reboots. While the VM is off, calls return `<name> is not running`. The first call after `vm start` can wait up to 90 s for the desktop. Cua's session, recording and admin tools are left out of the list; `VMLAB_MCP_EXTRA_TOOLS=recording` (a group, a tool's name, or `all`) in the MCP server's environment brings them back.
 
+## Looking at the screen: `screenshot`
+
+`screenshot` (machine `win` or `mac`) takes the screen on the host, from QEMU: 15–50 ms however busy the guest is, against hundreds of milliseconds to seconds for Cua's `get_desktop_state` or a `get_window_state` screenshot, and it works on a locked desktop, a UAC prompt or a hung guest. Use it to look; read a window with `get_window_state` and `include_screenshot: false`, and act on its element tokens.
+
+- `region: {x, y, width, height}` gives a part at full size (small text, a tray icon); `max_dimension: 800` a cheap whole-screen look.
+- Its pixels are screen pixels: click a point with scope `"desktop"` at the x,y the result's text gives (it says how to undo a `region` or `max_dimension`).
+
 ## Steps that need a specific way
 
 Found in the trials of 2026-11-14; each of these fails quietly the other way.
@@ -29,7 +36,7 @@ A second way, for checks of the page alone: start the app in the VM with `--remo
 
 `vm gui` knows nothing of what is on the screen; it works in pixels.
 
-- **The screen as it is:** `vm gui <name> shot <file.png>` shows a crash dialog, a prompt or the wrong window in front. Look at it before debugging a GUI test from logs.
+- **The screen as a file:** `vm gui <name> shot <file.png>` (`--crop X,Y,W,H`, `--max-dim N`) for a shot to keep or compare; to look, the MCP tool `screenshot` is the same picture. Look before debugging a GUI test from logs: a crash dialog, a prompt or the wrong window in front shows at once.
   - **Part of it:** `shot <file.png> --crop X,Y,W,H` saves only that region; `--max-dim N` shrinks the picture so neither side is over N pixels. Then the printed line gives the crop and the scale: the screen's x is X + x / scale. No PIL script of your own is needed.
 - **Input that must be a person's:** `vm gui <name> click X Y [right|double]`, `move X Y`, `drag X1 Y1 X2 Y2`, `type 'text'`, `key ctrl+s` use the VM's own keyboard and pointer at pixels of the screen (not of a cropped or shrunk shot). Use them to test a keyboard hook, a hotkey or a text expander: keys sent from inside Windows (Cua, SendKeys, SendInput) carry Windows' "injected" mark, and real ones never do.
   - **Key names:** QEMU's (`ret`, `esc`, `spc`, `tab`, `backspace`, `delete`, `up`, `pgdn`, `f4`, `meta_l`) and the common ones (`enter`, `escape`, `space`, `del`, `bs`, `pageup`, `cmd`, `win`, `option`, `alt`, `ctrl`, `shift`), in chords such as `ctrl+shift+escape` or `cmd+,`. `delete` is forward delete; the Mac's delete key is `backspace`. A wrong name stops the command before any key is sent.

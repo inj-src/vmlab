@@ -1,6 +1,7 @@
 //! Downstream side: the MCP server the agent talks to over stdio.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use rmcp::model::{
@@ -13,14 +14,16 @@ use rmcp::service::{Peer, PeerRequestOptions, RequestContext, RoleClient, RoleSe
 use rmcp::{ErrorData as McpError, ServerHandler};
 
 use crate::catalog::{self, Catalog, DiskCache, Machine};
+use crate::shot;
 use crate::upstream::{Config, Handle, Slot};
 
 const INSTRUCTIONS: &str = "\
 Drives the desktops of the vmlab test VMs through Cua Driver. Use these tools for everything \
 a VM shows: an app's UI, a tray icon, a menu, a dialog, an installer. They find elements by \
 name, click and right-click them, send hotkeys, and read window state and the accessibility \
-tree. The `vm gui` command works in bare pixels: keep it for a plain screenshot and for input \
-the guest must take for a person's (a keyboard hook or hotkey under test; Cua's keys carry \
+tree. `screenshot` takes the screen on the host in milliseconds, however busy the guest: use it \
+to look, and get_window_state with include_screenshot false to read a window. The `vm gui` \
+command works in bare pixels: keep it for input the guest must take for a person's (a keyboard hook or hotkey under test; Cua's keys carry \
 Windows' injected mark). Every tool takes a required \
 `machine` argument: \"win\" (Windows 11) or \"mac\" (macOS). The VM must already be running: \
 start it with `vm start <name>`. Load the `vmlab` skill first: the lab's rules and commands, and \
@@ -40,12 +43,22 @@ pub struct Proxy {
     served: StdMutex<Option<Vec<serde_json::Value>>>,
     /// Per VM, the session generation whose tools/list has been taken into account.
     seen_generation: [AtomicU64; 2],
+    /// The Cua sessions (VM, label; "" for none) whose last get_desktop_state image was
+    /// reduced: Cua scales later scope "desktop" x,y in them by that image's factor.
+    reduced_desktop: StdMutex<HashSet<(Machine, String)>>,
 }
 
 impl Proxy {
     pub fn new(cfg: Arc<Config>, slots: Arc<[Slot; 2]>) -> Proxy {
         let disk = DiskCache::new(cfg.cache_dir.clone());
-        Proxy { cfg, slots, disk, served: StdMutex::new(None), seen_generation: Default::default() }
+        Proxy {
+            cfg,
+            slots,
+            disk,
+            served: StdMutex::new(None),
+            seen_generation: Default::default(),
+            reduced_desktop: StdMutex::new(HashSet::new()),
+        }
     }
 
     /// Per VM: the list from this session's connect if there was one, else the cache file
@@ -53,6 +66,12 @@ impl Proxy {
     fn catalog(&self) -> Catalog {
         let list = |m: Machine| self.slots[m.index()].live_tools().unwrap_or_else(|| self.disk.get(m));
         Catalog { lists: [list(Machine::Win), list(Machine::Mac)] }
+    }
+
+    /// The list served: Cua's tools (unified) and vmlab-mcp's own `screenshot`, placed after
+    /// get_desktop_state.
+    fn tool_list(&self) -> Vec<serde_json::Value> {
+        with_native(self.catalog().unified())
     }
 
     async fn connect(
@@ -161,7 +180,9 @@ impl Proxy {
         if self.seen_generation[machine.index()].swap(generation, Ordering::SeqCst) == generation {
             return;
         }
-        let unified = self.catalog().unified();
+        // A new Cua process: its sessions start with no desktop capture.
+        self.reduced_desktop.lock().unwrap().retain(|(m, _)| *m != machine);
+        let unified = self.tool_list();
         let mut served = self.served.lock().unwrap();
         if served.as_ref().is_some_and(|s| *s != unified) {
             tracing::info!(%machine, "tool list changed; notifying the client");
@@ -193,6 +214,111 @@ impl Proxy {
         }
         Ok(catalog::check_tool(&self.catalog(), machine, tool))
     }
+}
+
+impl Proxy {
+    /// `screenshot`, served here from QEMU's display rather than forwarded to Cua.
+    async fn screenshot(
+        &self,
+        machine: Machine,
+        args: serde_json::Map<String, serde_json::Value>,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let a = match shot::parse_args(&args) {
+            Ok(a) => a,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
+        let t = std::time::Instant::now();
+        let r = tokio::select! {
+            r = shot::take(machine, &a, std::time::Duration::from_secs(10)) => r,
+            _ = ctx.ct.cancelled() => return Err(cancelled()),
+        };
+        let mut shot = match r {
+            Ok(s) => s,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
+        // Cua would scale this image's screen pixels by an earlier reduced capture's factor
+        // (macOS's Cua reduces every capture without a max_image_dimension to 1365 pixels):
+        // a full-size get_desktop_state (written in the guest, not sent) clears it. Slow on a
+        // busy guest, so only when that session has one.
+        let key = (machine, a.session.clone().unwrap_or_default());
+        if self.reduced_desktop.lock().unwrap().contains(&key) {
+            let mut reset = serde_json::Map::new();
+            let out = match machine {
+                Machine::Win => r"C:\Windows\Temp\vmlab-mcp-desktop.png",
+                Machine::Mac => "/tmp/vmlab-mcp-desktop.png",
+            };
+            reset.insert("screenshot_out_file".into(), out.into());
+            // An explicit limit above any screen: macOS's Cua shrinks to 1365 pixels without one.
+            reset.insert("max_image_dimension".into(), 16384.into());
+            if let Some(s) = &a.session {
+                reset.insert("session".into(), s.clone().into());
+            }
+            let p = CallToolRequestParams::new("get_desktop_state").with_arguments(reset);
+            match self.forward(machine, p, ctx).await? {
+                CallToolResponse::Complete(c) if c.is_error != Some(true) => {
+                    self.reduced_desktop.lock().unwrap().remove(&key);
+                    shot.text.push_str(
+                        " (This Cua session's scaling from an earlier reduced get_desktop_state \
+                         image was reset: x,y read off that image no longer map.)",
+                    );
+                }
+                _ => shot.text.push_str(
+                    " Warning: an earlier get_desktop_state image in this Cua session was \
+                     reduced, and Cua still scales scope \"desktop\" x,y by its factor; call \
+                     get_desktop_state without max_image_dimension before clicking by these pixels.",
+                ),
+            }
+        }
+        tracing::info!(%machine, tool = shot::NAME, ms = t.elapsed().as_millis() as u64, ok = true, "call");
+        let image = base64_encode(&shot.bytes);
+        Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+            ContentBlock::image(image, shot.mime),
+            ContentBlock::text(shot.text),
+        ])))
+    }
+}
+
+/// Cua's session for a call: its `session` label, "" for the default one.
+fn session_key(args: &serde_json::Map<String, serde_json::Value>) -> String {
+    args.get("session").and_then(|v| v.as_str()).unwrap_or_default().to_string()
+}
+
+/// Whether a get_desktop_state result's image is smaller than the screen (Cua then reports
+/// `screenshot_original_width`, in its structured content or its JSON text block).
+fn desktop_reduced(r: &CallToolResult) -> bool {
+    let reduced = |v: &serde_json::Value| {
+        let (orig, got) = (v["screenshot_original_width"].as_u64(), v["screenshot_width"].as_u64());
+        matches!((orig, got), (Some(o), Some(g)) if g < o)
+    };
+    if r.structured_content.as_ref().is_some_and(reduced) {
+        return true;
+    }
+    r.content.iter().filter_map(|b| b.as_text()).any(|t| {
+        serde_json::from_str::<serde_json::Value>(&t.text).is_ok_and(|v| reduced(&v))
+    })
+}
+
+/// Cua's list with `screenshot` added after get_desktop_state (or at the end), replacing any
+/// tool of that name Cua may add one day.
+fn with_native(mut tools: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    tools.retain(|t| t["name"] != shot::NAME);
+    let at = tools.iter().position(|t| t["name"] == "get_desktop_state").map_or(tools.len(), |i| i + 1);
+    tools.insert(at, shot::tool());
+    tools
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 /// One line of advice for the Cua errors that cost agents the most turns, appended to the text
@@ -310,7 +436,7 @@ impl ServerHandler for Proxy {
         _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let unified = self.catalog().unified();
+        let unified = self.tool_list();
         *self.served.lock().unwrap() = Some(unified.clone());
         serde_json::from_value(serde_json::json!({ "tools": unified }))
             .map_err(|e| McpError::internal_error(format!("bad tool list: {e}"), None))
@@ -326,13 +452,27 @@ impl ServerHandler for Proxy {
             Ok(r) => r,
             Err(msg) => return Ok(tool_error(msg)),
         };
+        if request.name == shot::NAME {
+            return self.screenshot(machine, args, &ctx).await;
+        }
         if let Err(msg) = self.check(machine, &request.name, &ctx).await? {
             return Ok(tool_error(msg));
         }
+        let desktop_session = (request.name == "get_desktop_state").then(|| session_key(&args));
         request.arguments = Some(args);
         let t = std::time::Instant::now();
         let name = request.name.clone();
         let r = self.forward(machine, request, &ctx).await;
+        if let (Some(key), Ok(CallToolResponse::Complete(c))) = (desktop_session, &r) {
+            if c.is_error != Some(true) {
+                let mut set = self.reduced_desktop.lock().unwrap();
+                if desktop_reduced(c) {
+                    set.insert((machine, key));
+                } else {
+                    set.remove(&(machine, key));
+                }
+            }
+        }
         tracing::info!(%machine, tool = %name, ms = t.elapsed().as_millis() as u64,
             ok = matches!(&r, Ok(CallToolResponse::Complete(c)) if c.is_error != Some(true)), "call");
         r
@@ -351,6 +491,34 @@ mod tests {
 
     fn text(r: &CallToolResult) -> &str {
         r.content[0].as_text().unwrap().text.as_str()
+    }
+
+    #[test]
+    fn base64_matches_rfc4648() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn reduced_desktop_captures_are_seen() {
+        let r = |j: &str| CallToolResult::success(vec![ContentBlock::text(j)]);
+        assert!(desktop_reduced(&r(r#"{"screenshot_width":400,"screenshot_original_width":1920}"#)));
+        assert!(!desktop_reduced(&r(r#"{"screenshot_width":1920,"screen_width":1920}"#)));
+        let mut s = CallToolResult::success(vec![]);
+        s.structured_content = Some(serde_json::json!({"screenshot_width": 800, "screenshot_original_width": 1600}));
+        assert!(desktop_reduced(&s));
+    }
+
+    #[test]
+    fn screenshot_follows_get_desktop_state() {
+        let t = |n: &str| serde_json::json!({"name": n});
+        let l = with_native(vec![t("click"), t("get_desktop_state"), t("screenshot"), t("zoom")]);
+        let names: Vec<_> = l.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["click", "get_desktop_state", "screenshot", "zoom"]);
+        assert_eq!(l[2]["inputSchema"]["required"][0], "machine");
+        assert_eq!(with_native(vec![]).len(), 1);
     }
 
     #[test]
