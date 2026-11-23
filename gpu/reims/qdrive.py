@@ -35,6 +35,7 @@ class Qmp:
     def __init__(self, path):
         self.s = socket.socket(socket.AF_UNIX); self.s.settimeout(30); self.s.connect(path)
         self.f = self.s.makefile('rw'); self.f.readline(); self.cmd('qmp_capabilities')
+        self._size = None
 
     def cmd(self, execute, **arguments):
         msg = {'execute': execute}
@@ -58,10 +59,20 @@ class Qmp:
         for q in reversed(qcodes): self.events(ev(q, False))
 
     def size(self):
-        if VNC: return vnc_size(int(VNC))
-        with tempfile.TemporaryDirectory(dir='/vmlab/run') as d:
-            w, h, _ = read_ppm(self.shot_ppm(os.path.join(d, 's.ppm')))
-        return w, h
+        """The screen's size, read once per process. QEMU's QMP has no query for a console's
+        size (11.1: query-display-options names the display, not its size), and the Mac's
+        launcher writes no size file (its size follows the window), so without VNC it takes
+        one screendump and reads only its header. A shot sets it too (shot_size)."""
+        if not self._size:
+            if VNC: self._size = vnc_size(int(VNC))
+            else:
+                os.makedirs('/vmlab/run', exist_ok=True)
+                with tempfile.TemporaryDirectory(dir='/vmlab/run') as d:
+                    self._size = ppm_size(self.shot_ppm(os.path.join(d, 's.ppm')))
+        return self._size
+
+    def shot_size(self, w, h):
+        self._size = (w, h)
 
     def shot_ppm(self, path):
         self.cmd('screendump', filename=path, device='gfx', head=0)
@@ -91,14 +102,27 @@ def vnc_size(port):
     return w, h
 
 
+def ppm_header(data):
+    """P6, width, height, max value: (width, height, where the pixels start)."""
+    parts, pos = [], 0
+    while len(parts) < 4:
+        end = pos
+        while data[end:end + 1] not in (b' ', b'\n', b'\t'):
+            if end >= len(data): raise SystemExit('screendump: not a PPM file')
+            end += 1
+        parts.append(data[pos:end]); pos = end + 1
+    return int(parts[1]), int(parts[2]), pos
+
+
+def ppm_size(path):
+    with open(path, 'rb') as f: w, h, _ = ppm_header(f.read(64))
+    return w, h
+
+
 def read_ppm(path):
     data = open(path, 'rb').read()
-    parts, pos = [], 0
-    while len(parts) < 4:                      # P6, width, height, max value
-        end = pos
-        while data[end:end + 1] not in (b' ', b'\n', b'\t'): end += 1
-        parts.append(data[pos:end]); pos = end + 1
-    return int(parts[1]), int(parts[2]), data[pos:]
+    w, h, pos = ppm_header(data)
+    return w, h, data[pos:]
 
 
 def main():
