@@ -26,7 +26,7 @@ person's: Windows does not mark them as injected, as it does input sent from ins
 
 VM is a reims VM name (its directory under the reims data dir) or a path to a qmp.sock.
 QDRIVE_VNC=PORT: the picture and its size come from the VM's VNC server on 127.0.0.1:PORT
-(the Windows VM: QMP's screendump has no picture of a guest that draws through the GPU).
+(the Windows VM; since its qemu-patches/0017 QMP's screendump has that picture too).
 """
 import difflib, json, os, re, shlex, socket, struct, sys, tempfile, time
 

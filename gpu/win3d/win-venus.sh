@@ -573,7 +573,7 @@ case ${1:-} in
   window) alive qemu && [[ -p $S/window.ctl ]] && cat "$S/window.state" 2>/dev/null || echo none ;;
   view) if alive qemu && [[ -p $S/window.ctl ]]; then window_ask show "$S/window.ctl" "$S/window.state"
         else exec remote-viewer "vnc://127.0.0.1:$((5900 + VNC_DISPLAY))"; fi ;;
-  # over VNC: QMP's screendump has no picture of a guest that draws through the GPU ("no surface")
+  # over VNC, which works with any build (qemu-patches/0017 gives QMP's screendump the picture too)
   shot) [[ -n ${2:-} ]] || die "usage: win-venus.sh shot <file.png>"; python3 -I "$HERE/vncshot.py" $((5900 + VNC_DISPLAY)) "$2" ;;
   d3d12) [[ ${2:-status} =~ ^(native|bridge|status)$ ]] || die "usage: win-venus.sh d3d12 [bridge|native|status]"
     "$0" scp "$HERE/guest-scripts/d3d12-mode.ps1" dev@127.0.0.1:C:/vmlab/

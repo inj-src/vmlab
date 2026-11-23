@@ -1,0 +1,235 @@
+egl-headless: vmlab: frames read back only while someone looks, and screendump of the GPU picture
+
+Each time the guest flushed its screen, egl-headless copied the whole 1920x1080 frame from the
+GPU into memory (glReadPixels, 8 MB) on QEMU's main thread, the thread that also runs the
+network (SSH, the shared folder). With the window hidden and no VNC client, nobody looked at
+that copy: a 60 fps animation in a hidden VM cost the main thread 28-35% of a CPU, against
+10-12% with this patch.
+- The copy is made only while the GTK window is shown or a VNC client is connected. Frames
+  that come meanwhile mark it stale; the first viewer to arrive gets one fresh copy, and the
+  whole screen as changed. VMLAB_EGL_EAGER=1 copies every frame, as before.
+- screendump, which answered "no surface" while the guest draws through the GPU, now takes
+  egl-headless's copy, brought up to date first: a screenshot without the guest's help (about
+  5-14 ms as PPM; QEMU's own PNG encoding takes about 190 ms).
+
+diff --git a/include/ui/console.h b/include/ui/console.h
+index 3634956..b05ea81 100644
+--- a/include/ui/console.h
++++ b/include/ui/console.h
+@@ -321,6 +321,18 @@ int qemu_console_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
+ 
+ bool qemu_console_has_gl(QemuConsole *con);
+ 
++/*
++ * vmlab: egl-headless reads each GPU frame back only while someone looks at it: the GTK window
++ * shown, or a VNC client. vmlab_readback() brings a console's copy up to date and returns it
++ * (NULL: not a GPU-drawn console), for screendump; con NULL brings every console's up to date.
++ */
++typedef DisplaySurface *(*VmlabReadbackFn)(QemuConsole *con);
++void vmlab_set_readback(VmlabReadbackFn fn);
++DisplaySurface *vmlab_readback(QemuConsole *con);
++void vmlab_viewer_window(bool shown);
++void vmlab_viewer_vnc(int delta);
++bool vmlab_has_viewers(void);
++
+ enum {
+     GRAPHIC_FLAGS_NONE     = 0,
+     /* require a console/display with GL callbacks */
+diff --git a/ui/console.c b/ui/console.c
+index b735717..2cef684 100644
+--- a/ui/console.c
++++ b/ui/console.c
+@@ -75,6 +75,46 @@ struct DisplayState {
+ };
+ 
+ static DisplayState *display_state;
++
++/* vmlab: who looks at egl-headless's read-back frames (include/ui/console.h) */
++static VmlabReadbackFn vmlab_readback_fn;
++static bool vmlab_window_shown;
++static int vmlab_vnc_viewers;
++
++void vmlab_set_readback(VmlabReadbackFn fn)
++{
++    vmlab_readback_fn = fn;
++}
++
++DisplaySurface *vmlab_readback(QemuConsole *con)
++{
++    return vmlab_readback_fn ? vmlab_readback_fn(con) : NULL;
++}
++
++bool vmlab_has_viewers(void)
++{
++    return vmlab_window_shown || vmlab_vnc_viewers > 0;
++}
++
++void vmlab_viewer_window(bool shown)
++{
++    bool had = vmlab_has_viewers();
++
++    vmlab_window_shown = shown;
++    if (!had && vmlab_has_viewers()) {
++        vmlab_readback(NULL);
++    }
++}
++
++void vmlab_viewer_vnc(int delta)
++{
++    bool had = vmlab_has_viewers();
++
++    vmlab_vnc_viewers = MAX(vmlab_vnc_viewers + delta, 0);
++    if (!had && vmlab_has_viewers()) {
++        vmlab_readback(NULL);
++    }
++}
+ static QTAILQ_HEAD(, QemuConsole) consoles =
+     QTAILQ_HEAD_INITIALIZER(consoles);
+ 
+diff --git a/ui/egl-headless.c b/ui/egl-headless.c
+index 5dfd5ed..de546bf 100644
+--- a/ui/egl-headless.c
++++ b/ui/egl-headless.c
+@@ -18,9 +18,11 @@ typedef struct egl_dpy {
+     bool y_0_top;
+     uint32_t pos_x;
+     uint32_t pos_y;
++    bool stale;         /* vmlab: frames came while nobody looked; ds is behind */
+ } egl_dpy;
+ 
+ static GPtrArray *egl_dpys;
++static bool egl_eager;  /* vmlab: VMLAB_EGL_EAGER=1 reads every frame back, as before */
+ 
+ /* ------------------------------------------------------------------ */
+ 
+@@ -151,15 +153,9 @@ static void egl_cursor_position(DisplayChangeListener *dcl,
+     edpy->pos_y = pos_y;
+ }
+ 
+-static void egl_scanout_flush(DisplayChangeListener *dcl,
+-                              uint32_t x, uint32_t y,
+-                              uint32_t w, uint32_t h)
++/* vmlab: the frame into edpy->ds, from the GPU; the GL work egl_scanout_flush did each time */
++static void egl_read_frame(egl_dpy *edpy)
+ {
+-    egl_dpy *edpy = container_of(dcl, egl_dpy, dcl);
+-
+-    if (!edpy->guest_fb.texture || !edpy->ds) {
+-        return;
+-    }
+     assert(surface_format(edpy->ds) == PIXMAN_x8r8g8b8);
+ 
+     eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+@@ -179,7 +175,55 @@ static void egl_scanout_flush(DisplayChangeListener *dcl,
+     }
+ 
+     egl_fb_read(edpy->ds, &edpy->blit_fb);
+-    qemu_console_update(edpy->dcl.con, x, y, w, h);
++    edpy->stale = false;
++}
++
++/*
++ * vmlab: reading a frame back costs QEMU's main thread a full-screen glReadPixels; with the
++ * window hidden and no VNC client nobody sees it, so the frame waits until someone asks
++ * (vmlab_readback: a viewer arrives, or screendump).
++ */
++static void egl_scanout_flush(DisplayChangeListener *dcl,
++                              uint32_t x, uint32_t y,
++                              uint32_t w, uint32_t h)
++{
++    egl_dpy *edpy = container_of(dcl, egl_dpy, dcl);
++    bool was_stale = edpy->stale;
++
++    if (!edpy->guest_fb.texture || !edpy->ds) {
++        return;
++    }
++    if (!egl_eager && !vmlab_has_viewers()) {
++        edpy->stale = true;
++        return;
++    }
++    egl_read_frame(edpy);
++    if (was_stale) {
++        qemu_console_update(edpy->dcl.con, 0, 0,
++                            surface_width(edpy->ds), surface_height(edpy->ds));
++    } else {
++        qemu_console_update(edpy->dcl.con, x, y, w, h);
++    }
++}
++
++static DisplaySurface *egl_readback(QemuConsole *con)
++{
++    DisplaySurface *found = NULL;
++
++    for (guint i = 0; egl_dpys && i < egl_dpys->len; i++) {
++        egl_dpy *edpy = g_ptr_array_index(egl_dpys, i);
++
++        if ((con && edpy->dcl.con != con) || !edpy->guest_fb.texture || !edpy->ds) {
++            continue;
++        }
++        if (edpy->stale) {
++            egl_read_frame(edpy);
++            qemu_console_update(edpy->dcl.con, 0, 0,
++                                surface_width(edpy->ds), surface_height(edpy->ds));
++        }
++        found = edpy->ds;
++    }
++    return found;
+ }
+ 
+ static const DisplayChangeListenerOps egl_ops = {
+@@ -239,6 +283,8 @@ static void egl_headless_init(DisplayState *ds, DisplayOptions *opts)
+     int idx;
+ 
+     egl_dpys = g_ptr_array_new();
++    egl_eager = g_strcmp0(g_getenv("VMLAB_EGL_EAGER"), "1") == 0;
++    vmlab_set_readback(egl_readback);
+ 
+     eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                    EGL_NO_SURFACE, qemu_egl_rn_ctx);
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 32bb63c..572a006 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -3320,6 +3320,8 @@ static void gd_vmlab_window_state(GtkDisplayState *s)
+ {
+     const char *path = g_getenv("VMLAB_WINDOW_STATE_FILE");
+ 
++    vmlab_viewer_window(gtk_widget_get_visible(s->window));
++
+     if (path) {
+         g_file_set_contents(path, gtk_widget_get_visible(s->window) ? "shown\n" : "hidden\n",
+                             -1, NULL);
+diff --git a/ui/ui-qmp-cmds.c b/ui/ui-qmp-cmds.c
+index 753cc2b..6a93f92 100644
+--- a/ui/ui-qmp-cmds.c
++++ b/ui/ui-qmp-cmds.c
+@@ -357,6 +357,9 @@ qmp_screendump(const char *filename, const char *device,
+      * an image ref before that.
+      */
+     surface = qemu_console_surface(con);
++    if (!surface) {
++        surface = vmlab_readback(con);  /* vmlab: GPU-drawn, egl-headless's copy */
++    }
+     if (!surface) {
+         error_setg(errp, "no surface");
+         object_unref(con);
+diff --git a/ui/vnc.c b/ui/vnc.c
+index 656768f..fc60518 100644
+--- a/ui/vnc.c
++++ b/ui/vnc.c
+@@ -1322,6 +1322,7 @@ static void vnc_disconnect_finish(VncState *vs)
+         qemu_remove_mouse_mode_change_notifier(&vs->mouse_mode_notifier);
+     }
+     QTAILQ_REMOVE(&vs->vd->clients, vs, next);
++    vmlab_viewer_vnc(-1);
+     if (QTAILQ_EMPTY(&vs->vd->clients)) {
+         /* last client gone */
+         vnc_update_server_surface(vs->vd);
+@@ -3366,6 +3367,7 @@ static void vnc_connect(VncDisplay *vd, QIOChannelSocket *sioc,
+     vs->bh = qemu_bh_new(vnc_jobs_bh, vs);
+ 
+     QTAILQ_INSERT_TAIL(&vd->clients, vs, next);
++    vmlab_viewer_vnc(1);
+     if (first_client) {
+         vnc_update_server_surface(vd);
+     }

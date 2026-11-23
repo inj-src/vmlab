@@ -208,6 +208,12 @@ the old icon for as long as it is open.
     button hides it and the picture comes back at the next `show`.
   - `0016`: the guest's arrow is drawn into the picture where the host's pointer is not driving
     it ("The pointer" below).
+  - `0017`: egl-headless reads a frame back from the GPU only while the window is shown or a
+    VNC client is connected (a hidden 60 fps animation: QEMU's main thread 28-35% → 10-12% of a
+    CPU), and QMP's screendump, which said "no surface" while the guest draws through the GPU,
+    gets that picture, brought up to date first (5-14 ms as PPM). `VMLAB_EGL_EAGER=1` reads
+    every frame back as before. Checked 2026-11-23: in the rig the shown window gives the same
+    picture as without it, VNC shots are current, and screendump follows the screen.
   Checked 2026-11-12: `0001` to `0013` on the release's sources give the built files byte for
   byte.
     To try a window change without a guest: `build/qemu-system-x86_64 -L build/pc-bios
