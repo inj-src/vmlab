@@ -970,7 +970,13 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   (`MAC26_DISK=virtio`, its default; `sata` keeps reims' emulated SATA disk, the stable lane's
   default). macOS has the driver; OpenCore's disk stays on SATA. Uncached 4 KiB random reads:
   29 µs each (34,000 a second; 81,000 with 4 threads) against 183 to 205 µs on SATA (5,000;
-  15,000).
+  15,000). `MAC26_DISK_CACHE=none` (2026-11-23, not yet the default: on trial) puts both disks
+  on `cache.direct=on,aio=io_uring`, as the Windows VM's, and the system disk on
+  `discard=unmap`, so Linux does not cache what macOS caches already; the default keeps QEMU's
+  writeback cache.
+- **Sound**: only when the window starts shown (2026-11-23), as on Windows. Started hidden or
+  headless, the audio backend is `none`: nobody listens, and PipeWire's stream overflowed into
+  `logs/qemu.log` about 190 lines a second. `MAC26_AUDIO=pipewire` keeps sound always.
 - **How fast apps open** (dev lane, 2026-11-11; `bench/guest-perf/launchtime.swift` times from
   launch to the first window):
   - an app opened before since boot: Calculator 0.7 s, TextEdit 0.5 s, Safari 0.9 s, Chrome

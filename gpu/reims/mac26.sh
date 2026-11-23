@@ -134,6 +134,18 @@ start(){
     sed -i "s|^  -device 'ide-hd,bus=sata.3,drive=disk,rotation_rate=1' \\\\\$|  -object 'iothread,id=io0' \\\\\n  -device 'virtio-blk-pci,drive=disk,iothread=io0,addr=0x8' \\\\|" "$V/run.sh"
     grep -q "virtio-blk-pci,drive=disk" "$V/run.sh" || die "could not make the disk virtio-blk in run.sh"
   fi
+  # MAC26_DISK_CACHE=none: both disks bypass the host's page cache (O_DIRECT, io_uring), as the
+  # Windows VM's do, and the system disk passes APFS's TRIM on (discard=unmap). Otherwise a
+  # disk read is cached twice, by macOS and by Linux, and Linux's copy pushes host programs
+  # out of memory. Default: QEMU's (writeback, threads).
+  local dcache=${MAC26_DISK_CACHE:-default} dopts=""
+  case $dcache in
+    none) dopts="cache.direct=on,aio=io_uring,discard=unmap,"
+      sed -i "s|^  -drive 'id=disk,if=none,format=qcow2,|&$dopts|" "$V/run.sh"
+      grep -q "id=disk,if=none,format=qcow2,$dopts" "$V/run.sh" || die "could not set the disk's cache mode in run.sh" ;;
+    default) ;;
+    *) die "MAC26_DISK_CACHE is none or default, not $dcache" ;;
+  esac
   # The firmware with a quiet start, as the Windows VM's (../win3d/firmware/make-firmware.py):
   # no TianoCore logo and no "BdsDxe: loading Boot..." lines, so the screen stays black until
   # macOS draws. reims' own OVMF_CODE.fd stays as it is; the quiet one is made from it, and
@@ -164,9 +176,10 @@ start(){
   if [[ $cache != off ]]; then
     mkdir -p "$cache"
     if [[ ! -f $cache/mac.qcow2 ]]; then
-      if [[ -f $empty ]]; then cp "$empty" "$cache/mac.qcow2"; else qemu-img create -q -f qcow2 "$cache/mac.qcow2" 25G; fi
+      if [[ -f $empty ]]; then cp "$empty" "$cache/mac.qcow2"; else qemu-img create -q -f qcow2 -o extended_l2=on "$cache/mac.qcow2" 25G; fi
     fi
-    sed -i "s|^  -netdev 'user,id=net0,|  -drive 'id=cache,if=none,format=qcow2,discard=unmap,file=$cache/mac.qcow2' \\\\\n  -device 'virtio-blk-pci,drive=cache,serial=vmlabcache,addr=0xa' \\\\\n&|" "$V/run.sh"
+    local cio=""; [[ $dcache == none && $disk == virtio ]] && cio=",iothread=io0"
+    sed -i "s|^  -netdev 'user,id=net0,|  -drive 'id=cache,if=none,format=qcow2,${dopts%discard=unmap,}discard=unmap,file=$cache/mac.qcow2' \\\\\n  -device 'virtio-blk-pci,drive=cache,serial=vmlabcache$cio,addr=0xa' \\\\\n&|" "$V/run.sh"
     grep -q "virtio-blk-pci,drive=cache" "$V/run.sh" || die "could not give run.sh the build cache disk"
   fi
   # MAC26_CPU_EXTRA: more flags for the guest CPU, e.g. +sha-ni
@@ -177,6 +190,13 @@ start(){
   [[ -n ${MAC26_STATS:-} ]] && sed -i 's|^export REIMS_VGPU_LOG=|export REIMS_VGPU_STATS=1\n&|' "$V/run.sh"
   # MAC26_TRACE=FILE: reims' timeline of guest doorbells, interrupts, commits and presents (large).
   [[ -n ${MAC26_TRACE:-} ]] && sed -i "s|^export REIMS_VGPU_LOG=|export REIMS_VGPU_TRACE=$MAC26_TRACE\n&|" "$V/run.sh"
+  # Sound only for a window started shown, as the Windows VM has it: hidden or headless, nobody
+  # listens, and PipeWire's stream overflowed into qemu.log ~190 lines a second.
+  # MAC26_AUDIO=pipewire keeps sound always.
+  if [[ $window != shown && ${MAC26_AUDIO:-} != pipewire ]]; then
+    sed -i "s|^  -audiodev 'pipewire,id=snd0'|  -audiodev 'none,id=snd0'|" "$V/run.sh"
+    grep -q "^  -audiodev 'none,id=snd0'" "$V/run.sh" || die "could not turn the sound off in run.sh"
+  fi
   local env=()
   systemctl --user stop vmlab-tray-mac 2>/dev/null || true
   rm -f "$V/window.ctl" "$V/window.state"
@@ -256,10 +276,10 @@ start(){
     -p StandardOutput="append:$V/logs/qemu.log" -p StandardError="append:$V/logs/qemu.log" "${thp[@]}" "$V/run.sh"
   if [[ $window != none ]]; then agent_link; [[ -z $hideable ]] || tray mac "$UNIT" "$V/window.state"; fi
   for _ in $(seq 20); do python3 -I "${0%/*}/../pin.py" "$V/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
-  for _ in $(seq 90); do
+  for _ in $(seq 180); do
     alive || die "QEMU ended: $(tail -3 "$V/logs/qemu.log")"
     guest true 2>/dev/null && { echo "started: ssh port $PORT, log $V/logs/qemu.log"; return; }
-    sleep 2
+    sleep 1
   done
   die "no SSH after 3 min (mac26.sh gui shot FILE.png shows the screen)"
 }
@@ -287,7 +307,7 @@ agent_link(){
 stop(){
   alive || { echo "not running"; return; }
   guest 'sudo shutdown -h now' > /dev/null 2>&1 || true
-  for _ in $(seq 45); do alive || { echo stopped; return; }; sleep 2; done
+  for _ in $(seq 180); do alive || { echo stopped; return; }; sleep 0.5; done
   echo "macOS did not shut down in 90 s, powering off"; systemctl --user stop "$UNIT"; echo stopped
 }
 
