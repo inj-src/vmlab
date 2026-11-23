@@ -56,7 +56,11 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 
 `host/` records what was changed as root; nothing installs it.
 
-- `/etc/fstab`: the VM SSD at `/vmlab` by label (`host/etc/fstab.vmlab-line`).
+- `/etc/fstab`: the VM SSD at `/vmlab` by label (`host/etc/fstab.vmlab-line`), without online
+  `discard` since 2026-11-23: the weekly `fstrim.timer` trims it.
+- Compressed swap in memory: `host/install-zram.sh` ran once as root (2026-11-23). zram0, zstd,
+  half the RAM up to 12 GB, used before `/swap.img` (`host/etc/systemd/zram-generator.conf`,
+  `host/etc/sysctl.d/91-vmlab-zram.conf`: swappiness 100, page-cluster 0).
 - `host/etc/`: `modprobe.d/kvm.conf` (KVM ignores the MSRs it does not know, which macOS reads),
   `tmpfiles.d/vmlab-thp.conf` (huge pages for shared memory when a program asks) and
   `sysctl.d/90-vmlab-reims.conf` (`vm.max_map_count`, for reims-vgpu on NVIDIA).
