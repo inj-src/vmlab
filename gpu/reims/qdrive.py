@@ -7,7 +7,7 @@ person's: Windows does not mark them as injected, as it does input sent from ins
   qdrive.py VM click X Y [right|double] click at a pixel of that screenshot
   qdrive.py VM move X Y                 move the pointer
   qdrive.py VM drag X1 Y1 X2 Y2         press at one point, release at the other
-  qdrive.py VM type 'text'              type US-keyboard text
+  qdrive.py VM type 'text'              type US-keyboard text (ASCII; other text: paste it)
   qdrive.py VM key cmd+q [ret ...]      key chords: cmd (= win), opt (= alt), ctrl, shift + a
                                         QEMU key name (ret, esc, tab, f4, up, delete, a, 1 ...),
                                         a common one (escape, enter, space, del, bs, pageup,
@@ -74,6 +74,24 @@ def chord(text):
                              "escape, enter, space, del, pageup, cmd, option ..., or one character")
         if k not in keys: keys.append(k)
     return keys
+
+
+def type_keys(text):
+    """The chords that type text on a US keyboard, one per character. A character with none
+    stops it before any key is sent."""
+    out = []
+    for i, ch in enumerate(text):
+        if ch in PLAIN: out.append([PLAIN[ch]])
+        elif ch in SHIFTED: out.append(['shift', SHIFTED[ch]])
+        elif ch.isascii() and ch.isupper(): out.append(['shift', ch.lower()])
+        elif ch.isascii() and ch.isalnum(): out.append([ch])
+        else:
+            raise SystemExit(
+                f'type: no key for {ch!r} (U+{ord(ch):04X}, character {i + 1}); nothing was typed. type sends '
+                'US-keyboard ASCII only (letters, digits, punctuation, space, tab, newline). For other text, put it '
+                'on the guest\'s clipboard with the vmlab MCP tool clipboard_write (machine "win" or "mac"), check '
+                'it with clipboard_read, then paste: vm gui win key ctrl+v, vm gui mac key cmd+v')
+    return out
 
 
 class Qmp:
@@ -174,6 +192,7 @@ def main():
     if len(sys.argv) < 3: raise SystemExit(__doc__)
     vm, verb, args = sys.argv[1], sys.argv[2], sys.argv[3:]
     chords = [chord(c) for c in args] if verb == 'key' else []      # a wrong name stops before any key
+    typed = type_keys(args[0]) if verb == 'type' else []            # so does a character with no key
     q = Qmp(vm if '/' in vm else f'{VMS}/{vm}/qmp.sock')
     if verb == 'size':
         print('%dx%d' % q.size())
@@ -199,12 +218,7 @@ def main():
         for i in range(1, 11): q.pointer(x1 + (x2 - x1) * i // 10, y1 + (y2 - y1) * i // 10)
         time.sleep(0.2); q.button(False)
     elif verb == 'type':
-        for ch in args[0]:
-            if ch in PLAIN: q.key(PLAIN[ch])
-            elif ch in SHIFTED: q.key('shift', SHIFTED[ch])
-            elif ch.isupper(): q.key('shift', ch.lower())
-            elif ch.isalnum(): q.key(ch)
-            else: raise SystemExit(f'type: no key for {ch!r}')
+        for keys in typed: q.key(*keys)
     elif verb == 'key':
         for keys in chords: q.key(*keys)
     elif verb == 'qmp':

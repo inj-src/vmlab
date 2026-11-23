@@ -120,5 +120,21 @@ class KeyNameTest(unittest.TestCase):
         self.assertEqual(fake.events, [])
 
 
+class TypeTest(unittest.TestCase):
+    def test_ascii(self):
+        self.assertEqual(qdrive.type_keys('aB1 !\n'), [['a'], ['shift', 'b'], ['1'], ['spc'], ['shift', '1'], ['ret']])
+
+    def test_no_key_says_what_to_do(self):
+        for text in ('café', 'naïve', '²', 'Ä', '\u2014', '\r'):
+            with self.assertRaises(SystemExit) as e: qdrive.type_keys(text)
+            msg = str(e.exception)
+            self.assertIn('ASCII only', msg); self.assertIn('clipboard_write', msg); self.assertIn('ctrl+v', msg)
+
+    def test_nothing_is_typed(self):
+        fake = FakeQmp(); self.addCleanup(fake.close)
+        with self.assertRaises(SystemExit): run(fake, 'type', 'abc é')
+        self.assertEqual(fake.events, [])
+
+
 if __name__ == '__main__':
     unittest.main()
