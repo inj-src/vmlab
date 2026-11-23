@@ -72,4 +72,4 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
   serves nothing by itself; QEMU starts `/usr/sbin/smbd` privately for each VM run. Without the
   package the launchers start the VMs without the shared folder.
 - The user is in the groups `kvm` and `libvirt`.
-- Root steps go through one zenity password prompt (`SUDO_ASKPASS=~/.local/bin/zenity-askpass sudo -A …`).
+- Root steps take one password prompt: T3 Code's secret prompt, or zenity (`SUDO_ASKPASS=~/.local/bin/zenity-askpass sudo -A …`).
