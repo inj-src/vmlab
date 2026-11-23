@@ -291,7 +291,7 @@ stop_helpers(){ alive net && kill "$(cat "$S/net.pid")"; rm -f "$S"/net.pid; sys
 stop(){
   if alive qemu; then
     qmp '{"execute":"system_powerdown"}' > /dev/null || true
-    for _ in $(seq 60); do alive qemu || break; sleep 2; done
+    for _ in $(seq 240); do alive qemu || break; sleep 0.5; done
     alive qemu && { echo "guest did not shut down in 2 min, stopping it"; kill "$(cat "$S/qemu.pid")"; }
   fi
   # (its unit ends a moment after QEMU: `vm` and the other VM's launcher go by the unit)
