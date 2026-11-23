@@ -7,7 +7,7 @@ person's: Windows does not mark them as injected, as it does input sent from ins
        [--crop X,Y,W,H] [--max-dim N]   only that part of the screen; shrunk so that neither side
                                         is over N pixels. The line it prints says how its pixels
                                         map to the screen's: click at X + x / scale, Y + y / scale
-  qdrive.py VM click X Y [right|double] click at a pixel of that screenshot
+  qdrive.py VM click X Y [right|double] click at a pixel of the screen (as a whole shot shows it)
   qdrive.py VM move X Y                 move the pointer
   qdrive.py VM drag X1 Y1 X2 Y2         press at one point, release at the other
   qdrive.py VM type 'text'              type US-keyboard text (ASCII; other text: paste it)
