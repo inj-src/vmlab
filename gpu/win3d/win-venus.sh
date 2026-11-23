@@ -312,7 +312,7 @@ start(){
   # With a window, Windows' own scaling follows the screen the window is on while it is shown,
   # and is 100% while it is hidden (scale-watch below)
   # (a unit has none of this shell's environment: the switch is handed on)
-  local scale_env=(); [[ ${WIN_VENUS_SCALE_DIRECT:-} == 1 ]] && scale_env=(--setenv=WIN_VENUS_SCALE_DIRECT=1)
+  local scale_env=(--setenv="WIN_VENUS_SCALE_DIRECT=${WIN_VENUS_SCALE_DIRECT:-1}")
   [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "${scale_env[@]}" "$0" scale-watch
   [[ $window == none || -z $hideable ]] || tray win vmlab-win-venus "$S/window.state"
   echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $window == none ]] || echo ", a window ($window)"), log $S/qemu.log"
@@ -338,8 +338,10 @@ stop(){
 # Git Bash; a guest from before vmshell ignores the variable).
 ssh_guest(){ ssh "${MUX[@]}" -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" \
   -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -o SetEnv=VMLAB_SHELL=pwsh dev@127.0.0.1 "$@"; }
-scp_guest(){ scp -q "${MUX[@]}" -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR "$@"; }
-# MUX: none by default. scale-watch with WIN_VENUS_SCALE_DIRECT=1 sets it to one connection
+# scp_guest asks for PowerShell too: with MUX the first call opens the shared connection, and
+# every later session on it gets the SetEnv of the one that opened it.
+scp_guest(){ scp -q "${MUX[@]}" -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR -o SetEnv=VMLAB_SHELL=pwsh "$@"; }
+# MUX: none by default. scale-watch (WIN_VENUS_SCALE_DIRECT=1, its default) sets it to one connection
 # shared by its calls (ControlMaster, as `vm` keeps one), so a call skips the key exchange. Its
 # own socket: a session over a shared connection gets the SetEnv of the one that opened it
 # (~/.local/bin/vm says so too), and these are all PowerShell. Keepalives, so a master left on a
@@ -349,7 +351,7 @@ MUX_SOCK=$S/ssh-pwsh-$SSH_PORT
 mux_on(){ MUX=(-o ControlMaster=auto -o "ControlPath=$MUX_SOCK" -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=3); }
 mux_close(){ [[ -S $MUX_SOCK ]] || return 0; ssh -o "ControlPath=$MUX_SOCK" -O exit dev@127.0.0.1 > /dev/null 2>&1 || true; rm -f "$MUX_SOCK"; }
 
-# guest_display SIZE PERCENT ALWAYS (WIN_VENUS_SCALE_DIRECT=1): set-mode.ps1 SIZE and then
+# guest_display SIZE PERCENT ALWAYS (scale-watch): set-mode.ps1 SIZE and then
 # set-scale.ps1 PERCENT in one SSH command, run in the SSH session itself: since desktop-ssh
 # (346efb2) that is dev's desktop session, so no scheduled task (run-interactive.ps1) is needed.
 # Empty SIZE or PERCENT: that part is not run; the scale runs after the mode only when ALWAYS
@@ -428,9 +430,12 @@ case ${1:-} in
   # are as large as on the host. It ends with QEMU.
   scale-watch)
     applied='' copied='' sized='' tries=0 direct=''
-    # WIN_VENUS_SCALE_DIRECT=1 (on trial): one shared SSH connection, and both scripts in one
+    # By default one shared SSH connection, and both scripts in one
     # command on the desktop (guest_display), the scheduled task only where SSH is not there
-    if [[ ${WIN_VENUS_SCALE_DIRECT:-} == 1 ]]; then
+    # (measured 2026-11-23 in the nested rig at 125%: the scale follows a show or hide in
+    # 1.6-4.8 s, against 6.2-7.8 s through the task; most of it is the call in Windows, about
+    # 3.6 s for the mode and the scale). WIN_VENUS_SCALE_DIRECT=0: always the task, as before.
+    if [[ ${WIN_VENUS_SCALE_DIRECT:-1} == 1 ]]; then
       direct=1; mux_close; mux_on      # (a connection left by an earlier run would hang)
       echo "$(date +%T) direct: one SSH connection, no scheduled task"
     fi

@@ -66,8 +66,12 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   dropped: it gives up one fast core, and the build took 10% longer.
 - Logs: `/vmlab/run/win-venus/qemu.log` (QEMU and the render server). `WIN_VENUS_STRACE=FILE`
   records the system calls of QEMU's main thread.
-- **Switches on trial** (each off by default until it is tested on the VM):
-  - `WIN_VENUS_SCALE_DIRECT=1`: scale-watch keeps one SSH connection (ControlMaster) and runs `set-mode.ps1` and `set-scale.ps1` in one command on the desktop (pwsh 7, no scheduled task), timing each in `scale.log`; where SSH is not on the desktop (a state from before desktop-ssh) it goes back to `run-interactive.ps1`.
+- **Scale helper's path**: scale-watch keeps one SSH connection (ControlMaster) and runs
+  `set-mode.ps1` and `set-scale.ps1` in one command on the desktop (pwsh 7, no scheduled task),
+  timing each in `scale.log`; where SSH is not on the desktop (a state from before desktop-ssh)
+  it goes back to `run-interactive.ps1`. The default since 2026-11-23: a show or hide reaches
+  Windows' scaling in 1.6-4.8 s, against 6.2-7.8 s through the task. `WIN_VENUS_SCALE_DIRECT=0`
+  always takes the task.
 
 ### The window (`--window`)
 
