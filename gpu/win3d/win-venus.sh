@@ -294,7 +294,9 @@ start(){
   for _ in $(seq 20); do python3 -I "$HERE/../pin.py" "$S/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
   # With a window, Windows' own scaling follows the screen the window is on while it is shown,
   # and is 100% while it is hidden (scale-watch below)
-  [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "$0" scale-watch
+  # (a unit has none of this shell's environment: the switch is handed on)
+  local direct=(); [[ ${WIN_VENUS_SCALE_DIRECT:-} == 1 ]] && direct=(--setenv=WIN_VENUS_SCALE_DIRECT=1)
+  [[ $window == none ]] || unit vmlab-win-venus-scale "$S/scale.log" "${direct[@]}" "$0" scale-watch
   [[ $window == none || -z $hideable ]] || tray win vmlab-win-venus "$S/window.state"
   echo "started on $gpu ($node): ssh port $SSH_PORT, VNC 127.0.0.1:$((5900 + VNC_DISPLAY))$([[ $window == none ]] || echo ", a window ($window)"), log $S/qemu.log"
 }
@@ -304,7 +306,7 @@ unit(){ local name=$1 log=$2; shift 2
   systemd-run --user --quiet --collect --unit="$name" -p StandardOutput="append:$log" -p StandardError="append:$log" "$@"; }
 up(){ for _ in $(seq 20); do alive "$1" && return 0; sleep 0.5; done; return 1; }
 gpu_node(){ local d; for d in /sys/class/drm/renderD*; do [[ $(cat "$d/device/vendor") == "$1" ]] && { echo "/dev/dri/${d##*/}"; return; }; done; }
-stop_helpers(){ alive net && kill "$(cat "$S/net.pid")"; rm -f "$S"/net.pid; systemctl --user stop vmlab-win-venus-scale 2>/dev/null || true; }
+stop_helpers(){ alive net && kill "$(cat "$S/net.pid")"; rm -f "$S"/net.pid; systemctl --user stop vmlab-win-venus-scale 2>/dev/null || true; mux_close; }
 stop(){
   if alive qemu; then
     qmp '{"execute":"system_powerdown"}' > /dev/null || true
@@ -317,8 +319,44 @@ stop(){
 }
 # Commands here are PowerShell: VMLAB_SHELL=pwsh asks the guest's vmshell for it (its default is
 # Git Bash; a guest from before vmshell ignores the variable).
-ssh_guest(){ ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" \
+ssh_guest(){ ssh "${MUX[@]}" -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" \
   -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR -o SetEnv=VMLAB_SHELL=pwsh dev@127.0.0.1 "$@"; }
+scp_guest(){ scp -q "${MUX[@]}" -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR "$@"; }
+# MUX: none by default. scale-watch with WIN_VENUS_SCALE_DIRECT=1 sets it to one connection
+# shared by its calls (ControlMaster, as `vm` keeps one), so a call skips the key exchange. Its
+# own socket: a session over a shared connection gets the SetEnv of the one that opened it
+# (~/.local/bin/vm says so too), and these are all PowerShell. Keepalives, so a master left on a
+# Windows that went away ends by itself; stop_helpers closes it.
+MUX=()
+MUX_SOCK=$S/ssh-pwsh-$SSH_PORT
+mux_on(){ MUX=(-o ControlMaster=auto -o "ControlPath=$MUX_SOCK" -o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=3); }
+mux_close(){ [[ -S $MUX_SOCK ]] || return 0; ssh -o "ControlPath=$MUX_SOCK" -O exit dev@127.0.0.1 > /dev/null 2>&1 || true; rm -f "$MUX_SOCK"; }
+
+# guest_display SIZE PERCENT ALWAYS (WIN_VENUS_SCALE_DIRECT=1): set-mode.ps1 SIZE and then
+# set-scale.ps1 PERCENT in one SSH command, run in the SSH session itself: since desktop-ssh
+# (346efb2) that is dev's desktop session, so no scheduled task (run-interactive.ps1) is needed.
+# Empty SIZE or PERCENT: that part is not run; the scale runs after the mode only when ALWAYS
+# is set or the mode was set (Windows keeps a scaling for each size). It prints "@mode RC LINE"
+# and "@scale RC LINE" (the script's exit code and last line), or "@desktop no" where the
+# session is not on the desktop (an older state), and scale-watch goes back to the task.
+guest_display(){
+  [[ $1 =~ ^([0-9]+x[0-9]+)?$ && $2 =~ ^[0-9]*$ && $3 =~ ^1?$ ]] || return 2
+  ssh_guest <<PS1
+if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) { '@desktop no'; exit 3 }
+\$rcs = @{}
+function Step(\$tag, \$file, \$arg) {
+    \$global:LASTEXITCODE = 0
+    try { \$o = @(& \$file \$arg 2>&1); \$rc = [int]\$global:LASTEXITCODE }
+    catch { \$o = @("\$_"); \$rc = 1 }
+    \$last = if (\$o.Count) { "\$(\$o[-1])" } else { '' }
+    "@\$tag \$rc \$last"
+    \$script:rcs[\$tag] = \$rc
+}
+if ('$1') { Step mode C:\vmlab\set-mode.ps1 '$1' }
+if ('$2' -and ('$3' -or \$rcs['mode'] -eq 0)) { Step scale C:\vmlab\set-scale.ps1 ([int]'$2') }
+exit 0
+PS1
+}
 
 # firmware: the firmware's file. The system's OVMF with a quiet start (no TianoCore logo, so
 # Windows draws its own, and no "BdsDxe: loading" lines: firmware/make-firmware.py), made again
@@ -372,8 +410,42 @@ case ${1:-} in
   # screen's pixels of the window. This gives Windows the same scaling, so that things in it
   # are as large as on the host. It ends with QEMU.
   scale-watch)
-    applied='' copied='' sized='' tries=0
+    applied='' copied='' sized='' tries=0 direct=''
+    # WIN_VENUS_SCALE_DIRECT=1 (on trial): one shared SSH connection, and both scripts in one
+    # command on the desktop (guest_display), the scheduled task only where SSH is not there
+    if [[ ${WIN_VENUS_SCALE_DIRECT:-} == 1 ]]; then
+      direct=1; mux_close; mux_on      # (a connection left by an earlier run would hang)
+      echo "$(date +%T) direct: one SSH connection, no scheduled task"
+    fi
     while alive qemu; do
+      if [[ -n $direct ]]; then
+        size=$(cat "$S/size" 2>/dev/null || true)
+        want=100; [[ $(cat "$S/window.state" 2>/dev/null) == hidden ]] || want=$(cat "$S/scale" 2>/dev/null || true)
+        m=''; [[ $size =~ ^[0-9]+x[0-9]+$ && $size != "$sized" ]] && m=$size
+        p=''; [[ $want =~ ^[0-9]+$ ]] && p=$want
+        always=''; [[ -n $p && $p != "$applied" ]] && always=1
+        if [[ -n $m || -n $always ]]; then
+          [[ -n $copied ]] || { scp_guest "$HERE/guest-scripts/set-scale.ps1" "$HERE/guest-scripts/set-mode.ps1" dev@127.0.0.1:C:/vmlab/ 2>/dev/null && copied=1; }
+          if [[ -n $copied ]]; then
+            t0=${EPOCHREALTIME/./}
+            out=$(guest_display "$m" "$p" "$always" 2>&1) || true
+            t0=$(( (${EPOCHREALTIME/./} - t0) / 100000 )); took="$((t0 / 10)).$((t0 % 10)) s"
+            if grep -qx '@desktop no' <<< "$out"; then
+              direct=''; echo "$(date +%T) direct: SSH is not on the desktop in this state; the scheduled task from now on"; continue
+            fi
+            mline=$(grep -m1 '^@mode ' <<< "$out" || true) sline=$(grep -m1 '^@scale ' <<< "$out" || true)
+            if [[ -n $m ]]; then
+              if [[ $mline == '@mode 0 '* ]]; then
+                sized=$m applied='' tries=0; echo "$(date +%T) window size $m: ${mline#@mode 0 } ($took)"
+              elif (( ++tries >= 20 )); then   # nobody signed in, or Windows has no such mode
+                msg=${mline#@mode * }; sized=$m tries=0; echo "$(date +%T) window size $m: not set: ${msg:-${out##*$'\n'}}"
+              fi
+            fi
+            [[ $sline == '@scale 0 '* ]] && { applied=$p; echo "$(date +%T) screen scale $p%: ${sline#@scale 0 } ($took)"; }
+          fi
+        fi
+        sleep 2; continue
+      fi
       # The size the window offered Windows ($S/size, VMLAB_WINDOW_SIZE_FILE), where Windows
       # did not take it by itself (set-mode.ps1 says why), before the scaling, which Windows
       # keeps for each size
@@ -402,7 +474,7 @@ case ${1:-} in
   kill) alive qemu && kill -9 "$(cat "$S/qemu.pid")"; rm -f "$S/qemu.pid"; stop_helpers; echo killed ;;
   status) alive qemu && echo "running on $(cat "$S/gpu") (pid $(cat "$S/qemu.pid"))" || echo "not running" ;;
   ssh) shift; ssh_guest "$@" ;;
-  scp) shift; scp -q -i "$KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$S/known_hosts" -o LogLevel=ERROR "$@" ;;
+  scp) shift; scp_guest "$@" ;;
   show|hide) alive qemu || die "not running"; window_ask "$1" "$S/window.ctl" "$S/window.state" ;;
   window) alive qemu && [[ -p $S/window.ctl ]] && cat "$S/window.state" 2>/dev/null || echo none ;;
   view) if alive qemu && [[ -p $S/window.ctl ]]; then window_ask show "$S/window.ctl" "$S/window.state"

@@ -60,6 +60,7 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   records the system calls of QEMU's main thread.
 - **Switches on trial** (each off by default until it is tested on the VM):
   - `WIN_VENUS_NET=inproc`: the VM's own QEMU does the network, SSH port and shared folder (as the Mac's does); no NAT box QEMU runs. Same NIC, MAC and slot. Default `helper`.
+  - `WIN_VENUS_SCALE_DIRECT=1`: scale-watch keeps one SSH connection (ControlMaster) and runs `set-mode.ps1` and `set-scale.ps1` in one command on the desktop (pwsh 7, no scheduled task), timing each in `scale.log`; where SSH is not on the desktop (a state from before desktop-ssh) it goes back to `run-interactive.ps1`.
 
 ### The window (`--window`)
 
