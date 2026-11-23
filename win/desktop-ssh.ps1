@@ -69,10 +69,17 @@ if (-not ($text -match '^AcceptEnv VMLAB_SHELL$')) {
 & $sshd -t -f $cfg
 if ($LASTEXITCODE) { throw "sshd rejects $cfg" }
 
-# 4. sshd in the desktop session, from dev's logon on. The loop starts it again if it ends;
-#    conhost --headless gives it a console without a window.
-$loop = "while (`$true) { & '$sshd' -f C:\ProgramData\ssh\sshd_config; Start-Sleep -Seconds 2 }"
-$action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless pwsh.exe -NoProfile -NonInteractive -Command `"$loop`""
+# 4. sshd in the desktop session, from dev's logon on. A loop starts it again if it ends (Task
+#    Scheduler's own restart waits a minute at least); conhost --headless gives it a console
+#    without a window. The loop is a batch file, not pwsh: cmd starts in milliseconds, pwsh took
+#    1.4 s of the boot before sshd (measured 2026-11-23). Written beside and renamed over: cmd
+#    reads a running batch file by offset.
+$loopFile = 'C:\vmlab\sshd-loop.cmd'
+Set-Content "$loopFile.new" -Encoding ascii -Value @(
+    '@echo off', 'rem vmlab: sshd in the desktop session, started again if it ends (desktop-ssh.ps1)',
+    ':again', "`"$sshd`" -f C:\ProgramData\ssh\sshd_config", 'ping -n 3 127.0.0.1 >nul', 'goto again')
+Move-Item -Force "$loopFile.new" $loopFile
+$action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless cmd.exe /d /c $loopFile"
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:COMPUTERNAME\dev"
 $principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\dev" -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -StartWhenAvailable
