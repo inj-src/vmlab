@@ -48,6 +48,7 @@ done
 
 # The trial files: the new ready state, and the run on it that commit folds into it
 export WIN_VENUS_READY=$NEW WIN_VENUS_DISK=${NEW%.qcow2}.run.qcow2
+export WIN_VENUS_ISO=on                     # the driver package's CD, D: (step 1); normal starts have none
 rm -f "$NEW" "${NEW%.qcow2}.vars.fd" "$WIN_VENUS_DISK"
 qemu-img create -q -f qcow2 -o extended_l2=on -b "$BASE" -F qcow2 "$NEW"   # (win-venus.sh, NEW_QCOW2)
 "$W" reset > /dev/null                      # fresh firmware variables for this start

@@ -95,7 +95,10 @@ STATES=/vmlab/images/states/win ST_VM=win
 # A trial on other files (setup-ready.sh) has nothing to do with them, or with their marks
 [[ -z ${WIN_VENUS_READY:-}${WIN_VENUS_DISK:-} ]] || STATES=$S/trial-states
 KEY=$HOME/.ssh/vmlab_ed25519
-ISO=$HERE/win3d-guest.iso          # the guest driver package, as a CD (D:\Install.cmd)
+# The guest driver package, as a CD (D:\Install.cmd): only setup-ready.sh installs from it
+# (WIN_VENUS_ISO=on). The package copies itself to C:\ProgramData\vmlab-win3d and runs from
+# there, so a normal start has no CD drive.
+ISO=$HERE/win3d-guest.iso
 SSH_PORT=2222 VNC_DISPLAY=11      # VNC on 127.0.0.1:5911
 VCPUS=0-7                         # host CPUs for the guest's CPUs: the fast cores (../pin.py)
 # The host folder both VMs see as \\10.0.2.4\qemu (in the guest: C:\share). The NAT helper's
@@ -233,6 +236,13 @@ start(){
       -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=io0,addr=2)
   fi
 
+  # (the CD is on the q35 board's own SATA controller, so it moves no PCI slot)
+  local cdrom=()
+  if [[ ${WIN_VENUS_ISO:-off} == on ]]; then
+    [[ -f $ISO ]] || die "no $ISO"
+    cdrom=(-drive if=none,id=cd0,media=cdrom,readonly=on,format=raw,file="$ISO" -device ide-cd,drive=cd0)
+  fi
+
   echo "$gpu" > "$S/gpu"
   # The clipboard channel (qemu-vdagent) has mouse=off: left on, QEMU sends every pointer move
   # through the agent program inside Windows, not the USB tablet, and the pointer lags
@@ -252,7 +262,7 @@ start(){
     -object iothread,id=io0 \
     -blockdev driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename="$DISK" \
     -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0,addr=1 "${cache[@]}" \
-    -drive if=none,id=cd0,media=cdrom,readonly=on,format=raw,file="$ISO" -device ide-cd,drive=cd0 \
+    "${cdrom[@]}" \
     -netdev "stream,id=n,server=off,addr.type=unix,addr.path=$S/net.sock" \
     -device virtio-net-pci,netdev=n,mac=52:54:00:58:55:6c,addr=3 \
     -device virtio-serial-pci,addr=4 \

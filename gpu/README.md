@@ -550,6 +550,8 @@ layer. What it does:
 
 1. The driver package from the CD (`D:\Install.cmd`, `win3d-guest.iso`). It restarts Windows
    twice; its state is `C:\ProgramData\vmlab-win3d\state.json`, its log `journal.log` there.
+   The package copies itself there and runs from that copy, so only setup has the CD
+   (`WIN_VENUS_ISO=on`, which `setup-ready.sh` sets); a normal start has no CD drive.
 2. `build-guest-umd.sh install`, `build-guest-kmd.sh install` (the pointer; it sets
    `HWCursor=1`) and `$W d3d12 native` (Microsoft's `d3d12.dll`, above), then a
    restart.
