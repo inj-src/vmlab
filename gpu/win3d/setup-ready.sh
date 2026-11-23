@@ -12,8 +12,8 @@
 #   2. the lab's builds of the Direct3D driver (guest-umd/) and of the kernel driver (guest-kmd/,
 #      HWCursor=1): Chrome's static vertex buffers, a pointer drawn by the host, Desktop
 #      Duplication
-#   3. Microsoft's d3d12.dll beside the package's bridge, for Chromium's GPU process
-#      (guest-scripts/d3d12-mode.ps1, bridge)
+#   3. Microsoft's d3d12.dll in place of the package's bridge (guest-scripts/d3d12-mode.ps1,
+#      native: the lab's default since 721108b; `win-venus.sh d3d12 bridge` brings the bridge back)
 #   4. no account lockout: Chrome's empty-password logons locked dev out of SSH
 #   5. the lab's helper for the desktop session (win/run-interactive.ps1) and Cua Driver's
 #      logon task, both started with no console window (the helper on win11-base shows one)
