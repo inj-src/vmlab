@@ -21,6 +21,7 @@ holds everything that makes them run except the disks and what is downloaded or 
 | `gpu/reims/` | The macOS VM: launcher `mac26.sh`, patches for the reims window and SDL, the title bar plugin. |
 | `gpu/rig/` | A headless GNOME desktop for testing the VM windows without touching the real one. |
 | `win/`, `mac/` | How the base disks were installed and set up; `win/desktop-ssh.ps1` and `mac/desktop-ssh.sh` (SSH sessions on the desktop; `install-desktop-ssh.sh` beside each runs them), `win/vmshell/` (Windows' SSH shell: Git Bash, or PowerShell for `ssh win-pwsh`) and `win/bash-env.sh` (the lab's Git Bash setup), `win/vm-run.ps1` (the guest's half of the older `vm run win`) and `win/run-interactive.ps1` (the older helper for Windows' desktop session, which the lab's own scripts still call); `mac/spice-agent/` (the clipboard in macOS). |
+| `vsock/` | A control channel to the Windows VM over virtio-vsock: `vmlab-agent` in the guest, `vmlab-vx` here (`vsock/README.md`; `win/install-vsock-agent.sh` installs both). |
 | `vmlab-mcp/` | The MCP server that drives a VM's GUI (Rust; `cargo build --release`, then copy `target/release/vmlab-mcp` to `~/.local/bin/`). |
 | `bench/` | The computer-use benchmark. |
 | `host/` | Copies of what the lab changed outside the home folder, as a record (below). |
@@ -41,6 +42,7 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 | The VMs' SSH key | `~/.ssh/vmlab_ed25519` | The guests trust its public half (`host/vmlab_ed25519.pub`, `win/config/authorized_keys`). Lost, a new key has to be put into both guests through their windows. |
 | The Windows kernel driver's test-signing key | `gpu/win3d/signing/` | Its own `.gitignore` keeps it out. Lost, `build-guest-kmd.sh` needs a new certificate, which the clean state then has to trust. |
 | vmlab-win3d release 0.1.2-alpha (QEMU, virglrenderer, guest driver package) | `gpu/win3d/release-0.1.2-alpha/`, unpacked into `src/`, `opt/qemu`, `opt/virgl`, `guest/` | Download from the VMLabDev/vmlab releases; `SHA256SUMS` here checks it. |
+| The vsock agent's token | `~/.config/vmlab/agent-token` (a real file, not a link) and its copy `C:\vmlab\agent-token` | `win/install-vsock-agent.sh` makes a new one when it is missing and copies it in. |
 | The guest driver package as a CD | `gpu/win3d/win3d-guest.iso` | An ISO of the release's driver package (`guest/`). The command that made it is not recorded. |
 | The lab's QEMU for Windows | `gpu/win3d/opt/qemu-ui/`; source in `/vmlab/tmp/win-qemu/` | `gpu/win3d/build-qemu.sh`: VMLabDev/qemu at `d8a6048aae11c5e26168e173a7c1b1a4335d6a23` plus `qemu-patches/`. |
 | The lab's guest drivers | `gpu/win3d/guest-umd/x64`, `x86`, `guest-kmd/viogpu3d.sys` | `build-guest-umd.sh`, `build-guest-kmd.sh` (podman; the pins are in each `BUILDINFO`). |

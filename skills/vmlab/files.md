@@ -27,3 +27,5 @@ The folder `/vmlab/share` on this machine is `C:\share` on `win` and `~/share` o
 ## Single files
 
 `scp file win:C:/share/`, `scp mac:<file> .`
+
+On `win`, `vmlab-vx put <file> C:/path/file` and `vmlab-vx get C:/path/file <file>` move a file over the VM's vsock agent: 64 MB in under 0.1 s, against 0.3 s (put) and 0.9 s (get) with `scp`. They exit 255 when the VM's disk has no agent (a saved state from before 2026-11-23); use `scp` then.

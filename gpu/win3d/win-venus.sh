@@ -75,6 +75,8 @@
 # The lab's build has slirp, so by default (WIN_VENUS_NET=inproc, since 2026-11-23) the VM's own
 # QEMU does the network, the shared folder and the SSH port, and no NAT box runs. The guest's
 # NIC is the same (MAC, slot) either way. WIN_VENUS_NET=helper: the NAT box, as before.
+# The guest has a virtio socket (CID 3) for the vsock agent (../../vsock) when QEMU and
+# /dev/vhost-vsock allow it; WIN_VENUS_VSOCK=off: none.
 set -euo pipefail
 
 HERE=/vmlab/tools/vmlab/gpu/win3d
@@ -299,6 +301,16 @@ start(){
     cdrom=(-drive if=none,id=cd0,media=cdrom,readonly=on,format=raw,file="$ISO" -device ide-cd,drive=cd0)
   fi
 
+  # The vsock control channel (../../vsock: vmlab-agent in Windows, vmlab-vx here): a virtio
+  # socket, CID 3, in slot 8. /dev/vhost-vsock is the kvm group's. A QEMU without vhost (built
+  # before build-qemu.sh had --enable-vhost-kernel) has no such device; then the VM starts
+  # without it, and vmlab-vx falls back to SSH. WIN_VENUS_VSOCK=off leaves it out.
+  local vsock=()
+  if [[ ${WIN_VENUS_VSOCK:-on} == on && -r /dev/vhost-vsock && -w /dev/vhost-vsock &&
+        $("$QEMU" -device help 2>/dev/null) == *'"vhost-vsock-pci"'* ]]; then
+    vsock=(-device vhost-vsock-pci,guest-cid=3,addr=8)
+  fi
+
   echo "$gpu" > "$S/gpu"
   # The clipboard channel (qemu-vdagent) has mouse=off: left on, QEMU sends every pointer move
   # through the agent program inside Windows, not the USB tablet, and the pointer lags
@@ -318,7 +330,7 @@ start(){
     -object iothread,id=io0 \
     -blockdev "driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap$l2,file.driver=file,file.aio=io_uring,file.filename=$DISK" \
     -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0,addr=1 "${cache[@]}" \
-    "${cdrom[@]}" \
+    "${cdrom[@]}" "${vsock[@]}" \
     "${net[@]}" \
     -device virtio-net-pci,netdev=n,mac=52:54:00:58:55:6c,addr=3 \
     -device virtio-serial-pci,addr=4 \

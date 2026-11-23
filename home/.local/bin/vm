@@ -337,8 +337,9 @@ cmd_gui(){
 
 # vm push <name> <dir> [dest]: the git work tree <dir> is in, as it is now (uncommitted changes
 # and untracked files too, ignored files not), mirrored to a checkout in the guest. It goes as
-# a git bundle over SSH, after the first time only what changed. In the guest, files that left
-# the tree are removed and ignored ones (build output) are kept, so builds stay incremental.
+# a git bundle over SSH (on win over the vsock agent when it answers), after the first time
+# only what changed. In the guest, files that left the tree are removed and ignored ones (build
+# output) are kept, so builds stay incremental.
 # The snapshot is a commit of its own that no branch holds: the repository's index, branch and
 # work tree are not touched; refs/vmlab/push/<name> keeps the last one. Its parent is the
 # snapshot the guest has, so the bundle holds only what changed (git leaves out only what the
@@ -385,10 +386,17 @@ cmd_push(){
     # printed is the new commit. A guest without the checkout gets it made first (autocrlf off:
     # the guest gets the bytes the host has). gc runs when the chain starts again, the push
     # that leaves old snapshots behind. A one-line change went from 587 to 367 ms on win.
-    local b="\"$home/vm-push.bundle\"" g="git -C \"$dest\"" pre="" post=""
+    local b="\"$home/vm-push.bundle\"" g="git -C \"$dest\"" pre="" post="" take="cat > \"$home/vm-push.bundle\" && " in=$tmp/push.bundle
     [[ -n $prev ]] || pre="git init -q \"$dest\" && $g config core.autocrlf false && $g config core.longpaths true && "
     (( ${#parent[@]} )) || post="$g gc -q --auto >/dev/null 2>&1; "
-    guest "$n" "cat > $b && $pre$g fetch -q $b $ref && $g checkout -q -f --detach FETCH_HEAD && $g clean -q -fd && $g update-ref refs/vmlab/pushed FETCH_HEAD && rm -f $b && { $post$g rev-parse -q --verify refs/vmlab/pushed; }" < "$tmp/push.bundle" \
+    # On win the bundle goes first over the vsock agent when it answers (vsock/: 64 MB in 71 ms
+    # against 0.55 s on ssh's stdin), and the command then has no stdin; a state without the
+    # agent fails the put at once and takes the stdin way.
+    if [[ $n == win ]] && command -v vmlab-vx >/dev/null &&
+       VMLAB_VX_QUIET=1 vmlab-vx put "$tmp/push.bundle" "$home/vm-push.bundle" 2>/dev/null; then
+      take="" in=/dev/null
+    fi
+    guest "$n" "$take$pre$g fetch -q $b $ref && $g checkout -q -f --detach FETCH_HEAD && $g clean -q -fd && $g update-ref refs/vmlab/pushed FETCH_HEAD && rm -f $b && { $post$g rev-parse -q --verify refs/vmlab/pushed; }" < "$in" \
       | tr -d '\r' | tail -n 1 | grep -qx "$commit" || { rm -rf "$tmp"; die "$n did not take the bundle (left in the guest: $home/vm-push.bundle)"; }
   fi
   rm -rf "$tmp"

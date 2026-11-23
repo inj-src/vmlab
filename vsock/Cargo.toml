@@ -1,0 +1,21 @@
+[package]
+name = "vmlab-vsock"
+version = "0.1.0"
+edition = "2021"
+description = "A control channel to the vmlab Windows VM over virtio-vsock: vmlab-agent (guest) and vmlab-vx (host)"
+publish = false
+
+[[bin]]
+name = "vmlab-agent"
+path = "src/bin/vmlab-agent.rs"
+
+[[bin]]
+name = "vmlab-vx"
+path = "src/bin/vmlab-vx.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+strip = true
