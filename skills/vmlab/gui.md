@@ -16,6 +16,11 @@ Found in the trials of 2026-11-14; each of these fails quietly the other way.
 - **A save dialog:** set the file name with `set_value` on the field (`type_text` on `win` appends to the selected name while reporting that it replaced it). The folder: `set_value` on Where on `mac`; on `win`, click it in the sidebar in the foreground.
 - **Closing a window:** a background click on Close can leave it open, and a foreground one can return `foreground_unavailable` after it closed. Check over `ssh` that the process is gone.
 
+## A browser tab: the `browser_*` tools
+
+- **`get_browser_state`** leaves the screenshot out unless asked. Keep it out to check or poll a page: 4 ms on `win` against 73 with `include_screenshot: true`, 13 against 47 on `mac`.
+- **`browser_click`:** keep its default `input_route: "trusted"`. On `win` it takes 40–60 ms and `"dom_event"` 440; on `mac` both take about 33.
+
 ## The page inside an Electron app: Playwright
 
 A second way, for checks of the page alone: start the app in the VM with `--remote-debugging-port=9222`, run `vm tunnel win 9222 9333`, and connect Playwright or playwright-mcp to `http://localhost:9333` (the user's Chrome often holds 9222 here). Run Playwright `_electron` tests inside the VM. The MCP tools stay the way for what is outside the page: the installer, native dialogs, the tray.
