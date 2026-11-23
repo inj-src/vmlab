@@ -199,6 +199,25 @@ start(){
     inproc) "$QEMU" -netdev help 2>/dev/null | grep -qx user || die "WIN_VENUS_NET=inproc: $QEMU has no user-mode network (build-qemu.sh --enable-slirp)" ;;
     *) die "WIN_VENUS_NET is helper or inproc, not '$netmode'" ;;
   esac
+  # The guest's CPUs, for an A/B test (both on trial, off by default):
+  # WIN_VENUS_TOPOLOGY=smt: Windows sees 3 cores of 2 threads, not 6 cores, and each guest CPU
+  #   has a host CPU of its own, a guest core's two threads on one fast core's two (0-5,
+  #   ../pin.py --one-each). The default, flat: 6 cores, sharing host CPUs 0-7.
+  # WIN_VENUS_HV_EXTRA=1: three more Hyper-V enlightenments: direct synthetic timers (they need
+  #   hv_stimer, on already), hypercall input in XMM registers, extended TLB flush ranges (they
+  #   need hv_tlbflush, on already).
+  local cpu=host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_frequencies,hv_tlbflush,hv_ipi,hv_time
+  local smp=6,sockets=1,cores=6,threads=1 vcpus=$VCPUS pin=()
+  case ${WIN_VENUS_TOPOLOGY:-flat} in
+    flat) ;;
+    smt) smp=6,sockets=1,cores=3,threads=2 vcpus=0-5 pin=(--one-each) ;;
+    *) die "WIN_VENUS_TOPOLOGY is flat or smt, not '$WIN_VENUS_TOPOLOGY'" ;;
+  esac
+  case ${WIN_VENUS_HV_EXTRA:-0} in
+    0) ;;
+    1) cpu+=,hv-stimer-direct,hv-xmm-input,hv-tlbflush-ext ;;
+    *) die "WIN_VENUS_HV_EXTRA is 0 or 1, not '$WIN_VENUS_HV_EXTRA'" ;;
+  esac
   [[ -n $node ]] || die "no $gpu render node"
   alive qemu && die "already running (win-venus.sh stop)"
   [[ $(virsh -c qemu:///system list --name | grep -c .) == 0 ]] || die "a libvirt VM is running: one VM at a time"
@@ -272,8 +291,8 @@ start(){
   # the pointer trailed again. A new device takes a free slot (8 and up), never one of these.
   unit vmlab-win-venus "$S/qemu.log" --setenv=VK_LOADER_DRIVERS_SELECT="$select" --setenv=RENDER_SERVER_EXEC_PATH="$RENDER_SERVER" "${layer[@]}" "${env[@]}" \
     "${trace[@]}" "$QEMU" -name win-venus -L /usr/share/qemu -L /usr/share/seabios -L /usr/lib/ipxe/qemu -machine q35,hpet=off -accel kvm \
-    -cpu host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_frequencies,hv_tlbflush,hv_ipi,hv_time \
-    -smp 6,sockets=1,cores=6,threads=1 -m 8192M -rtc base=localtime,driftfix=slew \
+    -cpu "$cpu" \
+    -smp "$smp" -m 8192M -rtc base=localtime,driftfix=slew \
     -drive if=pflash,format=raw,readonly=on,file="$(firmware)" \
     -drive if=pflash,format=raw,file="$S/OVMF_VARS.fd" \
     -object iothread,id=io0 \
@@ -291,7 +310,7 @@ start(){
     -qmp unix:"$S/qmp.sock",server=on,wait=off -monitor none -serial file:"$S/serial.log" -parallel none \
     -pidfile "$S/qemu.pid"
   up qemu || { stop_helpers; die "QEMU did not start: $(tail -5 "$S/qemu.log")"; }
-  for _ in $(seq 20); do python3 -I "$HERE/../pin.py" "$S/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
+  for _ in $(seq 20); do python3 -I "$HERE/../pin.py" "${pin[@]}" "$S/qmp.sock" "$vcpus" 2>/dev/null && break; sleep 0.5; done
   # With a window, Windows' own scaling follows the screen the window is on while it is shown,
   # and is 100% while it is hidden (scale-watch below)
   # (a unit has none of this shell's environment: the switch is handed on)
