@@ -81,5 +81,44 @@ class SizeTest(unittest.TestCase):
         with self.assertRaises(SystemExit): qdrive.ppm_header(b'P6\n640')
 
 
+class KeyNameTest(unittest.TestCase):
+    def test_aliases(self):
+        cases = {
+            'escape': ['esc'], 'Esc': ['esc'], 'enter': ['ret'], 'return': ['ret'], 'space': ['spc'],
+            'del': ['delete'], 'bs': ['backspace'], 'backspace': ['backspace'],
+            'pageup': ['pgup'], 'PgUp': ['pgup'], 'pagedown': ['pgdn'], 'pgdn': ['pgdn'], 'page-down': ['pgdn'],
+            'option+left': ['alt', 'left'], 'opt+right': ['alt', 'right'],
+            'cmd+q': ['meta_l', 'q'], 'command+w': ['meta_l', 'w'], 'super': ['meta_l'], 'meta': ['meta_l'],
+            'win+r': ['meta_l', 'r'], 'ctrl+shift+escape': ['ctrl', 'shift', 'esc'], 'control+c': ['ctrl', 'c'],
+            'arrowup': ['up'], 'down': ['down'], 'shift+Tab': ['shift', 'tab'], 'F4': ['f4'], 'alt+f4': ['alt', 'f4'],
+            'ctrl+A': ['ctrl', 'a'], 'cmd+,': ['meta_l', 'comma'], 'ctrl+-': ['ctrl', 'minus'],
+            'ctrl++': ['ctrl', 'shift', 'equal'], 'ctrl+plus': ['ctrl', 'shift', 'equal'], 'shift+1': ['shift', '1'],
+            'ctrl+!': ['ctrl', 'shift', '1'], 'meta_r': ['meta_r'], 'kp_enter': ['kp_enter'],
+        }
+        for text, keys in cases.items():
+            self.assertEqual(qdrive.chord(text), keys, text)
+
+    def test_every_alias_is_a_qcode(self):
+        for name, code in qdrive.ALIASES.items():
+            self.assertTrue(code in qdrive.QCODES or code in qdrive.SHIFTED, name)
+
+    def test_unknown_name(self):
+        with self.assertRaises(SystemExit) as e: qdrive.chord('escpe')
+        self.assertIn("no key named 'escpe'", str(e.exception)); self.assertIn('escape', str(e.exception))
+        with self.assertRaises(SystemExit): qdrive.chord('ctrl+é')
+
+    def test_key_sends_a_chord(self):
+        fake = FakeQmp(); self.addCleanup(fake.close)
+        run(fake, 'key', 'ctrl+shift+escape', 'enter')
+        sent = [(e['data']['key']['data'], e['data']['down']) for e in fake.events]
+        self.assertEqual(sent, [('ctrl', True), ('shift', True), ('esc', True), ('esc', False), ('shift', False),
+                                ('ctrl', False), ('ret', True), ('ret', False)])
+
+    def test_a_wrong_name_sends_nothing(self):
+        fake = FakeQmp(); self.addCleanup(fake.close)
+        with self.assertRaises(SystemExit): run(fake, 'key', 'ret', 'escpe')
+        self.assertEqual(fake.events, [])
+
+
 if __name__ == '__main__':
     unittest.main()

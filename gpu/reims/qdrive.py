@@ -9,7 +9,9 @@ person's: Windows does not mark them as injected, as it does input sent from ins
   qdrive.py VM drag X1 Y1 X2 Y2         press at one point, release at the other
   qdrive.py VM type 'text'              type US-keyboard text
   qdrive.py VM key cmd+q [ret ...]      key chords: cmd (= win), opt (= alt), ctrl, shift + a
-                                        QEMU key name (ret, esc, tab, f4, up, delete, a, 1 ...)
+                                        QEMU key name (ret, esc, tab, f4, up, delete, a, 1 ...),
+                                        a common one (escape, enter, space, del, bs, pageup,
+                                        option, command, super ...) or one character (cmd+,)
   qdrive.py VM qmp '{"execute":...}'    one raw QMP command
 
   qdrive.py VM size                     the screen's size, WxH
@@ -18,17 +20,60 @@ VM is a reims VM name (its directory under the reims data dir) or a path to a qm
 QDRIVE_VNC=PORT: the picture and its size come from the VM's VNC server on 127.0.0.1:PORT
 (the Windows VM: QMP's screendump has no picture of a guest that draws through the GPU).
 """
-import json, os, socket, struct, subprocess, sys, tempfile, time
+import difflib, json, os, re, socket, struct, subprocess, sys, tempfile, time
 
 VMS = '/vmlab/reims/data/reims-ctl/vms'
 VNC = os.environ.get('QDRIVE_VNC')
 VNCSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../win3d/vncshot.py')
-MODS = {'cmd': 'meta_l', 'win': 'meta_l', 'opt': 'alt', 'alt': 'alt', 'ctrl': 'ctrl', 'shift': 'shift'}
+# QEMU's key names (qcodes): the QKeyCode enum of QEMU 11.1's QMP schema (query-qmp-schema).
+QCODES = set('''
+unmapped shift shift_r alt alt_r ctrl ctrl_r menu esc 1 2 3 4 5 6 7 8 9 0 minus equal backspace tab
+q w e r t y u i o p bracket_left bracket_right ret a s d f g h j k l semicolon apostrophe
+grave_accent backslash z x c v b n m comma dot slash asterisk spc caps_lock f1 f2 f3 f4 f5 f6 f7 f8
+f9 f10 num_lock scroll_lock kp_divide kp_multiply kp_subtract kp_add kp_enter kp_decimal sysrq kp_0
+kp_1 kp_2 kp_3 kp_4 kp_5 kp_6 kp_7 kp_8 kp_9 less f11 f12 print home pgup pgdn end left up down
+right insert delete stop again props undo front copy open paste find cut lf help meta_l meta_r
+compose pause ro hiragana henkan yen muhenkan katakanahiragana kp_comma kp_equals power sleep wake
+audionext audioprev audiostop audioplay audiomute volumeup volumedown mediaselect mail calculator
+computer ac_home ac_back ac_forward ac_refresh ac_bookmarks lang1 lang2 f13 f14 f15 f16 f17 f18 f19
+f20 f21 f22 f23 f24
+'''.split())
+# The names agents and people use (Cua's, the DOM's, a Mac's keys) for qcodes.
+ALIASES = {
+    'cmd': 'meta_l', 'command': 'meta_l', 'win': 'meta_l', 'windows': 'meta_l', 'super': 'meta_l', 'meta': 'meta_l',
+    'opt': 'alt', 'option': 'alt', 'control': 'ctrl',
+    'escape': 'esc', 'enter': 'ret', 'return': 'ret', 'space': 'spc', 'del': 'delete', 'bs': 'backspace',
+    'pageup': 'pgup', 'page_up': 'pgup', 'pagedown': 'pgdn', 'page_down': 'pgdn', 'ins': 'insert',
+    'arrowup': 'up', 'arrowdown': 'down', 'arrowleft': 'left', 'arrowright': 'right',
+    'capslock': 'caps_lock', 'numlock': 'num_lock', 'scrolllock': 'scroll_lock',
+    'printscreen': 'print', 'prtsc': 'print', 'apps': 'menu', 'contextmenu': 'menu',
+    'period': 'dot', 'plus': '+',
+}
 PLAIN = {' ': 'spc', '\n': 'ret', '\t': 'tab', '-': 'minus', '=': 'equal', '[': 'bracket_left', ']': 'bracket_right',
          '\\': 'backslash', ';': 'semicolon', "'": 'apostrophe', '`': 'grave_accent', ',': 'comma', '.': 'dot', '/': 'slash'}
 SHIFTED = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
            '_': 'minus', '+': 'equal', '{': 'bracket_left', '}': 'bracket_right', '|': 'backslash', ':': 'semicolon',
            '"': 'apostrophe', '~': 'grave_accent', '<': 'comma', '>': 'dot', '?': 'slash'}
+
+
+def chord(text):
+    """'ctrl+shift+escape' -> ['ctrl', 'shift', 'esc']: the qcodes of a chord, in order. A name is
+    a qcode, an alias or one character ('cmd+,', 'ctrl++'); letters in any case."""
+    keys = []
+    for name in re.split(r'\+(?=.)', text):
+        k = name if len(name) == 1 else ALIASES.get(name.lower().replace('-', '_'), name.lower().replace('-', '_'))
+        if len(k) == 1 and k in ALIASES: k = ALIASES[k]
+        if len(k) == 1:
+            if k in PLAIN: k = PLAIN[k]
+            elif k in SHIFTED: keys.append('shift'); k = SHIFTED[k]
+            elif k.isascii() and k.isalnum(): k = k.lower()
+        if k not in QCODES:
+            near = difflib.get_close_matches(k, sorted(QCODES | set(ALIASES)), 3)
+            raise SystemExit(f"key: no key named {name!r} in {text!r}" + (f" (did you mean {', '.join(near)}?)" if near else '') +
+                             ". Names: QEMU's (ret, esc, spc, tab, backspace, delete, up, pgdn, f4, a, 1 ...), "
+                             "escape, enter, space, del, pageup, cmd, option ..., or one character")
+        if k not in keys: keys.append(k)
+    return keys
 
 
 class Qmp:
@@ -128,6 +173,7 @@ def read_ppm(path):
 def main():
     if len(sys.argv) < 3: raise SystemExit(__doc__)
     vm, verb, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+    chords = [chord(c) for c in args] if verb == 'key' else []      # a wrong name stops before any key
     q = Qmp(vm if '/' in vm else f'{VMS}/{vm}/qmp.sock')
     if verb == 'size':
         print('%dx%d' % q.size())
@@ -160,7 +206,7 @@ def main():
             elif ch.isalnum(): q.key(ch)
             else: raise SystemExit(f'type: no key for {ch!r}')
     elif verb == 'key':
-        for chord in args: q.key(*[MODS.get(k, k) for k in chord.split('+')])
+        for keys in chords: q.key(*keys)
     elif verb == 'qmp':
         print(json.dumps(q.raw(json.loads(args[0]))))
     else:
