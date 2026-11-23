@@ -1,6 +1,6 @@
 # Driving a VM's GUI
 
-The `vmlab` MCP tools are Cua Driver's computer-use tools for both VMs in one list, routed by the `machine` argument. Each agent session keeps its own connection per VM, so element tokens and Cua sessions last between calls until the VM reboots. While the VM is off, calls return `<name> is not running`. The first call after `vm start` can wait up to 90 s for the desktop.
+The `vmlab` MCP tools are Cua Driver's computer-use tools for both VMs in one list, routed by the `machine` argument. Each agent session keeps its own connection per VM, so element tokens and Cua sessions last between calls until the VM reboots. While the VM is off, calls return `<name> is not running`. The first call after `vm start` can wait up to 90 s for the desktop. Cua's session, recording and admin tools are left out of the list; `VMLAB_MCP_EXTRA_TOOLS=recording` (a group, a tool's name, or `all`) in the MCP server's environment brings them back.
 
 ## Steps that need a specific way
 

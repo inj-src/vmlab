@@ -48,6 +48,10 @@ close_mux(){
     [[ -S $p ]] || continue
     ssh -o ControlPath="$p" -O exit "${GUSER[$n]}@127.0.0.1" >/dev/null 2>&1 || rm -f "$p"
   done
+  # vmlab-mcp's own (ssh/%C, ssh/bash-%C: ssh works out the same name for the same port)
+  for p in "$STATE/ssh/%C" "$STATE/ssh/bash-%C"; do
+    ssh -o ControlPath="$p" -p "${PORT[$n]}" -O exit "${GUSER[$n]}@127.0.0.1" >/dev/null 2>&1 || true
+  done
 }
 
 wait_ssh(){
