@@ -97,44 +97,28 @@ impl Config {
 /// Printed to stderr by the remote command when the Cua daemon never came up.
 pub const NOT_READY_MARKER: &str = "vmlab-mcp: cua-driver daemon not running";
 
-/// The PowerShell check for Cua's pipe, for `pwsh -EncodedCommand` (no quoting through bash).
-const WIN_PIPE_CHECK: &str =
-    r#"if ([IO.Directory]::GetFiles('\\.\pipe\') -match 'cua-driver') { exit 0 } else { exit 1 }"#;
-
 /// The one remote command per session: wait for the Cua daemon in the desktop session, then
 /// become `cua-driver mcp`. Both run in the guest's default shell (Git Bash on win, zsh on
 /// mac): one command instead of a separate readiness probe saves a remote shell start.
 /// - The wait is bounded by wall-clock time (90 s, under the local connect timeout): the daemon
 ///   is kicked after 12 s on win (the logon task) and kickstarted after 60 s on mac (the
 ///   LaunchAgent), as `vm gui` did. Checks are 1 s apart.
-/// - win checks Cua's pipe with PowerShell (~0.25 s). Git Bash cannot see named pipes: on
-///   the VM `ls //./pipe/` and `test -e //./pipe/cua-driver` fail after 2-5 s (2026-11-23).
+/// - win checks the daemon with `cua-driver.exe status` on its pipe: rc 0 when it is up, rc 1
+///   when it is down, about 75 ms either way (2026-11-23), against 0.25-0.45 s for the pwsh
+///   pipe listing it replaced. It never hung, but `timeout 5` bounds it in case it does. Git
+///   Bash cannot see named pipes: `ls //./pipe/` and `test -e //./pipe/cua-driver` fail after
+///   2-5 s.
 /// - stdin carries the MCP stream, which the client starts writing at once, so the probes get
 ///   an empty stdin and their stdout is discarded: only `cua-driver mcp` may touch the stream.
 pub fn remote_command(machine: Machine) -> String {
     match machine {
         Machine::Win => format!(
-            r#"c="${{LOCALAPPDATA//\\//}}/Programs/Cua/cua-driver/bin/cua-driver.exe"; up() {{ "/c/Program Files/PowerShell/7/pwsh.exe" -NoProfile -NonInteractive -EncodedCommand {enc} </dev/null >/dev/null 2>&1; }}; ok=0; k=0; SECONDS=0; while :; do up && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 12 ] && {{ k=1; "$c" autostart kick </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec "$c" mcp --socket '\\.\pipe\cua-driver'"#,
-            enc = encode_pwsh(WIN_PIPE_CHECK)
+            r#"c="${{LOCALAPPDATA//\\//}}/Programs/Cua/cua-driver/bin/cua-driver.exe"; up() {{ timeout 5 "$c" status --socket '\\.\pipe\cua-driver' </dev/null >/dev/null 2>&1; }}; ok=0; k=0; SECONDS=0; while :; do up && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 12 ] && {{ k=1; "$c" autostart kick </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec "$c" mcp --socket '\\.\pipe\cua-driver'"#
         ),
         Machine::Mac => format!(
             r#"ok=0; k=0; SECONDS=0; while :; do ~/.local/bin/cua-driver status </dev/null >/dev/null 2>&1 && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 60 ] && {{ k=1; launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
         ),
     }
-}
-
-/// pwsh's -EncodedCommand argument: base64 of the UTF-16LE text.
-fn encode_pwsh(script: &str) -> String {
-    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-        for i in 0..4 {
-            out.push(if i <= chunk.len() { B64[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
-        }
-    }
-    out
 }
 
 /// ssh expands `%` tokens in these paths and splits UserKnownHostsFile on whitespace, so refuse
@@ -612,39 +596,43 @@ mod tests {
         let win = remote_command(Machine::Win);
         assert!(win.contains(r#""$c" autostart kick </dev/null >/dev/null 2>&1"#), "{win}");
         assert!(!win.contains("//./pipe/"), "{win}");
-        assert!(win.contains("-EncodedCommand aQBmACAAKABbAEkATwAuAEQAaQByAGUAYwB0AG8AcgB5AF0AOgA6AEcAZQB0AEYAaQBsAGUAcwAoACcAXABcAC4AXABwAGkAcABlAFwAJwApACAALQBtAGEAdABjAGgAIAAnAGMAdQBhAC0AZAByAGkAdgBlAHIAJwApACAAewAgAGUAeABpAHQAIAAwACAAfQAgAGUAbABzAGUAIAB7ACAAZQB4AGkAdAAgADEAIAB9AA== </dev/null >/dev/null"), "{win}");
+        assert!(!win.contains("pwsh"), "{win}");
+        assert!(
+            win.contains(r#"timeout 5 "$c" status --socket '\\.\pipe\cua-driver' </dev/null >/dev/null 2>&1"#),
+            "{win}"
+        );
         assert!(win.contains("[ $SECONDS -ge 90 ] && break"), "{win}");
         assert!(win.contains(r#"exec "$c" mcp --socket '\\.\pipe\cua-driver'"#), "{win}");
     }
 
-    #[test]
-    fn pwsh_encoding() {
-        // Checked against Python: base64.b64encode(s.encode("utf-16-le")).
-        assert_eq!(encode_pwsh("exit 1"), "ZQB4AGkAdAAgADEA");
-        assert_eq!(encode_pwsh("ab"), "YQBiAA==");
-    }
-
-    /// The win command run by a local bash, with stand-ins for pwsh and cua-driver.exe:
-    /// the bash logic and quoting as Git Bash gets them.
+    /// The win command run by a local bash, with a stand-in for cua-driver.exe whose `status`
+    /// exits with `status_exit`, or hangs when it is `None`: the bash logic and quoting as Git
+    /// Bash gets them.
     #[test]
     fn win_command_in_bash() {
         use std::os::unix::fs::PermissionsExt;
-        let run = |pwsh_exit: i32| {
+        let run = |status_exit: Option<i32>| {
             let dir = tempfile::tempdir().unwrap();
-            let exe = |p: std::path::PathBuf, body: String| {
-                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-                std::fs::write(&p, body).unwrap();
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            };
             let d = dir.path();
-            exe(d.join("pwsh"), format!("#!/bin/sh\necho \"pwsh $*\" >> {}/log\nexit {pwsh_exit}\n", d.display()));
-            exe(
-                d.join("app/Programs/Cua/cua-driver/bin/cua-driver.exe"),
-                format!("#!/bin/sh\nprintf '%s\\n' \"cua $*\" >> {}/log\n", d.display()),
-            );
+            let exe = d.join("app/Programs/Cua/cua-driver/bin/cua-driver.exe");
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            let status = match status_exit {
+                Some(n) => format!("exit {n}"),
+                None => "exec sleep 30".to_string(),
+            };
+            std::fs::write(
+                &exe,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"cua $*\" >> {}/log\n[ \"$1\" = status ] && {status}\nexit 0\n",
+                    d.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
             let cmd = remote_command(Machine::Win)
-                .replace("/c/Program Files/PowerShell/7/pwsh.exe", &d.join("pwsh").display().to_string())
-                .replace("[ $SECONDS -ge 90 ]", "[ $SECONDS -ge 0 ]");
+                .replace("[ $SECONDS -ge 90 ]", "[ $SECONDS -ge 0 ]")
+                .replace("timeout 5 ", "timeout 1 ");
+            let started = std::time::Instant::now();
             let out = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(cmd)
@@ -652,18 +640,23 @@ mod tests {
                 .output()
                 .unwrap();
             let log = std::fs::read_to_string(d.join("log")).unwrap_or_default();
-            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned(), log)
+            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned(), log, started.elapsed())
         };
-        // pwsh finds the pipe: cua-driver gets the pipe's Windows name, nothing on stderr.
-        let (code, err, log) = run(0);
+        // The daemon answers: cua-driver gets the pipe's Windows name, nothing on stderr.
+        let (code, err, log, _) = run(Some(0));
         assert_eq!((code, err.as_str()), (Some(0), ""), "{log}");
-        assert!(log.starts_with("pwsh -NoProfile -NonInteractive -EncodedCommand aQBm"), "{log}");
-        assert!(log.ends_with("cua mcp --socket \\\\.\\pipe\\cua-driver\n"), "{log}");
+        assert_eq!(log, "cua status --socket \\\\.\\pipe\\cua-driver\ncua mcp --socket \\\\.\\pipe\\cua-driver\n");
         // It does not: the marker, exit 3, and cua-driver never runs as mcp.
-        let (code, err, log) = run(1);
+        let (code, err, log, _) = run(Some(1));
         assert_eq!(code, Some(3));
         assert!(err.contains(NOT_READY_MARKER), "{err}");
         assert!(!log.contains("cua mcp"), "{log}");
+        // status hangs: timeout ends it and the wait goes on to its cap.
+        let (code, err, log, took) = run(None);
+        assert_eq!(code, Some(3));
+        assert!(err.contains(NOT_READY_MARKER), "{err}");
+        assert!(!log.contains("cua mcp"), "{log}");
+        assert!(took < std::time::Duration::from_secs(10), "{took:?}");
     }
 
     #[test]
