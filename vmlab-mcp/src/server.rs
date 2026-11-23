@@ -134,7 +134,10 @@ impl Proxy {
         // From here Cua needs no cancel: the call completed, or rmcp already sent one (timeout).
         guard.disarm();
         match result {
-            Ok(ServerResult::CallToolResult(r)) => Ok(CallToolResponse::Complete(r)),
+            Ok(ServerResult::CallToolResult(mut r)) => {
+                add_hint(machine, &mut r);
+                Ok(CallToolResponse::Complete(r))
+            }
             Ok(ServerResult::InputRequiredResult(r)) => Ok(CallToolResponse::InputRequired(r)),
             Ok(ServerResult::CreateTaskResult(r)) => Ok(CallToolResponse::Task(r)),
             Ok(other) => Err(McpError::internal_error(
@@ -189,6 +192,52 @@ impl Proxy {
             return Ok(first);
         }
         Ok(catalog::check_tool(&self.catalog(), machine, tool))
+    }
+}
+
+/// One line of advice for the Cua errors that cost agents the most turns, appended to the text
+/// block that has the error. The structured fields stay as Cua sent them.
+fn hint(machine: Machine, text: &str) -> Option<&'static str> {
+    // "Windows did not activate ... no mouse input was sent", or "... was not foreground after
+    // the click" (the click was sent, and may have closed or changed the window).
+    if machine == Machine::Win && text.contains("foreground_unavailable") {
+        return Some(if text.contains("after the click") {
+            "Hint: the click was sent; read the window again (get_window_state, or ssh) before \
+             retrying. To bring a window to the front: ssh win-pwsh 'C:\\vmlab\\focus.ps1 <part of its \
+             title, process name or pid>'."
+        } else {
+            "Hint: bring the window to the front with ssh win-pwsh 'C:\\vmlab\\focus.ps1 <part of its \
+             title, process name or pid>' (exit code 1 if it did not come forward), then retry."
+        });
+    }
+    if text.contains("No screenshot of window") || text.contains("No screenshot frame") {
+        return Some(
+            "Hint: before a coordinate action, call get_window_state on this window with \
+             include_screenshot true (and the same `session`), and take x,y from that image; for \
+             screen pixels use scope \"desktop\" and get_desktop_state.",
+        );
+    }
+    if machine == Machine::Mac && text.contains("AXPress returned -25206") {
+        return Some(
+            "Hint: on macOS click a text field by x,y with delivery_mode \"foreground\", not by \
+             element_token, then type_text in a second call.",
+        );
+    }
+    None
+}
+
+fn add_hint(machine: Machine, result: &mut CallToolResult) {
+    if result.is_error != Some(true) {
+        return;
+    }
+    for block in &mut result.content {
+        if let ContentBlock::Text(t) = block {
+            if let Some(h) = hint(machine, &t.text) {
+                t.text.push('\n');
+                t.text.push_str(h);
+                return;
+            }
+        }
     }
 }
 
@@ -287,5 +336,62 @@ impl ServerHandler for Proxy {
         tracing::info!(%machine, tool = %name, ms = t.elapsed().as_millis() as u64,
             ok = matches!(&r, Ok(CallToolResponse::Complete(c)) if c.is_error != Some(true)), "call");
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err(text: &str) -> CallToolResult {
+        let mut r = CallToolResult::error(vec![ContentBlock::text(text)]);
+        r.structured_content = Some(serde_json::json!({"code": "tool_invocation_failed"}));
+        r
+    }
+
+    fn text(r: &CallToolResult) -> &str {
+        r.content[0].as_text().unwrap().text.as_str()
+    }
+
+    #[test]
+    fn hints_on_costly_errors() {
+        let sent = "foreground_unavailable: exact target HWND 0x100d2 or a verified same-process \
+                    post-action window was not foreground after the click (actual foreground HWND 0x102d4)";
+        let mut r = err(sent);
+        add_hint(Machine::Win, &mut r);
+        let t = text(&r);
+        assert!(t.starts_with(sent) && t.contains("\nHint: the click was sent"), "{t}");
+        assert!(t.contains(r"ssh win-pwsh 'C:\vmlab\focus.ps1 <part of its title"), "{t}");
+        assert_eq!(t.lines().count(), 2);
+        assert_eq!(r.structured_content, Some(serde_json::json!({"code": "tool_invocation_failed"})));
+
+        let mut r = err("foreground_unavailable: Windows did not activate exact target HWND 0x2014c (actual foreground HWND 0x10248); no mouse input was sent");
+        add_hint(Machine::Win, &mut r);
+        assert!(text(&r).contains("\nHint: bring the window to the front with ssh win-pwsh"), "{}", text(&r));
+        // focus.ps1 is Windows'.
+        let mut r = err("foreground_unavailable: no");
+        add_hint(Machine::Mac, &mut r);
+        assert_eq!(text(&r), "foreground_unavailable: no");
+
+        for m in [Machine::Win, Machine::Mac] {
+            let mut r = err("No screenshot of window 131970 in this session: it has not been read yet.");
+            add_hint(m, &mut r);
+            assert!(text(&r).contains("\nHint: before a coordinate action, call get_window_state"));
+            let mut r = err("No screenshot frame for window 131970: its latest read had no screenshot");
+            add_hint(m, &mut r);
+            assert!(text(&r).contains("include_screenshot true"));
+        }
+
+        let mut r = err("AXPress returned -25206");
+        add_hint(Machine::Mac, &mut r);
+        assert!(text(&r).ends_with("not by element_token, then type_text in a second call."), "{}", text(&r));
+
+        // Only on errors, and other errors are left alone.
+        let mut ok = CallToolResult::success(vec![ContentBlock::text("No screenshot of window 1")]);
+        add_hint(Machine::Win, &mut ok);
+        assert_eq!(text(&ok), "No screenshot of window 1");
+        let mut r = err("background_unavailable");
+        add_hint(Machine::Win, &mut r);
+        assert_eq!(text(&r), "background_unavailable");
     }
 }

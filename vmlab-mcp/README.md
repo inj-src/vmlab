@@ -30,7 +30,11 @@ A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and 
   - Every session still starts its own `cua-driver mcp`, because Cua state (element refs, sessions) belongs to a connection.
   - The master process outlives the session for 10 minutes by design. ServerAlive ends it within about 15 s once the VM goes away.
 - **outputSchema is served as Cua sends it.** It is a quarter of tools/list's bytes, but neither client gives it to the model: on 2026-11-23, Claude Code 2.1.330 and Codex 0.171, pointed at a fake model API, sent each MCP tool's name, description and input schema only (Codex as `parameters`, Claude Code as `input_schema`). Dropping it would save no tokens.
-- **Proxying.** Results pass through unchanged, including image content and JSON-RPC errors. Concurrent calls run in parallel. A `notifications/cancelled` from the agent is forwarded to Cua. Progress notifications are mapped back to the agent's progress token. If a connect changes the unified list, the agent gets `notifications/tools/list_changed`.
+- **Proxying.** Results pass through unchanged, including image content and JSON-RPC errors, with one exception: three Cua errors that cost agents several turns get a line of advice appended to their text (`hint` in `src/server.rs`), their structured fields left as they are:
+  - `foreground_unavailable` on win: bring the window forward with `ssh win-pwsh 'C:\vmlab\focus.ps1 <title, process name or pid>'`; when the error says the click was sent, read the window again first.
+  - `No screenshot of window` / `No screenshot frame`: read the window with get_window_state (include_screenshot true, same `session`) before a coordinate action.
+  - `AXPress returned -25206` on mac: click a text field by x,y in the foreground, then type in a second call (the rule in the skill's gui.md).
+  - Concurrent calls run in parallel. A `notifications/cancelled` from the agent is forwarded to Cua. Progress notifications are mapped back to the agent's progress token. If a connect changes the unified list, the agent gets `notifications/tools/list_changed`.
 - **Cleanup.** When the session ends (stdin EOF, SIGTERM, SIGINT or SIGHUP), each upstream's stdin is closed, and SIGTERM and then SIGKILL follow if needed. If vmlab-mcp itself is SIGKILLed, `PR_SET_PDEATHSIG` stops the ssh children. Either way the remote `cua-driver mcp` exits.
 - stdout carries only MCP messages. Logs go to stderr (`RUST_LOG`, default `info,rmcp=warn`).
 

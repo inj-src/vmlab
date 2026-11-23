@@ -239,7 +239,7 @@ fn proxy_routes_strips_and_passes_through() {
 
     // The connect refreshed the mac cache, which changed the unified list.
     let cached: Value = serde_json::from_slice(&std::fs::read(f.cache.join("cua-tools-mac.json")).unwrap()).unwrap();
-    assert_eq!(cached.as_array().unwrap().len(), 6);
+    assert_eq!(cached.as_array().unwrap().len(), 7);
     assert_eq!(cached[0]["description"], "fake echo");
     assert!(
         c.notes.iter().any(|n| n["method"] == "notifications/tools/list_changed"),
@@ -266,6 +266,13 @@ fn proxy_routes_strips_and_passes_through() {
     assert_eq!(r["error"]["code"], -32602);
     assert_eq!(r["error"]["message"], "bad window id");
     assert_eq!(r["error"]["data"], json!({"hint": "x"}));
+
+    // A costly Cua error gets one line of advice; its structured fields stay.
+    let r = c.call_wait(7, "fgerr", json!({"machine": "win"}));
+    assert!(is_error(&r));
+    assert!(text(&r).starts_with("foreground_unavailable: Windows did not activate"), "{r}");
+    assert!(text(&r).contains("\nHint: bring the window to the front with ssh win-pwsh"), "{r}");
+    assert_eq!(r["result"]["structuredContent"], json!({"code": "tool_invocation_failed"}));
 
     // Both upstreams exit when the session ends.
     let all: Vec<i32> = pids(&f, "win").into_iter().chain(pids(&f, "mac")).collect();

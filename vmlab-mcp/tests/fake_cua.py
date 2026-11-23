@@ -31,7 +31,7 @@ def send(obj):
 
 TOOLS = [
     {"name": n, "description": f"fake {n}", "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}}}
-    for n in ["echo", "sleep", "image", "fail", "die", "huge"]
+    for n in ["echo", "sleep", "image", "fail", "die", "huge", "fgerr"]
 ]
 
 IMAGE = [
@@ -61,6 +61,9 @@ def call(rid, params):
         send({"jsonrpc": "2.0", "id": rid, "result": {"content": IMAGE, "structuredContent": {"w": 1, "h": 1}}})
     elif name == "fail":
         send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "bad window id", "data": {"hint": "x"}}})
+    elif name == "fgerr":
+        text = "foreground_unavailable: Windows did not activate exact target HWND 0x1; no mouse input was sent"
+        send({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": text}], "structuredContent": {"code": "tool_invocation_failed"}, "isError": True}})
     elif name == "die":
         os._exit(3)
     elif name == "huge":
