@@ -212,7 +212,13 @@ start(){
     inproc) "$QEMU" -netdev help 2>/dev/null | grep -qx user || die "WIN_VENUS_NET=inproc: $QEMU has no user-mode network (build-qemu.sh --enable-slirp)" ;;
     *) die "WIN_VENUS_NET is helper or inproc, not '$netmode'" ;;
   esac
-  # The guest's CPUs: 6 cores sharing the fast host CPUs 0-7. With the Hyper-V enlightenments
+  # The guest's CPUs (WIN_VENUS_CPUS=8, the default since 2026-11-23): 4 cores of 2 threads,
+  # each on its own fast host CPU (0-7: 4 cores of 2 threads, so the guest's pairs are real
+  # pairs), with host-cache-info and hv-avic; the cache disk on an iothread of its own and both
+  # disks with a 32 MiB L2 table cache. Measured 2026-11-23, a clean release build of ripgrep
+  # without sccache, 3 boots of each in turn, 3 builds a boot: median 27.0 s (24.9-29.6) against
+  # 29.3 s (27.5-34.6) for WIN_VENUS_CPUS=6, everything as it was before: 6 cores sharing the
+  # fast host CPUs 0-7, one iothread, QEMU's L2 cache. Below, with the Hyper-V enlightenments
   # below plus three more (WIN_VENUS_HV_EXTRA=1, the default since 2026-11-23): direct synthetic
   # timers (they need hv_stimer), hypercall input in XMM registers, extended TLB flush ranges
   # (they need hv_tlbflush). Measured 2026-11-23: a UI Automation read of a window 27-35%
@@ -224,6 +230,12 @@ start(){
     0) ;;
     1) cpu+=,hv-stimer-direct,hv-xmm-input,hv-tlbflush-ext ;;
     *) die "WIN_VENUS_HV_EXTRA is 0 or 1, not '$WIN_VENUS_HV_EXTRA'" ;;
+  esac
+  local cio=io0 l2=''
+  case ${WIN_VENUS_CPUS:-8} in
+    6) ;;
+    8) smp=8,sockets=1,cores=4,threads=2 cpu+=,host-cache-info=on,hv-avic cio=io1 l2=,l2-cache-size=33554432 ;;
+    *) die "WIN_VENUS_CPUS is 8 or 6, not '$WIN_VENUS_CPUS'" ;;
   esac
   [[ -n $node ]] || die "no $gpu render node"
   alive qemu && die "already running (win-venus.sh stop)"
@@ -275,8 +287,9 @@ start(){
     if [[ ! -f $CACHE/win.qcow2 ]]; then
       if [[ -f $CACHE_EMPTY ]]; then cp "$CACHE_EMPTY" "$CACHE/win.qcow2"; else qemu-img create -q "${NEW_QCOW2[@]}" "$CACHE/win.qcow2" 25G; fi
     fi
-    cache=(-blockdev "driver=qcow2,node-name=cache0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename=$CACHE/win.qcow2"
-      -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=io0,addr=2)
+    cache=(-blockdev "driver=qcow2,node-name=cache0,cache.direct=on,discard=unmap$l2,file.driver=file,file.aio=io_uring,file.filename=$CACHE/win.qcow2"
+      -device virtio-blk-pci,drive=cache0,serial=vmlabcache,iothread=$cio,addr=2)
+    [[ $cio == io0 ]] || cache=(-object iothread,id=$cio "${cache[@]}")
   fi
 
   # (the CD is on the q35 board's own SATA controller, so it moves no PCI slot)
@@ -303,7 +316,7 @@ start(){
     -drive if=pflash,format=raw,readonly=on,file="$(firmware)" \
     -drive if=pflash,format=raw,file="$S/OVMF_VARS.fd" \
     -object iothread,id=io0 \
-    -blockdev driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap,file.driver=file,file.aio=io_uring,file.filename="$DISK" \
+    -blockdev "driver=qcow2,node-name=disk0,cache.direct=on,discard=unmap$l2,file.driver=file,file.aio=io_uring,file.filename=$DISK" \
     -device virtio-blk-pci,drive=disk0,bootindex=1,iothread=io0,addr=1 "${cache[@]}" \
     "${cdrom[@]}" \
     "${net[@]}" \

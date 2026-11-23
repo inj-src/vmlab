@@ -58,7 +58,12 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   as the Mac's), with the SSH port and the shared folder. Only SSH is forwarded.
   `WIN_VENUS_NET=helper` puts a second QEMU in front as the NAT box, as before 2026-11-23; the
   guest's NIC, MAC and slot are the same either way.
-- **CPUs**: 6 cores sharing the fast host CPUs 0-7, with Hyper-V enlightenments, among them
+- **CPUs**: 4 cores of 2 threads, each guest CPU on a fast host CPU of its own (0-7, which are
+  4 cores of 2 threads too), with `host-cache-info` and `hv-avic`; the cache disk on an I/O
+  thread of its own, both disks with a 32 MiB L2 table cache (`WIN_VENUS_CPUS=8`, the default
+  since 2026-11-23). A clean release build of ripgrep without sccache, 3 boots of each in turn:
+  median 27.0 s (24.9-29.6) against 29.3 s (27.5-34.6) for `WIN_VENUS_CPUS=6`, all as before:
+  6 cores sharing the fast host CPUs 0-7. Either way with Hyper-V enlightenments, among them
   `hv-stimer-direct`, `hv-xmm-input` and `hv-tlbflush-ext` since 2026-11-23
   (`WIN_VENUS_HV_EXTRA=0` leaves those three out). With them ten UI Automation reads of a window
   took a median 449 ms against 615-688 ms, and a release build of ripgrep as long (29.4 s).
