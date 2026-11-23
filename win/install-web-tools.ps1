@@ -46,17 +46,30 @@ $vars = [ordered]@{
 foreach ($v in $vars.GetEnumerator()) { [Environment]::SetEnvironmentVariable($v.Key, $v.Value, 'Machine') }
 
 # `fnm use` works in every pwsh session (SSH's too); with no argument it reads the folder's
-# .node-version or .nvmrc
+# .node-version or .nvmrc. Lazily, as in bash-env.sh: `fnm env` runs at the first fnm command, not
+# in every pwsh (measured 2026-11-23: it cost 72-89 ms on each `ssh win-pwsh` call). Then `fnm use
+# system`: fnm makes the first version anyone installs its default, and its versions are on the
+# cache disk, which outlives a reset, so every session starts on the VM's node.
+# The marker is not "# vmlab: ...": desktop-ssh.ps1 deletes such lines from this profile.
 $hook = @'
-# vmlab: fnm's shell hook (win/install-web-tools.ps1). Without a `fnm use`, node is the VM's own.
-if (Get-Command fnm -ErrorAction SilentlyContinue) {
-    # (`fnm use system`: fnm makes the first version anyone installs its default, and its
-    # versions are on the cache disk, which outlives a reset: every session starts on the VM's node)
-    try { fnm env --shell powershell | Out-String | Invoke-Expression; fnm use system *> $null } catch { }
+# fnm, lazily (vmlab: win/install-web-tools.ps1). Without a `fnm use`, node is the VM's own.
+function global:fnm {
+    $exe = (Get-Command fnm -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if (-not $exe) { Write-Error 'fnm is not installed'; return }
+    if (-not $env:FNM_MULTISHELL_PATH) {
+        & $exe env --shell powershell | Out-String | Invoke-Expression
+        & $exe use system *> $null
+    }
+    & $exe @args
 }
 '@
 $profilePath = 'C:\Program Files\PowerShell\7\profile.ps1'
-$kept = if (Test-Path $profilePath) { (Get-Content $profilePath -Raw) -replace '(?s)# vmlab: fnm.*?\r?\n}\r?\n?', '' } else { '' }
+# Earlier hooks: with the old marker; without it (desktop-ssh.ps1 took it); this one
+$kept = if (Test-Path $profilePath) {
+    (Get-Content $profilePath -Raw) -replace '(?s)# vmlab: fnm.*?\r?\n}\r?\n?', '' `
+        -replace '(?s)if \(Get-Command fnm -ErrorAction SilentlyContinue\) \{.*?\r?\n}\r?\n?', '' `
+        -replace '(?s)# fnm, lazily \(vmlab.*?\r?\n}\r?\n?', ''
+} else { '' }
 Set-Content $profilePath ($kept.TrimEnd() + "`r`n" + $hook).TrimStart() -Encoding utf8
 
 $hosts = 'C:\Windows\System32\drivers\etc\hosts'
