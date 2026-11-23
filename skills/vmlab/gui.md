@@ -13,7 +13,7 @@ Found in the trials of 2026-11-14; each of these fails quietly the other way.
 - **The first `get_window_state` of an Electron window** may show only the frame and the menu: read it again after the first click.
 - **A checkbox's ticked state** is not in the accessibility tree: check the screenshot or the app's own output.
 - **A `<select>`:** on `win`, focus it and press the option's first letter (`press_key`, foreground); on `mac`, `set_value` on the select.
-- **A save dialog:** set the file name with `set_value` on the field (`type_text` on `win` appends to the selected name while reporting that it replaced it). The folder: `set_value` on Where on `mac`; on `win`, click it in the sidebar in the foreground.
+- **A save dialog:** choose the folder first, then give only the file name: on `mac` a path in the name field (`/Users/dev/x/a.txt`) saves a file named `Users:dev:x:a.txt` where the dialog already is. Set the file name with `set_value` on the field (`type_text` on `win` appends to the selected name while reporting that it replaced it). The folder: `set_value` on Where on `mac`; on `win`, click it in the sidebar in the foreground.
 - **Closing a window:** a background click on Close can leave it open, and a foreground one can return `foreground_unavailable` after it closed. Check over `ssh` that the process is gone.
 
 ## A browser tab: the `browser_*` tools

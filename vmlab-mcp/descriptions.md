@@ -287,7 +287,7 @@ Keys held from press to release: cmd, shift, option (alt), ctrl. On Windows only
 True when the coordinates are pixels of the last zoom image of this pid.
 
 ## type_text fp=dc4fac0eae84c32c
-Inserts text into an element (`element_token`) or into the focused element of pid's window. It types characters only: Return, Tab, Escape and arrows go through press_key or hotkey. To replace a field's whole value, set_value is more reliable; on Windows type_text into a save dialog's selected file name appends to it while reporting it replaced. Read the field back (get_window_state) before trusting the result: for web content the tool cannot verify what the page received.
+Inserts text into an element (`element_token`) or into the focused element of pid's window. It types characters only: Return, Tab, Escape and arrows go through press_key or hotkey. To replace a field's whole value, set_value is more reliable; on Windows type_text into a save dialog's selected file name appends to it while reporting it replaced. On macOS a save dialog's name field takes a name only: a path typed there (`/Users/dev/bench/note.txt`) saves a file named `Users:dev:bench:note.txt` in the folder the dialog shows. Choose the folder first (cmd+shift+G, Go to Folder, or set_value on Where), then give the name. Read the field back (get_window_state) before trusting the result: for web content the tool cannot verify what the page received.
 
 From the lab's trials: in an Electron or Chromium window (VS Code, Slack, browsers), pass delivery_mode "foreground": in the background Windows refuses the keys and macOS drops them while reporting "sent, unverified". Click the field first in its own call, then type; the `x`,`y` form, which clicks and types in one call, lost every key on macOS while reporting them sent. On Windows, Store and WinUI apps need an element_token (background keystrokes don't reach them). `delay_ms` paces one key per character, for search boxes that debounce.
 
@@ -356,7 +356,7 @@ X in pixels of the get_window_state screenshot: the tool clicks there to focus, 
 Y in the same screenshot as x.
 
 ## set_value fp=194885feb4fbc994
-Sets an element's value in one call, by `element_token`: a text field, slider, stepper, date picker, or the option of a dropdown. Prefer it over typing when a field's whole value should change, for example a save dialog's file name. Some web inputs ignore it: then use type_text and read the field back.
+Sets an element's value in one call, by `element_token`: a text field, slider, stepper, date picker, or the option of a dropdown. Prefer it over typing when a field's whole value should change, for example a save dialog's file name. On macOS that field takes a name only: a path given there becomes a file named `Users:dev:…:name` in the folder the dialog shows, so set the folder first (set_value on Where, or cmd+shift+G). Some web inputs ignore it: then use type_text and read the field back.
 
 - Dropdowns: give the option's text as `value`. An unknown value is refused with the list of options. On Windows this works for native Win32 combo boxes (dialogs, WinForms); other combo boxes get a plain value write the app may not treat as a choice (for a web `<select>` there, see press_key). On macOS it works for popup buttons and `<select>` in Safari, Chrome and Electron, in the background.
 - macOS Finder: on a file name cell (list or icon view) it renames the file; give the full new name with its extension. Finder's Get Info Name field is refused with `file_name_needs_rename`.
