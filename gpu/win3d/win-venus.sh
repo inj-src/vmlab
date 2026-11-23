@@ -71,10 +71,10 @@
 # QEMU is vmlab-win3d's (patched for NVIDIA), built here with a window (build-qemu.sh). Their
 # release build, opt/qemu/, has no user-mode network, so the system QEMU runs beside it as a
 # NAT box: its slirp backend and a socket backend share a hub, and the guest's NIC connects to
-# that socket. Guest: 10.0.2.15, host: 10.0.2.2. That arrangement is kept for both builds.
-# WIN_VENUS_NET=inproc (on trial): the lab's build has slirp, so the VM's own QEMU does the
-# network, the shared folder and the SSH port, and no NAT box runs. The guest's NIC is the same
-# (MAC, slot). The default, helper, is the NAT box.
+# that socket. Guest: 10.0.2.15, host: 10.0.2.2.
+# The lab's build has slirp, so by default (WIN_VENUS_NET=inproc, since 2026-11-23) the VM's own
+# QEMU does the network, the shared folder and the SSH port, and no NAT box runs. The guest's
+# NIC is the same (MAC, slot) either way. WIN_VENUS_NET=helper: the NAT box, as before.
 set -euo pipefail
 
 HERE=/vmlab/tools/vmlab/gpu/win3d
@@ -105,7 +105,7 @@ ISO=$HERE/win3d-guest.iso
 SSH_PORT=2222 VNC_DISPLAY=11      # VNC on 127.0.0.1:5911
 VCPUS=0-7                         # host CPUs for the guest's CPUs: the fast cores (../pin.py)
 # The host folder both VMs see as \\10.0.2.4\qemu (in the guest: C:\share). The QEMU that does
-# the network (the NAT helper, or the VM's own with WIN_VENUS_NET=inproc) starts a private
+# the network (the VM's own, or the NAT helper with WIN_VENUS_NET=helper) starts a private
 # smbd for it at each connection (../share-smbd.sh); the host's own
 # Samba services are masked, so nothing serves it outside the VM. WIN_VENUS_SHARE=off: none.
 SHARE=${WIN_VENUS_SHARE:-/vmlab/share}
@@ -197,7 +197,7 @@ start(){
       [[ -n ${WIN_VENUS_WINDOW_X11:-} ]] && env+=(--setenv=GDK_BACKEND=x11)
       ;;
   esac
-  local netmode=${WIN_VENUS_NET:-helper}
+  local netmode=${WIN_VENUS_NET:-inproc}
   case $netmode in
     helper) ;;
     inproc) "$QEMU" -netdev help 2>/dev/null | grep -qx user || die "WIN_VENUS_NET=inproc: $QEMU has no user-mode network (build-qemu.sh --enable-slirp)" ;;

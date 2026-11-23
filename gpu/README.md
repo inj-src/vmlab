@@ -54,12 +54,13 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   same tool with the screen's size and picture taken from VNC (`QDRIVE_VNC=5911`), which adds
   `click`, `move`, `drag`, `size` and `shot`. Windows takes these keys for a keyboard's: a
   low-level keyboard hook sees them without the "injected" flag that `SendInput` leaves.
-- **Network**: guest 10.0.2.15, host 10.0.2.2, through a second QEMU that acts as the NAT box.
-  Only SSH is forwarded.
+- **Network**: guest 10.0.2.15, host 10.0.2.2, done by the VM's own QEMU (user-mode network,
+  as the Mac's), with the SSH port and the shared folder. Only SSH is forwarded.
+  `WIN_VENUS_NET=helper` puts a second QEMU in front as the NAT box, as before 2026-11-23; the
+  guest's NIC, MAC and slot are the same either way.
 - Logs: `/vmlab/run/win-venus/qemu.log` (QEMU and the render server). `WIN_VENUS_STRACE=FILE`
   records the system calls of QEMU's main thread.
 - **Switches on trial** (each off by default until it is tested on the VM):
-  - `WIN_VENUS_NET=inproc`: the VM's own QEMU does the network, SSH port and shared folder (as the Mac's does); no NAT box QEMU runs. Same NIC, MAC and slot. Default `helper`.
   - `WIN_VENUS_SCALE_DIRECT=1`: scale-watch keeps one SSH connection (ControlMaster) and runs `set-mode.ps1` and `set-scale.ps1` in one command on the desktop (pwsh 7, no scheduled task), timing each in `scale.log`; where SSH is not on the desktop (a state from before desktop-ssh) it goes back to `run-interactive.ps1`.
   - `WIN_VENUS_TOPOLOGY=smt`: `-smp 6,sockets=1,cores=3,threads=2`, each guest CPU on a host CPU of its own, a guest core's two threads on one fast core's two (host CPUs 0-5, `pin.py --one-each`). Default `flat`: 6 cores sharing host CPUs 0-7.
   - `WIN_VENUS_HV_EXTRA=1`: adds `hv-stimer-direct`, `hv-xmm-input` and `hv-tlbflush-ext` to `-cpu` (they need `hv_stimer` and `hv_tlbflush`, which are on already).
