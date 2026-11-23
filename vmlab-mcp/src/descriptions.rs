@@ -109,23 +109,46 @@ impl Overrides {
             if let Some(d) = &o.desc {
                 obj.insert("description".into(), json!(d));
             }
-            let Some(props) = obj
-                .get_mut("inputSchema")
-                .and_then(|s| s.get_mut("properties"))
-                .and_then(Value::as_object_mut)
-            else {
+            let Some(schema) = obj.get_mut("inputSchema").and_then(Value::as_object_mut) else {
                 continue;
             };
-            for (pname, prop) in props.iter_mut() {
-                let text = o.params.get(pname).or_else(|| self.shared.get(pname));
-                if let (Some(text), Some(p)) = (text.filter(|t| !t.is_empty()), prop.as_object_mut()) {
-                    p.insert("description".into(), json!(text));
-                }
+            let removed = self.apply_props(o, schema, "");
+            if let Some(Value::Array(req)) = schema.get_mut("required") {
+                req.retain(|r| !r.as_str().is_some_and(|r| removed.contains(&r.to_string())));
             }
         }
         true
     }
+
+    /// Set the texts of a schema's properties, and of their own properties one level down
+    /// (`target.pid`). Returns the properties removed with `(remove)`.
+    fn apply_props(&self, o: &Override, schema: &mut serde_json::Map<String, Value>, prefix: &str) -> Vec<String> {
+        let mut removed = Vec::new();
+        let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+            return removed;
+        };
+        for (pname, prop) in props.iter_mut() {
+            let path = if prefix.is_empty() { pname.clone() } else { format!("{prefix}.{pname}") };
+            let text = o.params.get(&path).or_else(|| self.shared.get(&path));
+            let Some(p) = prop.as_object_mut() else { continue };
+            match text.map(String::as_str) {
+                Some(REMOVE) => removed.push(pname.clone()),
+                Some(t) if !t.is_empty() => {
+                    p.insert("description".into(), json!(t));
+                }
+                _ => {}
+            }
+            if prefix.is_empty() {
+                self.apply_props(o, p, &path);
+            }
+        }
+        props.retain(|k, _| !removed.contains(k));
+        removed
+    }
 }
+
+/// A parameter text that leaves the parameter out of the schema (for one Cua ignores).
+pub const REMOVE: &str = "(remove)";
 
 /// FNV-1a 64 of the canonical JSON (keys sorted) of what an override depends on: each VM's
 /// description and input schema, `null` for a VM without the tool.
@@ -222,6 +245,20 @@ mod tests {
             assert_eq!(p["session"]["description"], "cua session");
             assert_eq!(p["pid"]["description"], "cua pid");
         }
+        // Nested texts and (remove).
+        let nested = json!({"name": "t", "inputSchema": {"type": "object", "required": ["old", "pid"],
+            "properties": {"old": {"type": "string"}, "pid": {"type": "integer"},
+                "target": {"type": "object", "properties": {"kind": {"type": "string", "description": "cua kind"}}}}}});
+        let fp2 = fingerprint(Some(&nested), None);
+        let o2 = Overrides::parse(&format!(
+            "## (every tool)\n### target.kind\nKind.\n## t fp={fp2}\n### old\n(remove)\n"
+        ));
+        let (mut t, mut none) = (Some(nested), None);
+        assert!(o2.apply("t", &mut t, &mut none));
+        let s = &t.unwrap()["inputSchema"];
+        assert_eq!(s["properties"]["target"]["properties"]["kind"]["description"], "Kind.");
+        assert!(s["properties"].get("old").is_none());
+        assert_eq!(s["required"], json!(["pid"]));
         // Cua changed the tool: nothing applied.
         let (mut win, mut mac) = (Some(def("new win text")), Some(m));
         assert!(!o.apply("click", &mut win, &mut mac));
@@ -255,7 +292,13 @@ mod tests {
             }
             for p in o.params.keys() {
                 let has = [&w, &m].iter().any(|t| {
-                    t.as_ref().is_some_and(|t| t["inputSchema"]["properties"].get(p).is_some())
+                    t.as_ref().is_some_and(|t| {
+                        // A literal name (Cua's set_config has `cursor.badges`), or `a.b` one
+                        // level down.
+                        let props = &t["inputSchema"]["properties"];
+                        let nested = p.split_once('.').map(|(a, b)| &props[a]["properties"][b]);
+                        props.get(p).is_some() || nested.is_some_and(|n| !n.is_null())
+                    })
                 });
                 if !has {
                     problems.push(format!("{name}: no parameter {p}"));

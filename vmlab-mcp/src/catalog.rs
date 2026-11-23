@@ -283,8 +283,8 @@ impl Catalog {
 
 fn machine_property(only: Option<Machine>) -> Value {
     let desc = match only {
-        None => "The VM: \"win\" (Windows 11) or \"mac\" (macOS).".to_string(),
-        Some(m) => format!("The VM: only \"{}\" ({}) has this tool.", m.name(), m.label()),
+        None => "\"win\" or \"mac\".".to_string(),
+        Some(m) => format!("\"{}\": only {} has this tool.", m.name(), m.label()),
     };
     json!({"type": "string", "enum": ["win", "mac"], "description": desc})
 }
@@ -611,7 +611,7 @@ mod tests {
         let m = by_name(&u, "mac_only")["description"].as_str().unwrap();
         assert!(m.starts_with("[macOS only"), "{m}");
         let mp = &by_name(&u, "mac_only")["inputSchema"]["properties"]["machine"]["description"];
-        assert!(mp.as_str().unwrap().contains("only \"mac\" (macOS) has this tool"));
+        assert_eq!(mp, "\"mac\": only macOS has this tool.");
         assert!(by_name(&u, "a")["description"] == "A.");
     }
 

@@ -10,7 +10,9 @@ How the server reads this file (built into the binary; `cargo build` after editi
 - `## name fp=<16 hex>` starts a tool. Its text, up to the first `### `, is the tool's
   description; an empty text keeps the merged Cua description. `### param` gives a parameter's
   description (its type, enum and limits stay Cua's); an empty text keeps Cua's. The server
-  adds the marks "(win only)", "(mac only)" and "(required on win)" itself.
+  adds the marks "(win only)", "(mac only)" and "(required on win)" itself. `### a.b` is
+  property `b` of object parameter `a` (one level down). The text `(remove)` leaves the
+  parameter out of the schema: only for one Cua ignores.
 - `fp` is the fingerprint of Cua's definitions of the tool on both VMs (description and input
   schema). When Cua changes the tool, the fingerprint no longer matches, and the server serves
   Cua's own text for that tool and logs a warning: a description that is long but true beats
@@ -18,8 +20,8 @@ How the server reads this file (built into the binary; `cargo build` after editi
   `cargo test` fails while one here is stale; read Cua's new text before updating it.
 - `## (every tool)` gives parameter texts used by every tool listed here that has that
   parameter, unless the tool gives its own. A tool listed with an empty body gets only these.
-  Tools not listed (the browser and session tools, whose `session` means something else) keep
-  Cua's texts.
+  The browser tools give their own `session` and `delivery_mode`, which mean something else
+  there. Tools not listed (the opt-in session tools) keep Cua's texts.
 - Lines before the first `## ` (this preamble) are ignored.
 
 Sources for how these are written: Anthropic's tool-definition guidance ("what the tool does,
@@ -29,7 +31,7 @@ trials of 2026-11-14 for the keyboard and focus rules (`skills/vmlab/gui.md`).
 ## (every tool)
 
 ### session
-Optional label for this agent's Cua session. Pass the same short label on every call of a task, or omit it everywhere.
+Optional Cua session label: the same one on every call of a task, or none.
 
 ### element_token
 Element handle `<snapshot_id>:<N>` for row `[N]` of a get_window_state read (for example "s0000002a:11"). It goes stale once a newer read of the same window replaces that snapshot; the error then names the current one.
@@ -38,10 +40,31 @@ Element handle `<snapshot_id>:<N>` for row `[N]` of a get_window_state read (for
 "default" waits up to 300 ms to report a new window, menu, dialog or focus change caused by the action; "none" returns at once and reports such a change on the next action.
 
 ### delivery_mode
-"background" (default) acts without raising the window or moving the user's focus; "foreground" briefly brings the window to the front, acts, and restores the previous front window. Try background first and switch when the tool answers `background_unavailable`. Exception, from the lab's trials: keys and typing into an Electron or Chromium window need "foreground" from the start (in the background Windows refuses them and macOS loses them while reporting "sent, unverified").
+"background" (default) acts without raising the window; "foreground" raises it for the action and then restores the front window: use it after a `background_unavailable` answer, and for keys into Electron.
 
 ### target
-The exact surface the coordinates belong to: {"kind": "window", "pid", "window_id"} or {"kind": "desktop", "display_id": "primary"}. Passing pid and window_id (or scope "desktop") is the same and shorter.
+Where x,y belong: {"kind": "window", "pid", "window_id"} or {"kind": "desktop", "display_id": "primary"}. pid and window_id (or scope "desktop") say the same, shorter.
+
+### target.kind
+"window" or "desktop".
+
+### target.display_id
+"primary" (kind "desktop").
+
+### target.pid
+Kind "window".
+
+### target.window_id
+Kind "window".
+
+### target_id
+From get_browser_state's bind.
+
+### tab_id
+From get_browser_state's bind.
+
+### ref
+A `p<snapshot>:<index>` ref from the tab's latest get_browser_state; navigation or a newer snapshot stales it.
 
 ### scope
 "window" (default): x,y are pixels of the get_window_state screenshot of pid/window_id. "desktop": no pid or window_id, and x,y are pixels of the get_desktop_state screenshot.
@@ -84,7 +107,7 @@ On a re-read after acting: "latest" (or an earlier snapshot_id of this window) r
 Time limit for the tree walk in milliseconds (default 1000). When it runs out the partial tree comes back with `truncated: true`; retry with more (e.g. 5000) or narrow with query or max_depth.
 
 ### capture_mode
-Obsolete and ignored: the tool always returns both the tree and a screenshot.
+(remove)
 
 ### pid
 Process ID of the window's app (from list_windows or launch_app).
@@ -579,6 +602,129 @@ Allow launching a separate driver-owned browser with `profile`. Default false.
 
 ### profile
 The driver-owned profile to launch with allow_launch: {"mode": "isolated_new"} for a fresh one, or {"mode": "isolated_named", "name": "…"} to reuse a named one.
+
+## get_browser_state fp=8ad7b4867082b903
+Reads a web page in Chrome, Edge or Brave through DevTools, without moving the pointer or raising the window; use it, not the desktop tools, for any page in those browsers. First bind: pid and window_id of the browser window return a target_id and tab ids (the browser_* tools refuse heuristic bindings). Then read: target_id and tab_id return the page's elements with refs `p<snapshot>:<index>` for the browser_* tools. snapshot_format "semantic_v2" returns an outline with visible content first, typed action refs, scoped reads (query, scope_ref) and a continuation. A browser not attached yet refuses with `browser_consent_required` or `browser_requires_setup`, and detail.next_call names the browser_prepare call to make. Setup and recovery: `get_guide({topic: "browser"})`.
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+### pid
+The browser process (bind).
+
+### window_id
+The browser window, owned by pid (bind).
+
+### snapshot_format
+"dom_refs_v1" (default) or "semantic_v2".
+
+### include_screenshot
+Also capture the tab's viewport as PNG, without selecting the tab or raising the window; refuses if it cannot. Default false.
+
+### query
+semantic_v2: only content whose role, name or visible text matches.
+
+### scope_ref
+semantic_v2: only the subtree of this ref.
+
+### continuation
+semantic_v2: the continuation of an earlier response, to read on.
+
+## browser_navigate fp=0e3009e22443ed4d
+Loads a URL (http, https or about) in a bound tab. It stales every ref of that tab.
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+## browser_click fp=38c422e7691daab1
+Clicks a page element (`ref`) or viewport x,y (CSS pixels) in a bound tab. The default route sends trusted mouse events through DevTools and refuses where that would raise the browser window, unless delivery_mode is "foreground". input_route "dom_event" sends a synthetic DOM click at the ref's center instead; it proves the dispatch, not that the control acted (controls that check for trusted input ignore it). If the click opens a JavaScript dialog, the call returns at once with a dialog block (present, kind, dialog_id) for browser_dialog; clicks in that tab are refused while it is open.
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+### delivery_mode
+"background" (default) refuses trusted input where it would raise the browser window; "foreground" accepts that.
+
+### input_route
+"trusted" (default) or "dom_event" (synthetic, needs ref; read the page again to check it worked).
+
+### x
+Viewport x in CSS pixels, instead of ref.
+
+### y
+Viewport y in CSS pixels, instead of ref.
+
+## browser_type fp=fa0af00654a16cd1
+Types text at the caret of an editable element (`ref`, required) in a bound tab, through DevTools. It appends to what the field holds; replace true replaces that (with an empty text: clears the field), and the page's input events still fire. mode "insert_text" (default) inserts the text at once; "keystrokes" sends a key event per character.
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+### mode
+"insert_text" (default) or "keystrokes".
+
+### replace
+True: select the field's content first, so the text replaces it. Default false: append.
+
+## browser_select fp=3ffab79d13eb5e1f
+Selects one option of a native `<select>` (`ref`) in a bound tab without opening its popup. Pass label or value, not both; exactly one option must equal it. Non-native, multiple and disabled selects, disabled options and no or several matches are refused with nothing changed. The input and change events it fires are synthetic: check that the page took the selection.
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+## browser_dialog fp=f4ce68f68af769a7
+Inspects or answers a page's JavaScript alert, confirm, prompt or beforeunload dialog in a bound tab; not permission prompts, extension UI, native dialogs or file pickers. action "inspect" returns the dialog and its dialog_id; "accept" and "dismiss" need that current dialog_id.
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+### delivery_mode
+For accept and dismiss. Default "background".
+
+### dialog_id
+From action "inspect".
+
+### prompt_text
+The answer to a prompt dialog, with "accept".
+
+## browser_set_input_files fp=804510515bb99709
+Sets the files of an `<input type=file>` (`ref`) in a bound tab through DevTools, without the file picker. The paths are absolute paths of regular files in the VM (no symlinks).
+
+### session
+Session label: the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call (browser_pointer and browser_download require one).
+
+### files
+1 to 32 absolute paths of files in the VM.
+
+## browser_download fp=c874a02015272101
+Starts a download by activating a page element (`ref`) in a bound tab and saves the file in `destination_root`, an existing folder in the VM. It needs the MCP host's approval for destructive tools and refuses stale or ambiguous refs. It never returns the URL, file name or path: look in the folder.
+
+### session
+Session label (required here): the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call.
+
+### ref
+The element that starts the download.
+
+### destination_root
+Absolute path of an existing folder in the VM.
+
+## browser_pointer fp=dcdb12d2eb8f0fa5
+Hovers, right-clicks, double-clicks, scrolls or drags in a bound tab, without raising it. Start at `ref` or x,y (viewport CSS pixels). scroll takes delta_x or delta_y; drag takes destination_ref or to_x,to_y. A ref must offer pointer actions (scroll also takes a scroll ref). The trusted route sends DevTools input events and refuses where that would raise the window; input_route "dom_event" synthesizes DOM events and needs a ref.
+
+### session
+Session label (required here): the browser binding, its tabs and refs belong to it. Pass the same label to get_browser_state and every browser_* call.
+
+### action
+The gesture.
+
+### delivery_mode
+"background" (default) refuses trusted input where it would raise the browser window; "foreground" accepts that.
+
+### input_route
+"trusted" (default) or "dom_event" (needs ref).
+
+### ref
+Where the gesture starts, instead of x,y.
 
 ## run_script fp=f7fe1ea7c7f2ee09
 Runs a JavaScript program that drives apps through Cua Driver in one call, returning only its result: for flows that need logic, such as a loop over rows, a branch on what the app shows, or a retry. For a fixed list of actions, run_steps is simpler. The script is the body of an async function (`await`, `return` a JSON value), in a sandbox without filesystem, network, processes or timers; its only API is `cua`:
