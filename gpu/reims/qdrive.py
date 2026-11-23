@@ -4,6 +4,9 @@ pointer are the VM's own hardware (a USB keyboard and tablet), so the guest sees
 person's: Windows does not mark them as injected, as it does input sent from inside it.
 
   qdrive.py VM shot FILE.png            screenshot (the display's own size)
+       [--crop X,Y,W,H] [--max-dim N]   only that part of the screen; shrunk so that neither side
+                                        is over N pixels. The line it prints says how its pixels
+                                        map to the screen's: click at X + x / scale, Y + y / scale
   qdrive.py VM click X Y [right|double] click at a pixel of that screenshot
   qdrive.py VM move X Y                 move the pointer
   qdrive.py VM drag X1 Y1 X2 Y2         press at one point, release at the other
@@ -246,7 +249,7 @@ def read_ppm(path):
 
 
 USAGE = {
-    'shot': 'shot FILE.png', 'click': 'click X Y [right|double]', 'move': 'move X Y', 'drag': 'drag X1 Y1 X2 Y2',
+    'shot': 'shot FILE.png [--crop X,Y,W,H] [--max-dim N]', 'click': 'click X Y [right|double]', 'move': 'move X Y', 'drag': 'drag X1 Y1 X2 Y2',
     'type': "type 'text'", 'key': 'key CHORD [CHORD ...]', 'qmp': "qmp '{\"execute\": ...}'", 'size': 'size',
     'sleep': 'sleep SECONDS',
 }
@@ -262,8 +265,26 @@ def parse(verb, args):
         except ValueError: usage(f'{verb}: {" ".join(args[:n])} are not all whole numbers')
     if verb not in USAGE: raise SystemExit(f"no command {verb!r} (commands: {', '.join(USAGE)})")
     if verb == 'shot':
-        if len(args) != 1: usage()
-        return verb, args[0]
+        files, crop, most, rest = [], None, None, list(args)
+        while rest:
+            a = rest.pop(0); opt, eq, val = a.partition('=')
+            if opt in ('--crop', '--max-dim'):
+                if not eq:
+                    if not rest: usage(f'{opt} needs a value')
+                    val = rest.pop(0)
+                try: nums = [int(v) for v in val.split(',')]
+                except ValueError: nums = []
+                if opt == '--crop':
+                    if len(nums) != 4 or nums[0] < 0 or nums[1] < 0 or nums[2] < 1 or nums[3] < 1:
+                        usage(f'--crop {val}: X,Y,W,H, four whole numbers, W and H above 0')
+                    crop = nums
+                else:
+                    if len(nums) != 1 or nums[0] < 16: usage(f'--max-dim {val}: a whole number of pixels, 16 or more')
+                    most = nums[0]
+            elif a.startswith('--'): usage(f'shot: no option {a}')
+            else: files.append(a)
+        if len(files) != 1: usage('shot takes one file')
+        return verb, (files[0], crop, most)
     if verb in ('click', 'move'):
         x, y = ints(2); rest = args[2:]
         how = rest[0] if rest else 'left'
@@ -296,7 +317,21 @@ def run(q, verb, a):
     if verb == 'size':
         print('%dx%d' % q.size())
     elif verb == 'shot':
-        img = q.frame(); img.save(a); print(f'{img.width}x{img.height} {a}')
+        from PIL import Image
+        path, crop, most = a
+        img = q.frame(); sw, sh = img.size; notes = []
+        if crop:
+            x, y, w, h = crop
+            box = (x, y, min(x + w, sw), min(y + h, sh))
+            if box[0] >= sw or box[1] >= sh:
+                raise SystemExit(f'shot: --crop {x},{y},{w},{h} is outside the {sw}x{sh} screen')
+            img = img.crop(box); notes.append('crop %d,%d,%d,%d' % (x, y, box[2] - x, box[3] - y))
+        if most and max(img.size) > most:
+            scale = most / max(img.size)
+            img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.Resampling.LANCZOS)
+            notes.append(f'scale {scale:.4g}')
+        img.save(path)
+        print(f'{img.width}x{img.height} {path}' + (f" (screen {sw}x{sh}, {', '.join(notes)})" if notes else ''))
     elif verb in ('click', 'move'):
         x, y, how = a
         q.pointer(x, y); time.sleep(0.15)

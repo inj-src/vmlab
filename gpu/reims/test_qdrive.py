@@ -256,5 +256,53 @@ class VncTest(unittest.TestCase):
         self.assertEqual(vnc.connections, 2)
 
 
+class ShotTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeQmp(); self.addCleanup(self.fake.close)
+        self.dir = tempfile.mkdtemp(dir='/vmlab/tmp'); self.addCleanup(shutil.rmtree, self.dir, True)
+        self.out = os.path.join(self.dir, 's.png')
+
+    def test_parse(self):
+        p = lambda *a: qdrive.parse('shot', list(a))[1]
+        self.assertEqual(p('a.png'), ('a.png', None, None))
+        self.assertEqual(p('a.png', '--crop', '1,2,30,40'), ('a.png', [1, 2, 30, 40], None))
+        self.assertEqual(p('--crop=1,2,30,40', 'a.png', '--max-dim', '800'), ('a.png', [1, 2, 30, 40], 800))
+        self.assertEqual(p('a.png', '--max-dim=1200'), ('a.png', None, 1200))
+        for bad in (['a.png', '--crop', '1,2,3'], ['a.png', '--crop', '1,2,0,4'], ['a.png', '--crop', '-1,0,4,4'],
+                    ['a.png', '--crop'], ['a.png', '--max-dim', 'big'], ['a.png', '--max-dim', '4'],
+                    ['a.png', '--zoom', '2'], [], ['a.png', 'b.png']):
+            with self.assertRaises(SystemExit, msg=bad): p(*bad)
+
+    def test_crop_over_vnc(self):
+        from PIL import Image
+        vnc = FakeVnc(64, 48); self.addCleanup(vnc.close)
+        printed = run(self.fake, 'shot', self.out, '--crop', '10,20,30,8', vnc=vnc)
+        self.assertEqual(printed, f'30x8 {self.out} (screen 64x48, crop 10,20,30,8)\n')
+        img = Image.open(self.out); self.assertEqual(img.size, (30, 8)); self.assertEqual(img.getpixel((0, 0)), (10, 20, 7))
+
+    def test_crop_is_cut_at_the_edge(self):
+        vnc = FakeVnc(64, 48); self.addCleanup(vnc.close)
+        self.assertEqual(run(self.fake, 'shot', self.out, '--crop', '50,40,100,100', vnc=vnc),
+                         f'14x8 {self.out} (screen 64x48, crop 50,40,14,8)\n')
+        with self.assertRaises(SystemExit) as e: run(self.fake, 'shot', self.out, '--crop', '64,0,5,5', vnc=vnc)
+        self.assertIn('outside the 64x48 screen', str(e.exception))
+
+    def test_max_dim(self):
+        from PIL import Image
+        printed = run(self.fake, 'shot', self.out, '--max-dim', '480')         # the dump: 1920x1080
+        self.assertEqual(printed, f'480x270 {self.out} (screen 1920x1080, scale 0.25)\n')
+        self.assertEqual(Image.open(self.out).size, (480, 270))
+        self.assertEqual(run(self.fake, 'shot', self.out, '--max-dim', '4000'), f'1920x1080 {self.out}\n')
+
+    def test_crop_then_max_dim(self):
+        printed = run(self.fake, 'shot', self.out, '--crop', '0,0,1000,500', '--max-dim', '500')
+        self.assertEqual(printed, f'500x250 {self.out} (screen 1920x1080, crop 0,0,1000,500, scale 0.5)\n')
+
+    def test_in_a_batch(self):
+        printed = run(self.fake, 'batch', f'shot {self.out} --crop 0,0,100,100', 'size')
+        self.assertEqual(printed, f'100x100 {self.out} (screen 1920x1080, crop 0,0,100,100)\n1920x1080\n')
+        self.assertEqual(self.fake.dumps(), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
