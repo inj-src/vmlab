@@ -18,7 +18,7 @@ A disk of its own per VM that `vm reset` leaves alone, so a pushed checkout, its
 
 ## Large or loose files: `/vmlab/share`
 
-The folder `/vmlab/share` on this machine is `C:\share` on `win` and `~/share` on `mac`, both ways, while the VM runs (on `mac` about 30 s after SSH answers).
+The folder `/vmlab/share` on this machine is `C:\share` on `win` and `~/share` on `mac`, both ways, while the VM runs (on `mac` about 15 s after `vm start` returns).
 
 - **Writing into it, the tool matters.** On `win`, Git Bash `cp` writes 2.9 MB/s (17 s for 50 MB); use `Copy-Item` in `ssh win-pwsh` (89 MB/s), `cmd //c copy` (137) or `scp` from here. On `mac`, `cp` writes about 20 MB/s; use `dd if=<file> of=~/share/<name> bs=1m` or `scp` (about 150). Reading from it is fast with any tool (200–240 MB/s).
 - Build on the guest's own disk (`vm push`), not in the share: there every file access is a network round trip.
