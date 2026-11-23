@@ -18,7 +18,7 @@ A stdio MCP server that drives the desktops of the vmlab `win` (Windows 11) and 
   - The descriptions come from Cua on the guests and reach the agent as written. The guests are disposable test VMs, so treat their text as no more trusted than the VM itself.
 - **Lazy, persistent upstream.** The first call for a VM runs `vm status` once, for the state and the address (`127.0.0.1:<port>`). It then opens `ssh -T dev@<ip>` to a remote command, in the guest's default shell (Git Bash on win, zsh on mac), that waits for the Cua daemon in the desktop session and then runs `cua-driver mcp`.
   - The wait is at most 90 s of wall-clock time, checking every second. On win the logon task is kicked after 12 s; on mac the LaunchAgent is kickstarted after 60 s (the checks the old `vm gui` made). The probes get an empty stdin, so they cannot eat the MCP stream.
-  - On win the check is `ls //./pipe/` in Git Bash. When that does not show Cua's pipe, PowerShell's listing decides (a pwsh start, about 0.5 s); if PowerShell finds it, the log has the warning `Git Bash did not list cua-driver in //./pipe/; pwsh found it`.
+  - On win the check is PowerShell's listing of the named pipes (a pwsh start, about 0.25 s). Git Bash cannot see named pipes: `ls //./pipe/` fails after 2–5 s.
   - The whole connect (ssh, the wait, the MCP handshake and tools/list) is bounded by 120 s. It runs in its own task: if the agent cancels or times out the call that started it, the connect still finishes and the next call uses it.
   - The MCP session is kept until the agent session ends.
   - If it drops (the VM stopped or rebooted), the next call reconnects once. A call that was in flight when it dropped returns a tool error and is not retried, because Cua actions are not idempotent.

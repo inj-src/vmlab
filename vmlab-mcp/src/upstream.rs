@@ -97,10 +97,6 @@ impl Config {
 /// Printed to stderr by the remote command when the Cua daemon never came up.
 pub const NOT_READY_MARKER: &str = "vmlab-mcp: cua-driver daemon not running";
 
-/// Printed to stderr on win when Git Bash's listing of the pipes did not show Cua's pipe and
-/// PowerShell's did, so the log tells when the fast probe does not work.
-pub const PWSH_PROBE_NOTE: &str = "vmlab-mcp: Git Bash did not list cua-driver in //./pipe/; pwsh found it";
-
 /// The PowerShell check for Cua's pipe, for `pwsh -EncodedCommand` (no quoting through bash).
 const WIN_PIPE_CHECK: &str =
     r#"if ([IO.Directory]::GetFiles('\\.\pipe\') -match 'cua-driver') { exit 0 } else { exit 1 }"#;
@@ -111,15 +107,14 @@ const WIN_PIPE_CHECK: &str =
 /// - The wait is bounded by wall-clock time (90 s, under the local connect timeout): the daemon
 ///   is kicked after 12 s on win (the logon task) and kickstarted after 60 s on mac (the
 ///   LaunchAgent), as `vm gui` did. Checks are 1 s apart.
-/// - win checks Cua's pipe with `ls //./pipe/`. When that does not show it (the daemon is not
-///   up yet, or Git Bash cannot list pipes), PowerShell decides, as before, at the cost of a
-///   pwsh start (~0.5 s) for that check only.
+/// - win checks Cua's pipe with PowerShell (~0.25 s). Git Bash cannot see named pipes: on
+///   the VM `ls //./pipe/` and `test -e //./pipe/cua-driver` fail after 2-5 s (2026-11-23).
 /// - stdin carries the MCP stream, which the client starts writing at once, so the probes get
 ///   an empty stdin and their stdout is discarded: only `cua-driver mcp` may touch the stream.
 pub fn remote_command(machine: Machine) -> String {
     match machine {
         Machine::Win => format!(
-            r#"c="${{LOCALAPPDATA//\\//}}/Programs/Cua/cua-driver/bin/cua-driver.exe"; up() {{ timeout 3 ls //./pipe/ </dev/null 2>/dev/null | grep -qx cua-driver && return 0; "/c/Program Files/PowerShell/7/pwsh.exe" -NoProfile -NonInteractive -EncodedCommand {enc} </dev/null >/dev/null 2>&1 && echo "{PWSH_PROBE_NOTE}" >&2; }}; ok=0; k=0; SECONDS=0; while :; do up && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 12 ] && {{ k=1; "$c" autostart kick </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec "$c" mcp --socket '\\.\pipe\cua-driver'"#,
+            r#"c="${{LOCALAPPDATA//\\//}}/Programs/Cua/cua-driver/bin/cua-driver.exe"; up() {{ "/c/Program Files/PowerShell/7/pwsh.exe" -NoProfile -NonInteractive -EncodedCommand {enc} </dev/null >/dev/null 2>&1; }}; ok=0; k=0; SECONDS=0; while :; do up && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 12 ] && {{ k=1; "$c" autostart kick </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec "$c" mcp --socket '\\.\pipe\cua-driver'"#,
             enc = encode_pwsh(WIN_PIPE_CHECK)
         ),
         Machine::Mac => format!(
@@ -616,7 +611,7 @@ mod tests {
         assert!(mac.contains("[ $SECONDS -ge 90 ] && break"), "{mac}");
         let win = remote_command(Machine::Win);
         assert!(win.contains(r#""$c" autostart kick </dev/null >/dev/null 2>&1"#), "{win}");
-        assert!(win.contains("ls //./pipe/ </dev/null 2>/dev/null"), "{win}");
+        assert!(!win.contains("//./pipe/"), "{win}");
         assert!(win.contains("-EncodedCommand aQBmACAAKABbAEkATwAuAEQAaQByAGUAYwB0AG8AcgB5AF0AOgA6AEcAZQB0AEYAaQBsAGUAcwAoACcAXABcAC4AXABwAGkAcABlAFwAJwApACAALQBtAGEAdABjAGgAIAAnAGMAdQBhAC0AZAByAGkAdgBlAHIAJwApACAAewAgAGUAeABpAHQAIAAwACAAfQAgAGUAbABzAGUAIAB7ACAAZQB4AGkAdAAgADEAIAB9AA== </dev/null >/dev/null"), "{win}");
         assert!(win.contains("[ $SECONDS -ge 90 ] && break"), "{win}");
         assert!(win.contains(r#"exec "$c" mcp --socket '\\.\pipe\cua-driver'"#), "{win}");
@@ -629,12 +624,12 @@ mod tests {
         assert_eq!(encode_pwsh("ab"), "YQBiAA==");
     }
 
-    /// The win command run by a local bash, with stand-ins for `ls`, pwsh and cua-driver.exe:
+    /// The win command run by a local bash, with stand-ins for pwsh and cua-driver.exe:
     /// the bash logic and quoting as Git Bash gets them.
     #[test]
     fn win_command_in_bash() {
         use std::os::unix::fs::PermissionsExt;
-        let run = |ls_out: &str, pwsh_exit: i32| {
+        let run = |pwsh_exit: i32| {
             let dir = tempfile::tempdir().unwrap();
             let exe = |p: std::path::PathBuf, body: String| {
                 std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -642,7 +637,6 @@ mod tests {
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
             };
             let d = dir.path();
-            exe(d.join("bin/ls"), format!("#!/bin/sh\n[ \"$1\" = //./pipe/ ] && printf '{ls_out}'\n"));
             exe(d.join("pwsh"), format!("#!/bin/sh\necho \"pwsh $*\" >> {}/log\nexit {pwsh_exit}\n", d.display()));
             exe(
                 d.join("app/Programs/Cua/cua-driver/bin/cua-driver.exe"),
@@ -654,25 +648,19 @@ mod tests {
             let out = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(cmd)
-                .env("PATH", format!("{}:{}", d.join("bin").display(), std::env::var("PATH").unwrap()))
                 .env("LOCALAPPDATA", d.join("app"))
                 .output()
                 .unwrap();
             let log = std::fs::read_to_string(d.join("log")).unwrap_or_default();
             (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned(), log)
         };
-        // The pipe is listed: no pwsh, and cua-driver gets the pipe's Windows name.
-        let (code, err, log) = run("InitShutdown\\ncua-driver\\nlsass\\n", 1);
+        // pwsh finds the pipe: cua-driver gets the pipe's Windows name, nothing on stderr.
+        let (code, err, log) = run(0);
         assert_eq!((code, err.as_str()), (Some(0), ""), "{log}");
-        assert_eq!(log, "cua mcp --socket \\\\.\\pipe\\cua-driver\n");
-        // Not listed, pwsh finds it: a note on stderr, then the same.
-        let (code, err, log) = run("", 0);
-        assert_eq!(code, Some(0));
-        assert!(err.contains(PWSH_PROBE_NOTE), "{err}");
         assert!(log.starts_with("pwsh -NoProfile -NonInteractive -EncodedCommand aQBm"), "{log}");
         assert!(log.ends_with("cua mcp --socket \\\\.\\pipe\\cua-driver\n"), "{log}");
-        // Neither: the marker, exit 3, and cua-driver never runs as mcp.
-        let (code, err, log) = run("other\\n", 1);
+        // It does not: the marker, exit 3, and cua-driver never runs as mcp.
+        let (code, err, log) = run(1);
         assert_eq!(code, Some(3));
         assert!(err.contains(NOT_READY_MARKER), "{err}");
         assert!(!log.contains("cua mcp"), "{log}");
