@@ -134,17 +134,19 @@ start(){
     sed -i "s|^  -device 'ide-hd,bus=sata.3,drive=disk,rotation_rate=1' \\\\\$|  -object 'iothread,id=io0' \\\\\n  -device 'virtio-blk-pci,drive=disk,iothread=io0,addr=0x8' \\\\|" "$V/run.sh"
     grep -q "virtio-blk-pci,drive=disk" "$V/run.sh" || die "could not make the disk virtio-blk in run.sh"
   fi
-  # MAC26_DISK_CACHE=none: both disks bypass the host's page cache (O_DIRECT, io_uring), as the
-  # Windows VM's do, and the system disk passes APFS's TRIM on (discard=unmap). Otherwise a
-  # disk read is cached twice, by macOS and by Linux, and Linux's copy pushes host programs
-  # out of memory. Default: QEMU's (writeback, threads).
-  local dcache=${MAC26_DISK_CACHE:-default} dopts=""
+  # MAC26_DISK_CACHE=none (the default since 2026-11-23): both disks bypass the host's page
+  # cache (O_DIRECT, io_uring), as the Windows VM's do, and the system disk passes APFS's TRIM
+  # on (discard=unmap). Through the cache a disk read is cached twice, by macOS and by Linux,
+  # and Linux's copy pushes host programs out of memory: after a session the system disk had
+  # 3.5 GiB in it. A clean release build of ripgrep took as long either way (32-36 s, 4 runs
+  # each). MAC26_DISK_CACHE=writeback: QEMU's default cache, as before.
+  local dcache=${MAC26_DISK_CACHE:-none} dopts=""
   case $dcache in
     none) dopts="cache.direct=on,aio=io_uring,discard=unmap,"
       sed -i "s|^  -drive 'id=disk,if=none,format=qcow2,|&$dopts|" "$V/run.sh"
       grep -q "id=disk,if=none,format=qcow2,$dopts" "$V/run.sh" || die "could not set the disk's cache mode in run.sh" ;;
-    default) ;;
-    *) die "MAC26_DISK_CACHE is none or default, not $dcache" ;;
+    writeback) ;;
+    *) die "MAC26_DISK_CACHE is none or writeback, not $dcache" ;;
   esac
   # The firmware with a quiet start, as the Windows VM's (../win3d/firmware/make-firmware.py):
   # no TianoCore logo and no "BdsDxe: loading Boot..." lines, so the screen stays black until
