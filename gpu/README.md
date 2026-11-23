@@ -71,8 +71,9 @@ $W stop                   # $W reset: back to the ready state. $W commit: this r
   `scale.log`. The command is `win3d/guest-bin/vmlab-display.exe` where it has been built
   (`win3d/vmlab-display/build.sh`, in the running VM): a Rust program that does what
   `set-mode.ps1` and `set-scale.ps1` do, run through Git Bash on a connection of its own (no
-  pwsh starts), measured by Gemini at about 50 ms for a call that changes nothing and 0.2 s for
-  a new scaling. Without it, the two scripts in pwsh 7 (about 3.6 s in Windows): a show or hide
+  pwsh starts). The built one is in the repository. Measured 2026-11-23: 27-38 ms in Windows
+  for a call that changes nothing, 58-88 ms for a new scaling; in the rig, a scale change, a
+  hide or a show reached Windows within 0.0-0.2 s of scale-watch seeing it. Without it, the two scripts in pwsh 7 (about 3.6 s in Windows): a show or hide
   reaches Windows' scaling in 1.6-4.8 s, against 6.2-7.8 s through the task. It looks for a
   change four times a second, with no process started while nothing changes (2 s after a call
   that left something to do). Where SSH is not on the desktop (a state from before
