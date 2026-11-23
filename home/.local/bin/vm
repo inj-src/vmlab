@@ -369,11 +369,15 @@ cmd_push(){
     [[ -n $prev ]] && range+=("^$prev")
     git -C "$top" bundle create -q "$tmp/push.bundle" "${range[@]}" || { rm -rf "$tmp"; die "could not pack the work tree"; }
     sent="$(du -h "$tmp/push.bundle" | cut -f1) sent"
-    local -a o; read -r -a o <<< "$(ssh_opts "$n")"
-    scp -q "${o[@]/#-p/-P}" "$tmp/push.bundle" "${GUSER[$n]}@127.0.0.1:$home/vm-push.bundle" || { rm -rf "$tmp"; die "could not copy the bundle to $n"; }
-    # One line that Git Bash and zsh both run. autocrlf off: the guest gets the bytes the host
-    # has. The bundle is removed in the same call; the last line printed is the new commit
-    guest "$n" "git init -q \"$dest\" && git -C \"$dest\" config core.autocrlf false && git -C \"$dest\" config core.longpaths true && git -C \"$dest\" fetch -q \"$home/vm-push.bundle\" $ref && git -C \"$dest\" checkout -q -f --detach FETCH_HEAD && git -C \"$dest\" clean -q -fd && git -C \"$dest\" update-ref refs/vmlab/pushed FETCH_HEAD && rm -f \"$home/vm-push.bundle\" && { git -C \"$dest\" gc -q --auto >/dev/null 2>&1; git -C \"$dest\" rev-parse -q --verify refs/vmlab/pushed; }" \
+    # The bundle goes on the command's stdin, which the guest writes to a file and fetches from
+    # (no scp: one round trip fewer). One line that Git Bash and zsh both run; the last line
+    # printed is the new commit. A guest without the checkout gets it made first (autocrlf off:
+    # the guest gets the bytes the host has). gc runs when the chain starts again, the push
+    # that leaves old snapshots behind. A one-line change went from 587 to 367 ms on win.
+    local b="\"$home/vm-push.bundle\"" g="git -C \"$dest\"" pre="" post=""
+    [[ -n $prev ]] || pre="git init -q \"$dest\" && $g config core.autocrlf false && $g config core.longpaths true && "
+    (( ${#parent[@]} )) || post="$g gc -q --auto >/dev/null 2>&1; "
+    guest "$n" "cat > $b && $pre$g fetch -q $b $ref && $g checkout -q -f --detach FETCH_HEAD && $g clean -q -fd && $g update-ref refs/vmlab/pushed FETCH_HEAD && rm -f $b && { $post$g rev-parse -q --verify refs/vmlab/pushed; }" < "$tmp/push.bundle" \
       | tr -d '\r' | tail -n 1 | grep -qx "$commit" || { rm -rf "$tmp"; die "$n did not take the bundle (left in the guest: $home/vm-push.bundle)"; }
   fi
   rm -rf "$tmp"
