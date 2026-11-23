@@ -27,7 +27,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Backstop for one tool call, so a wedged Cua cannot hang the agent forever. Generous: the
 /// slowest normal calls (screenshots, long waits) take seconds.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// `vm status` / `vm ip` should answer in well under a second.
+/// `vm status` should answer in well under a second.
 const VM_CMD_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub const GUEST_USER: &str = "dev";
@@ -97,23 +97,49 @@ impl Config {
 /// Printed to stderr by the remote command when the Cua daemon never came up.
 pub const NOT_READY_MARKER: &str = "vmlab-mcp: cua-driver daemon not running";
 
+/// Printed to stderr on win when Git Bash's listing of the pipes did not show Cua's pipe and
+/// PowerShell's did, so the log tells when the fast probe does not work.
+pub const PWSH_PROBE_NOTE: &str = "vmlab-mcp: Git Bash did not list cua-driver in //./pipe/; pwsh found it";
+
+/// The PowerShell check for Cua's pipe, for `pwsh -EncodedCommand` (no quoting through bash).
+const WIN_PIPE_CHECK: &str =
+    r#"if ([IO.Directory]::GetFiles('\\.\pipe\') -match 'cua-driver') { exit 0 } else { exit 1 }"#;
+
 /// The one remote command per session: wait for the Cua daemon in the desktop session, then
-/// become `cua-driver mcp`. One command instead of a separate readiness probe saves a remote
-/// shell start (~0.5 s for pwsh on win).
+/// become `cua-driver mcp`. Both run in the guest's default shell (Git Bash on win, zsh on
+/// mac): one command instead of a separate readiness probe saves a remote shell start.
 /// - The wait is bounded by wall-clock time (90 s, under the local connect timeout): the daemon
 ///   is kicked after 12 s on win (the logon task) and kickstarted after 60 s on mac (the
-///   LaunchAgent), as `vm gui` did.
+///   LaunchAgent), as `vm gui` did. Checks are 1 s apart.
+/// - win checks Cua's pipe with `ls //./pipe/`. When that does not show it (the daemon is not
+///   up yet, or Git Bash cannot list pipes), PowerShell decides, as before, at the cost of a
+///   pwsh start (~0.5 s) for that check only.
 /// - stdin carries the MCP stream, which the client starts writing at once, so the probes get
 ///   an empty stdin and their stdout is discarded: only `cua-driver mcp` may touch the stream.
 pub fn remote_command(machine: Machine) -> String {
     match machine {
         Machine::Win => format!(
-            r#"$c="$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe"; $sw=[Diagnostics.Stopwatch]::StartNew(); $ok=$false; $kicked=$false; while ($true) {{ if ([IO.Directory]::GetFiles("\\.\pipe\") -match "cua-driver") {{ $ok=$true; break }}; if ($sw.Elapsed.TotalSeconds -ge 90) {{ break }}; if (-not $kicked -and $sw.Elapsed.TotalSeconds -ge 12) {{ $kicked=$true; $null | & $c autostart kick | Out-Null }}; Start-Sleep 2 }}; if (-not $ok) {{ [Console]::Error.WriteLine("{NOT_READY_MARKER}"); exit 3 }}; & $c mcp --socket \\.\pipe\cua-driver; exit $LASTEXITCODE"#
+            r#"c="${{LOCALAPPDATA//\\//}}/Programs/Cua/cua-driver/bin/cua-driver.exe"; up() {{ timeout 3 ls //./pipe/ </dev/null 2>/dev/null | grep -qx cua-driver && return 0; "/c/Program Files/PowerShell/7/pwsh.exe" -NoProfile -NonInteractive -EncodedCommand {enc} </dev/null >/dev/null 2>&1 && echo "{PWSH_PROBE_NOTE}" >&2; }}; ok=0; k=0; SECONDS=0; while :; do up && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 12 ] && {{ k=1; "$c" autostart kick </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec "$c" mcp --socket '\\.\pipe\cua-driver'"#,
+            enc = encode_pwsh(WIN_PIPE_CHECK)
         ),
         Machine::Mac => format!(
-            r#"ok=0; k=0; SECONDS=0; while :; do ~/.local/bin/cua-driver status </dev/null >/dev/null 2>&1 && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 60 ] && {{ k=1; launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver </dev/null >/dev/null 2>&1; }}; sleep 2; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
+            r#"ok=0; k=0; SECONDS=0; while :; do ~/.local/bin/cua-driver status </dev/null >/dev/null 2>&1 && {{ ok=1; break; }}; [ $SECONDS -ge 90 ] && break; [ $k = 0 ] && [ $SECONDS -ge 60 ] && {{ k=1; launchctl kickstart -k gui/$(id -u)/com.trycua.cua-driver </dev/null >/dev/null 2>&1; }}; sleep 1; done; [ $ok = 1 ] || {{ echo "{NOT_READY_MARKER}" >&2; exit 3; }}; exec ~/.local/bin/cua-driver mcp"#
         ),
     }
+}
+
+/// pwsh's -EncodedCommand argument: base64 of the UTF-16LE text.
+fn encode_pwsh(script: &str) -> String {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { B64[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 /// ssh expands `%` tokens in these paths and splits UserKnownHostsFile on whitespace, so refuse
@@ -138,7 +164,7 @@ fn check_ssh_paths(cfg: &Config) -> Result<(), String> {
 /// are the port and the destination, built from a parsed number and a parsed IP address, so
 /// nothing from outside can inject an option. `-F none` ignores ~/.ssh/config so a user Host
 /// block cannot change behaviour.
-pub fn ssh_args(cfg: &Config, ip: IpAddr, port: u16) -> Vec<String> {
+pub fn ssh_args(cfg: &Config, machine: Machine, ip: IpAddr, port: u16) -> Vec<String> {
     let mut a: Vec<String> = vec!["-F".into(), "none".into(), "-T".into(), "-a".into(), "-x".into()];
     a.push("-p".into());
     a.push(port.to_string());
@@ -163,7 +189,12 @@ pub fn ssh_args(cfg: &Config, ip: IpAddr, port: u16) -> Vec<String> {
     if cfg.mux {
         opt("ControlMaster=auto".into());
         // %C is a hash of the connection, so the path stays short (sun_path is 108 bytes).
-        opt(format!("ControlPath={}/%C", cfg.mux_dir().display()));
+        // A session over a shared connection sends no SetEnv, so the master decides win's
+        // shell: vmlab-mcp up to 2026-11-22 made PowerShell masters at %C (SetEnv
+        // VMLAB_SHELL=pwsh), and still does in sessions that run an older binary. Git Bash
+        // masters need a path of their own.
+        let name = if matches!(machine, Machine::Win) { "bash-%C" } else { "%C" };
+        opt(format!("ControlPath={}/{name}", cfg.mux_dir().display()));
         opt("ControlPersist=10m".into());
     } else {
         opt("ControlMaster=no".into());
@@ -206,11 +237,15 @@ async fn run_vm(cfg: &Config, args: &[&str]) -> Result<(bool, String), String> {
     Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
-/// Parse `vm status` output (`name state ip owner...`) for one VM's state.
-pub fn parse_status(out: &str, machine: Machine) -> Option<String> {
+/// Parse `vm status` output (`name state address owner...`, the address `127.0.0.1:2222` or
+/// `-`) for one VM's state and address.
+pub fn parse_status(out: &str, machine: Machine) -> Option<(String, String)> {
     out.lines().find_map(|l| {
         let mut f = l.split_whitespace();
-        (f.next() == Some(machine.name())).then(|| f.next().unwrap_or("unknown").to_string())
+        (f.next() == Some(machine.name())).then(|| {
+            let state = f.next().unwrap_or("unknown").to_string();
+            (state, f.next().unwrap_or("-").to_string())
+        })
     })
 }
 
@@ -227,23 +262,21 @@ pub fn not_running_message(machine: Machine) -> String {
     format!("{machine} is not running: run `vm start {machine}` first")
 }
 
-/// Where the VM's SSH is (`vm ip`, `vm port`: 127.0.0.1 and a port QEMU forwards to the
-/// guest), or an agent-facing error if the VM is not running (`vm status`).
+/// Where the VM's SSH is (127.0.0.1 and a port QEMU forwards to the guest), from one
+/// `vm status`, or an agent-facing error if the VM is not running.
 async fn vm_address(cfg: &Config, machine: Machine) -> Result<(IpAddr, u16), String> {
     let (_, status) = run_vm(cfg, &["status"]).await?;
-    match parse_status(&status, machine).as_deref() {
-        Some("running") => {}
-        Some(_) => return Err(not_running_message(machine)),
-        None => return Err(format!("`vm status` does not list {machine}")),
+    let (state, addr) =
+        parse_status(&status, machine).ok_or_else(|| format!("`vm status` does not list {machine}"))?;
+    if state != "running" {
+        return Err(not_running_message(machine));
     }
-    let (ok, out) = run_vm(cfg, &["ip", machine.name()]).await?;
-    let (port_ok, port) = run_vm(cfg, &["port", machine.name()]).await?;
-    match (ok && port_ok, out.trim().parse::<IpAddr>(), port.trim().parse::<u16>()) {
-        (true, Ok(ip), Ok(port)) => Ok((ip, port)),
-        _ => Err(format!(
-            "{machine} is running but `vm ip {machine}` and `vm port {machine}` gave no address (still booting?): wait for `vm start {machine}` to finish"
-        )),
-    }
+    let parsed = addr.rsplit_once(':').and_then(|(ip, port)| Some((ip.parse().ok()?, port.parse().ok()?)));
+    parsed.ok_or_else(|| {
+        format!(
+            "{machine} is running but `vm status` gave no address for it (\"{addr}\"; still booting?): wait for `vm start {machine}` to finish"
+        )
+    })
 }
 
 /// Routes upstream progress notifications back to the downstream request that caused them.
@@ -318,13 +351,8 @@ pub async fn connect(
         }
         tracing::info!(%machine, %ip, port, "connecting");
         let mut c = tokio::process::Command::new("ssh");
-        // win's sessions are Git Bash unless they ask for pwsh, which remote_command is
-        // written in (win/vmshell). Every vmlab-mcp sends it for win, so the shared mux masters
-        // carry it.
-        if matches!(machine, Machine::Win) {
-            c.args(["-o", "SetEnv=VMLAB_SHELL=pwsh"]);
-        }
-        c.args(ssh_args(cfg, ip, port)).arg(remote_command(machine));
+        // win's sessions are Git Bash (win/vmshell), which remote_command is written in.
+        c.args(ssh_args(cfg, machine, ip, port)).arg(remote_command(machine));
         c
     };
     die_with_parent(&mut cmd);
@@ -549,10 +577,14 @@ mod tests {
 
     #[test]
     fn ssh_args_mux() {
-        let a = ssh_args(&cfg(true), "127.0.0.1".parse().unwrap(), 2222);
+        let a = ssh_args(&cfg(true), Machine::Mac, "127.0.0.1".parse().unwrap(), 2222);
         let s = a.join(" ");
         assert!(s.starts_with("-F none -T -a -x -p 2222 -i /k/id "), "{s}");
         assert!(s.contains("-o ControlMaster=auto -o ControlPath=/s/ssh/%C -o ControlPersist=10m"));
+        // win's Git Bash masters are kept apart from older binaries' PowerShell ones.
+        let w = ssh_args(&cfg(true), Machine::Win, "127.0.0.1".parse().unwrap(), 2222).join(" ");
+        assert!(w.contains("-o ControlPath=/s/ssh/bash-%C "), "{w}");
+        assert!(!w.contains("SetEnv"), "{w}");
         assert!(s.contains("-o UserKnownHostsFile=/s/known_hosts"));
         assert!(s.contains("-o BatchMode=yes"));
         assert_eq!(&a[a.len() - 2..], ["--", "dev@127.0.0.1"]);
@@ -560,7 +592,7 @@ mod tests {
 
     #[test]
     fn ssh_args_no_mux() {
-        let s = ssh_args(&cfg(false), "10.0.0.1".parse().unwrap(), 22).join(" ");
+        let s = ssh_args(&cfg(false), Machine::Win, "10.0.0.1".parse().unwrap(), 22).join(" ");
         assert!(s.contains("-o ControlMaster=no -o ControlPath=none"));
         assert!(!s.contains("ControlPersist"));
     }
@@ -583,16 +615,75 @@ mod tests {
         assert!(mac.contains("com.trycua.cua-driver </dev/null >/dev/null"), "{mac}");
         assert!(mac.contains("[ $SECONDS -ge 90 ] && break"), "{mac}");
         let win = remote_command(Machine::Win);
-        assert!(win.contains("$null | & $c autostart kick | Out-Null"), "{win}");
-        assert!(win.contains("TotalSeconds -ge 90"), "{win}");
-        assert!(win.contains(r"& $c mcp --socket \\.\pipe\cua-driver"), "{win}");
+        assert!(win.contains(r#""$c" autostart kick </dev/null >/dev/null 2>&1"#), "{win}");
+        assert!(win.contains("ls //./pipe/ </dev/null 2>/dev/null"), "{win}");
+        assert!(win.contains("-EncodedCommand aQBmACAAKABbAEkATwAuAEQAaQByAGUAYwB0AG8AcgB5AF0AOgA6AEcAZQB0AEYAaQBsAGUAcwAoACcAXABcAC4AXABwAGkAcABlAFwAJwApACAALQBtAGEAdABjAGgAIAAnAGMAdQBhAC0AZAByAGkAdgBlAHIAJwApACAAewAgAGUAeABpAHQAIAAwACAAfQAgAGUAbABzAGUAIAB7ACAAZQB4AGkAdAAgADEAIAB9AA== </dev/null >/dev/null"), "{win}");
+        assert!(win.contains("[ $SECONDS -ge 90 ] && break"), "{win}");
+        assert!(win.contains(r#"exec "$c" mcp --socket '\\.\pipe\cua-driver'"#), "{win}");
+    }
+
+    #[test]
+    fn pwsh_encoding() {
+        // Checked against Python: base64.b64encode(s.encode("utf-16-le")).
+        assert_eq!(encode_pwsh("exit 1"), "ZQB4AGkAdAAgADEA");
+        assert_eq!(encode_pwsh("ab"), "YQBiAA==");
+    }
+
+    /// The win command run by a local bash, with stand-ins for `ls`, pwsh and cua-driver.exe:
+    /// the bash logic and quoting as Git Bash gets them.
+    #[test]
+    fn win_command_in_bash() {
+        use std::os::unix::fs::PermissionsExt;
+        let run = |ls_out: &str, pwsh_exit: i32| {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = |p: std::path::PathBuf, body: String| {
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, body).unwrap();
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            let d = dir.path();
+            exe(d.join("bin/ls"), format!("#!/bin/sh\n[ \"$1\" = //./pipe/ ] && printf '{ls_out}'\n"));
+            exe(d.join("pwsh"), format!("#!/bin/sh\necho \"pwsh $*\" >> {}/log\nexit {pwsh_exit}\n", d.display()));
+            exe(
+                d.join("app/Programs/Cua/cua-driver/bin/cua-driver.exe"),
+                format!("#!/bin/sh\nprintf '%s\\n' \"cua $*\" >> {}/log\n", d.display()),
+            );
+            let cmd = remote_command(Machine::Win)
+                .replace("/c/Program Files/PowerShell/7/pwsh.exe", &d.join("pwsh").display().to_string())
+                .replace("[ $SECONDS -ge 90 ]", "[ $SECONDS -ge 0 ]");
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(cmd)
+                .env("PATH", format!("{}:{}", d.join("bin").display(), std::env::var("PATH").unwrap()))
+                .env("LOCALAPPDATA", d.join("app"))
+                .output()
+                .unwrap();
+            let log = std::fs::read_to_string(d.join("log")).unwrap_or_default();
+            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned(), log)
+        };
+        // The pipe is listed: no pwsh, and cua-driver gets the pipe's Windows name.
+        let (code, err, log) = run("InitShutdown\\ncua-driver\\nlsass\\n", 1);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "{log}");
+        assert_eq!(log, "cua mcp --socket \\\\.\\pipe\\cua-driver\n");
+        // Not listed, pwsh finds it: a note on stderr, then the same.
+        let (code, err, log) = run("", 0);
+        assert_eq!(code, Some(0));
+        assert!(err.contains(PWSH_PROBE_NOTE), "{err}");
+        assert!(log.starts_with("pwsh -NoProfile -NonInteractive -EncodedCommand aQBm"), "{log}");
+        assert!(log.ends_with("cua mcp --socket \\\\.\\pipe\\cua-driver\n"), "{log}");
+        // Neither: the marker, exit 3, and cua-driver never runs as mcp.
+        let (code, err, log) = run("other\\n", 1);
+        assert_eq!(code, Some(3));
+        assert!(err.contains(NOT_READY_MARKER), "{err}");
+        assert!(!log.contains("cua mcp"), "{log}");
     }
 
     #[test]
     fn status_parsing() {
-        let out = "mac  shutoff  -               \nwin  running  127.0.0.1:2222  started by x 2026\n";
-        assert_eq!(parse_status(out, Machine::Mac).as_deref(), Some("shutoff"));
-        assert_eq!(parse_status(out, Machine::Win).as_deref(), Some("running"));
+        let out = "mac  shutoff  -               state: pebble\nwin  running  127.0.0.1:2222  started by x 2026\n";
+        let st = |m| parse_status(out, m).map(|(s, a)| format!("{s} {a}"));
+        assert_eq!(st(Machine::Mac).as_deref(), Some("shutoff -"));
+        assert_eq!(st(Machine::Win).as_deref(), Some("running 127.0.0.1:2222"));
         assert_eq!(parse_status("", Machine::Win), None);
     }
 
@@ -615,5 +706,20 @@ mod tests {
         let err = connect(&c, Machine::Mac, 1).await.err().unwrap();
         assert_eq!(err, "mac is not running: run `vm start mac` first");
         assert!(t.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn address_comes_from_one_vm_status() {
+        // `vm ip` and `vm port` are not asked: this fake fails them.
+        let dir = tempfile::tempdir().unwrap();
+        let vm = dir.path().join("vm");
+        std::fs::write(&vm, "#!/bin/sh\n[ \"$1\" = status ] || exit 1\nprintf 'mac  running  127.0.0.1:2227  started by x  state: pebble\\nwin  running  -\\n'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&vm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut c = cfg(true);
+        c.vm = vm;
+        assert_eq!(vm_address(&c, Machine::Mac).await.unwrap(), ("127.0.0.1".parse().unwrap(), 2227));
+        let err = vm_address(&c, Machine::Win).await.unwrap_err();
+        assert!(err.contains("gave no address"), "{err}");
     }
 }
