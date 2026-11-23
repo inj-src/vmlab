@@ -614,9 +614,10 @@ vm untunnel <localport>        close a tunnel opened by vm tunnel
 vm forward <name> <port>...    the other way: this machine's 127.0.0.1:<port> on the VM's own
                                localhost:<port> (GUEST:HOST for another number in the VM)
 vm unforward <name>            close that VM's forwards
-vm gui <name> shot FILE.png    the VM's screen as a picture, whatever is on it
+vm gui <name> shot FILE.png [--crop X,Y,W,H] [--max-dim N]   the VM's screen as a picture, whatever is on it
 vm gui <name> click X Y [right|double] | move X Y | drag X1 Y1 X2 Y2
 vm gui <name> type 'text' | key ctrl+s [ret ...] | size
+vm gui <name> batch "STEP" ["STEP" ...]   several of these in one run ("sleep 0.2" too)
                                the VM's own keyboard and pointer, at pixels of that picture.
                                The guest takes them for a person's (Windows does not mark
                                them as injected). Key names: win (= cmd), alt, ctrl, shift
@@ -666,6 +667,6 @@ case $sub in
   tunnel) [[ $# -ge 2 ]] || die "usage: vm tunnel <name> <port> [localport]"; cmd_tunnel "$@" ;;
   forward) [[ $# -ge 2 ]] || die "usage: vm forward <name> <port|guestport:hostport>..."; cmd_forward "$@" ;;
   unforward) [[ $# -ge 1 ]] || die "usage: vm unforward <name>"; cmd_unforward "$1" ;;
-  gui) [[ $# -ge 2 ]] || die "usage: vm gui <name> shot FILE.png | click X Y | type 'text' | key ctrl+s (vm help)"; cmd_gui "$@" ;;
+  gui) [[ $# -ge 2 ]] || die "usage: vm gui <name> shot FILE.png | click X Y | type 'text' | key ctrl+s | batch \"STEP\" ... (vm help)"; cmd_gui "$@" ;;
   *) die "unknown command '$sub' (vm help)" ;;
 esac
