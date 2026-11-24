@@ -1,6 +1,6 @@
 # When something fails or is missing
 
-**Look at the screen first:** the MCP tool `screenshot` (or `vm gui <name> shot /tmp/now.png` for a file), then read the picture. A crash dialog, a permission prompt or the wrong window in front explains most GUI failures that logs don't. Then check the list below.
+**Look at the screen first:** the MCP tool `screenshot` (or `vm gui <name> shot <file.png>` for a file, a new name for each look), then read the picture. A crash dialog, a permission prompt or the wrong window in front explains most GUI failures that logs don't. Then check the list below.
 
 ## Known gotchas
 
