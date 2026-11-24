@@ -63,7 +63,7 @@
 #                                       --keep-states moves them to the new one, each as it was
 #                                       (it grows by what the commit changed); --drop-states
 #                                       deletes them
-#   win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list
+#   win-venus.sh state save NAME | save-live NAME | load NAME [--discard] | rm NAME | list
 #                                       named states (`vm save`, `vm states`; ../states.sh): the
 #                                       stopped VM's disk kept under a name, and put back
 #   win-venus.sh setup                  build the ready state again from win11-base (setup-ready.sh)
@@ -624,7 +624,7 @@ case ${1:-} in
     rm -f "$STATES/.usb"; st_mark clean   # the default state passes no USB device through
     [[ ${2:-} != --keep-states ]] || states_release
     echo "committed: $READY is the ready state" ;;
-  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm && ${2:-} != default-size ]] && die "stop it first"
+  state) alive qemu && [[ ${2:-} != list && ${2:-} != rm && ${2:-} != default-size && ${2:-} != save-live ]] && die "stop it first"
     case ${2:-} in
       save) st_valid "${3:-}"; mkdir -p "$STATES" "$S"
         [[ -f $DISK ]] || qemu-img create -q "${NEW_QCOW2[@]}" -F qcow2 -b "$READY" "$DISK"   # nothing ran: the ready state itself
@@ -633,6 +633,21 @@ case ${1:-} in
         if [[ -e $STATES/.defender ]]; then : > "$STATES/$3.defender"; else rm -f "$STATES/$3.defender"; fi
         if [[ -s $STATES/.usb ]]; then cp "$STATES/.usb" "$STATES/$3.usb"; else rm -f "$STATES/$3.usb"; fi
         st_mark "$3"; echo "saved: $3" ;;
+      save-live) # the disk of the running VM, the VM running on (../live-save.py says how)
+        st_valid "${3:-}"; alive qemu || die "not running: 'state save' saves a stopped VM"
+        rm -f "$STATES/$3.qcow2.live" "$S/live-top.qcow2"
+        # the layer Windows writes to while the disk is copied; -u: the running disk is locked
+        qemu-img create -q "${NEW_QCOW2[@]}" -F qcow2 -b "$DISK" -u "$S/live-top.qcow2" \
+          "$(qemu-img info -U --output=json "$DISK" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
+        python3 -I "$HERE/../live-save.py" win "$S/qmp.sock" "$S/ga.sock" "$DISK" "$S/live-top.qcow2" "$STATES/$3.qcow2.live" > /dev/null ||
+          { rm -f "$STATES/$3.qcow2.live"; [[ -e $S/live-top.qcow2 ]] && ! grep -q live-top < <(qmp '{"execute":"query-named-block-nodes","arguments":{"flat":true}}') && rm -f "$S/live-top.qcow2"
+            die "not saved: $3 is as it was"; }
+        rm -f "$S/live-top.qcow2"
+        mv -f "$STATES/$3.qcow2.live" "$STATES/$3.qcow2"
+        cp "$S/OVMF_VARS.fd" "$STATES/$3.vars.fd"
+        if [[ -e $STATES/.defender ]]; then : > "$STATES/$3.defender"; else rm -f "$STATES/$3.defender"; fi
+        if [[ -s $STATES/.usb ]]; then cp "$STATES/.usb" "$STATES/$3.usb"; else rm -f "$STATES/$3.usb"; fi
+        st_mark "$3"; st_ran; echo "saved: $3 (the VM runs on)" ;;
       load) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
         st_guard "${4:-}"; mkdir -p "$S"
         cp --reflink=auto "$STATES/$3.qcow2" "$DISK.new"; mv "$DISK.new" "$DISK"
@@ -648,7 +663,7 @@ case ${1:-} in
         done ;;
       default-size) # bytes on disk of the default (clean) state: the installed base and the ready layer on it
         echo $(( ($(stat -c %b "$BASE") + $(stat -c %b "$READY")) * 512 )) ;;
-      *) die "usage: win-venus.sh state save NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
+      *) die "usage: win-venus.sh state save NAME | save-live NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
     esac ;;
   setup) shift; exec "$HERE/setup-ready.sh" "$@" ;;
   *) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;

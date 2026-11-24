@@ -45,6 +45,8 @@
 #                                         named states (`vm save`, `vm states`; ../states.sh):
 #                                         snapshots in the disk file beside `clean`. A commit
 #                                         leaves them as they are
+#   mac26.sh state save-live NAME         the same of the running VM, which runs on (the disk
+#                                         only: the state starts with a fresh boot; ../live-save.py)
 #
 # The VM is mac26d, port 2227, on reims' `development` branch with the lab's patches
 # (/vmlab/reims-dev, ../README.md). reims' `master` does not run macOS 26.7.1 here.
@@ -441,11 +443,18 @@ case ${1:-} in
   commit) stopped
     qemu-img snapshot -l "$V/disk.qcow2" | grep -qw clean && qemu-img snapshot -d clean "$V/disk.qcow2"
     qemu-img snapshot -c clean "$V/disk.qcow2"; st_mark clean; echo "the disk as it is now is the clean snapshot" ;;
-  state) [[ ${2:-} == list || ${2:-} == default-size ]] || stopped
+  state) [[ ${2:-} == list || ${2:-} == default-size || ${2:-} == save-live ]] || stopped
     case ${2:-} in
       save) st_valid "${3:-}"
         if has_snapshot "$3"; then qemu-img snapshot -d "$3" "$V/disk.qcow2"; fi
         qemu-img snapshot -c "$3" "$V/disk.qcow2"; st_mark "$3"; echo "saved: $3" ;;
+      save-live) # a snapshot of the running VM's disk, the VM running on (../live-save.py)
+        st_valid "${3:-}"; alive || die "not running: 'state save' saves a stopped VM"
+        # what macOS holds in memory goes to the disk first; APFS keeps itself whole either way
+        timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=5 mac sync < /dev/null ||
+          echo "mac26.sh: macOS was not asked to write its disk first (no SSH); saved as it is" >&2
+        python3 -I /vmlab/tools/vmlab/gpu/live-save.py mac "$V/qmp.sock" "$3" > /dev/null || die "not saved"
+        st_mark "$3"; st_ran; echo "saved: $3 (the VM runs on)" ;;
       load) st_valid "${3:-}"; has_snapshot "$3" || die "no state '$3'"
         st_guard "${4:-}"; qemu-img snapshot -a "$3" "$V/disk.qcow2"; st_mark "$3"; echo "loaded: $3" ;;
       rm) st_valid "${3:-}"; has_snapshot "$3" || die "no state '$3'"
@@ -454,7 +463,7 @@ case ${1:-} in
         snapshots | sort | join -t $'\t' - <(python3 -I /vmlab/tools/vmlab/gpu/qcow2-sizes.py "$V/disk.qcow2" clean | sort) |
           awk -F'\t' -v OFS='\t' '{ print $1, $4, $3 }' ;;
       default-size) python3 -I /vmlab/tools/vmlab/gpu/qcow2-sizes.py "$V/disk.qcow2" clean | awk -F'\t' '$1 == "clean" { print $2 }' ;;
-      *) die "usage: mac26.sh state save NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
+      *) die "usage: mac26.sh state save NAME | save-live NAME | load NAME [--discard] | rm NAME | list | default-size" ;;
     esac ;;
   *) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
