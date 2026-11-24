@@ -116,8 +116,10 @@ pub fn load(dir: &Path, machine: Machine) -> Vec<Value> {
 }
 
 /// Cua tools a test agent has no use for, left out of the list: driver upkeep (updates,
-/// extensions, ffmpeg), deprecated or legacy tools, the agent cursor's styling, and replaying a
-/// recording. Fewer names to scan under tool search. A call to one is refused as unknown.
+/// extensions, ffmpeg), deprecated or legacy tools, the agent cursor's styling, replaying a
+/// recording, and the Mac's virtual displays (`agent_display`: a window moved onto one is out of
+/// the VM's screen, so `screenshot` and `vm view` never show it). Fewer names to scan under tool
+/// search. A call to one is refused as unknown.
 pub const HIDDEN: &[&str] = &[
     "check_for_update",
     "install_extension",
@@ -129,6 +131,7 @@ pub const HIDDEN: &[&str] = &[
     "set_agent_cursor_motion",
     "set_agent_cursor_theme",
     "replay_trajectory",
+    "agent_display",
 ];
 
 /// Cua tools agents almost never call (1 call in 2,715 in the lab's transcripts up to
@@ -141,6 +144,7 @@ pub const EXTRA_GROUPS: &[(&str, &[&str])] = &[
     ("recording", &["start_recording", "stop_recording", "get_recording_state"]),
     ("admin", &["set_config", "get_config", "debug_window_info", "health_report", "check_permissions"]),
     ("vision", &["parse_visual_regions"]),
+    ("browser", &["browser_motion_policy"]),
 ];
 
 pub const EXTRA_ENV: &str = "VMLAB_MCP_EXTRA_TOOLS";
