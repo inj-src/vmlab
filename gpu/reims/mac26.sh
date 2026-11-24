@@ -228,6 +228,8 @@ start(){
     # `show` and `hide` reach the window through the FIFO, which the title bar's hide button
     # writes to too; the window writes shown or hidden to the file (../window.sh).
     env+=(--setenv="VMLAB_WINDOW_CONTROL=$V/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$V/window.state")
+    # The title bar's save button runs VMLAB_SAVE_COMMAND (libdecor-vmlab), `vm save --button`.
+    env+=(--setenv="VMLAB_SAVE_COMMAND=/vmlab/tools/vmlab/home/.local/bin/vm save mac --button")
     # The window's close button shuts macOS down (closed, below; our switch in reims' window
     # code, which hides the window at the click either way). Without the switch reims powers
     # the VM off, a power cut to whatever is open in macOS: MAC26_CLOSE=poweroff keeps that.

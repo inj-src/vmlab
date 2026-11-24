@@ -569,11 +569,15 @@ cmd_states(){
     *) die "usage: vm states [--plain|--json]" ;;
   esac
 }
-# vm save <name> <state> [--replace] [--defender] [note...]
+# vm save <name> <state> [--live] [--replace] [--defender] [note...] | vm save <name> --button
 cmd_save(){
-  local n=$1 name=${2:-} replace=0 defender=0 a note=(); need "$n"; shift 2 || die "usage: vm save <name> <state> [--replace] [--defender] [note...]"
-  for a in "$@"; do case $a in --replace) replace=1 ;; --defender) defender=1 ;; *) note+=("$a") ;; esac; done
-  [[ $(state_of "$n") != running ]] || die "$n is running: vm stop $n first (a state is the disk of a VM that is shut down)"
+  local n=$1 name=${2:-} replace=0 defender=0 live=save a note=(); need "$n"
+  [[ $name == --button ]] && { save_button "$n"; return; }
+  shift 2 || die "usage: vm save <name> <state> [--live] [--replace] [--defender] [note...]"
+  for a in "$@"; do case $a in --replace) replace=1 ;; --defender) defender=1 ;; --live) live=save-live ;; *) note+=("$a") ;; esac; done
+  if [[ $(state_of "$n") == running ]]; then
+    [[ $live == save-live ]] || die "$n is running: vm stop $n first, or vm save $n $name --live saves it as it runs (its disk only: the state starts with a fresh boot)"
+  else live=save; fi
   if (( ! replace )) && st_has "$n" "$name"; then
     if tty_both; then ask "$n has a state '$name' already. Replace it?" || die "not saved"
     else die "$n has a state '$name' already: vm save $n $name --replace writes over it"; fi
@@ -584,9 +588,45 @@ cmd_save(){
     if tty_both; then ask "$n runs with Defender on, and '$name' has it off. Save it with Defender on over '$name'?" || die "not saved"
     else die "$n runs with Defender on (started with --defender), and '$name' has it off: saved over it, '$name' would have Defender on for good. A new name keeps both; vm save $n $name --replace --defender writes over it all the same"; fi
   fi
-  "${RUN[$n]}" state save "$name" > /dev/null || exit 1
+  "${RUN[$n]}" state "$live" "$name" > /dev/null || exit 1
   (( ${#note[@]} )) && echo "${note[*]}" > "$STATES_DIR/$n/$name.note"
   echo "$n: saved as '$name' (start it with: vm start $n $name)"
+}
+# The title bar's save button runs this (VMLAB_SAVE_COMMAND, from the launchers): the running VM's
+# disk over the state it is on, at once. Only the default state, which is not saved over, asks
+# for a name first. A notification says how it went; the exit code is for the button's icon:
+# 0 saved, 3 nothing done (cancelled, or a save already running), anything else failed.
+save_button(){
+  local n=$1 title name err id
+  title=$([[ $n == win ]] && echo "Windows 11" || echo "macOS")
+  exec 9> "$STATE/save-$n.lock"; flock -n 9 || exit 3
+  [[ $(state_of "$n") == running ]] || { notify 0 "$title not saved" "It is not running" > /dev/null; exit 1; }
+  name=$(st_cur "$n")
+  if [[ $name == default ]]; then
+    name=$(zenity --entry --title="Save $title" --ok-label=Save \
+      --text="The default state is not saved over: a name for this one" 2>/dev/null) || exit 3
+    [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,15}$ && $name != clean && $name != default ]] ||
+      { notify 0 "$title not saved" "'$name': a name is up to 16 lower-case letters, digits and . _ - (not default or clean)" > /dev/null; exit 1; }
+    ! st_has "$n" "$name" || zenity --question --title="Save $title" --ok-label=Replace \
+      --text="$title has a state '$name' already. Replace it?" 2>/dev/null || exit 3
+  fi
+  # as cmd_save: Defender, once on in a state, stays on in it
+  if st_def "$n" && st_has "$n" "$name" && ! st_def "$n" "$name"; then
+    zenity --question --title="Save $title" --ok-label=Save --text="$title runs with Defender on, and '$name' has it off. Saved over it, '$name' has Defender on for good." 2>/dev/null || exit 3
+  fi
+  id=$(notify 0 "Saving $title" "as '$name'")
+  if err=$("${RUN[$n]}" state save-live "$name" 2>&1 > /dev/null); then
+    notify "$id" "$title saved" "as '$name', as it is now (its disk: the state starts with a fresh boot)" > /dev/null
+  else
+    notify "$id" "$title not saved" "$(grep -v '^$' <<< "$err" | tail -n1)" dialog-error-symbolic > /dev/null; exit 1
+  fi
+}
+# notify REPLACES SUMMARY BODY [ICON]: a desktop notification over the one numbered REPLACES (0:
+# a new one); prints its number. gdbus, as notify-send fails here (libnotify lacks a symbol it needs)
+notify(){
+  gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+    --method org.freedesktop.Notifications.Notify vmlab "$1" "${4:-document-save-symbolic}" "$2" "$3" '[]' \
+    "{'transient': <true>}" 'int32 -1' 2>/dev/null | grep -o '[0-9]\+' | tail -n1 || echo 0
 }
 cmd_note(){
   local n=$1 name=$2; need "$n"; shift 2
@@ -666,7 +706,12 @@ vm commit <name>               make the current state the new default state (VM 
 vm save <name> <state> [note]  keep the stopped VM's disk as it is under a name, beside the
                                default state. --replace writes over a state of that name.
                                A run started with --defender is saved over a state without
-                               Defender only with --defender
+                               Defender only with --defender. --live: a running VM, which runs
+                               on (its disk only: the state starts with a fresh boot, as after
+                               a power cut; Windows is held under a second)
+vm save <name> --button        what the window's save button does: --live over the state the
+                               VM is on, without questions (on the default state it asks for a
+                               name); a notification says when it is saved
 vm note <name> <state> text    the line of text the list shows beside a state
 vm states                      the states of both VMs. In a terminal: a list to work in (start,
                                save, note, delete). --plain: a table. --json: for programs
@@ -682,7 +727,7 @@ case $sub in
   stop|ip|port|view|hide|restart) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   reset|commit) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$@" ;;
   states) cmd_states "$@" ;;
-  save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--replace] [--defender] [note...]"; cmd_save "$@" ;;
+  save) [[ $# -ge 2 ]] || die "usage: vm save <name> <state> [--live] [--replace] [--defender] [note...] | vm save <name> --button"; cmd_save "$@" ;;
   note) [[ $# -ge 3 ]] || die "usage: vm note <name> <state> <text>"; cmd_note "$@" ;;
   clear) [[ $# -ge 2 ]] || die "usage: vm clear <name> <state>... | --all  [-y]"; cmd_clear "$@" ;;
   ssh) [[ $# -ge 1 ]] || die "usage: vm ssh <name> [cmd]"; cmd_ssh "$@" ;;

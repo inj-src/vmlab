@@ -192,7 +192,10 @@ start(){
       # xwininfo can measure and resize it.
       # CONTROL and STATE_FILE (qemu-patches/0014): `show` and `hide` reach the window through
       # the FIFO, and it writes shown or hidden to the file; HIDDEN makes it without showing it.
-      for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR WAYLAND_DEBUG; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
+      # SAVE_COMMAND (qemu-patches/0018): the title bar's save button runs it, `vm save --button`,
+      # whose notifications go to the desktop's bus (DBUS_SESSION_BUS_ADDRESS, the test
+      # compositor's own in a test).
+      for a in WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR WAYLAND_DEBUG DBUS_SESSION_BUS_ADDRESS; do [[ -n ${!a:-} ]] && env+=(--setenv="$a=${!a}"); done
       local size=${WIN_VENUS_WINDOW_SIZE:-first}
       [[ $window == hidden ]] && env+=(--setenv=VMLAB_WINDOW_HIDDEN=1)
       # HIDDEN_SIZE (qemu-patches/0015): while the window is hidden Windows is offered 1920x1080,
@@ -202,7 +205,8 @@ start(){
       elif [[ $window == hidden ]]; then size=1920x1080; fi
       env+=(--setenv=VMLAB_WINDOW=1 --setenv=VMLAB_WINDOW_APP_ID=vmlab-win11 --setenv="VMLAB_WINDOW_TITLE=Windows 11" --setenv=VMLAB_WINDOW_CLOSE_POWERS_DOWN=1
         --setenv="VMLAB_WINDOW_FIXED_SIZE=$size" --setenv="VMLAB_WINDOW_SCALE_FILE=$S/scale" --setenv="VMLAB_WINDOW_SIZE_FILE=$S/size"
-        --setenv="VMLAB_WINDOW_CONTROL=$S/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$S/window.state")
+        --setenv="VMLAB_WINDOW_CONTROL=$S/window.ctl" --setenv="VMLAB_WINDOW_STATE_FILE=$S/window.state"
+        --setenv="VMLAB_SAVE_COMMAND=$(readlink -f "$HERE/../../home/.local/bin/vm") save win --button")
       # WIN_VENUS_WINDOW_RESTORED=1, for tests: the window opens at QEMU's own size, not maximized.
       [[ -n ${WIN_VENUS_WINDOW_RESTORED:-} ]] || env+=(--setenv=VMLAB_WINDOW_MAXIMIZE=1)
       [[ -n ${WIN_VENUS_WINDOW_X11:-} ]] && env+=(--setenv=GDK_BACKEND=x11)
