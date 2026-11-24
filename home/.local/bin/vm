@@ -447,7 +447,7 @@ state_rows(){
     while IFS=$'\t' read -r name bytes when; do
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$name" "$bytes" "$when" "$([[ $cur == "$name" ]] && echo loaded || echo -)" \
         "$([[ $cur == "$name" ]] && st_chg "$n" && echo changed || echo -)" \
-        "$(st_def "$n" "$name" && printf 'Defender on. ')$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)"
+        "$(st_def "$n" "$name" && printf 'Defender on. ')$([[ -s $STATES_DIR/$n/$name.usb ]] && printf 'USB passthrough. ')$(head -n1 "$STATES_DIR/$n/$name.note" 2>/dev/null || true)"
     done < <("${RUN[$n]}" state list | sort)
   done
 }

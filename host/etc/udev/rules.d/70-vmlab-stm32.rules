@@ -1,0 +1,4 @@
+# ST's USB devices (vendor 0483: ST-LINK probes, the STM32 DFU bootloader) open to plugdev and the
+# desktop's user, so the VMs' QEMU, which runs as that user, can pass them through (a state's
+# .usb list: gpu/win3d/win-venus.sh). Installed by host/install-usb.sh.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0483", MODE="0660", GROUP="plugdev", TAG+="uaccess"

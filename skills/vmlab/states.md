@@ -8,6 +8,7 @@ A saved state is a VM's whole disk kept under a name beside the default state: a
 - **Size:** a `win` state is as large as what its run wrote (0.4 GB after ten minutes, 1 to 2 GB after a long session): save right after the setup. `mac` states live inside the Mac's disk file.
 - **Remove:** `vm clear win hq`, for states you made.
 - **Defender:** a run started with `vm start win [state] --defender` keeps Defender on in what it saves, so save it under a new name: `vm save` writes it over a state without Defender only when given `--defender` too. `vm states` says "Defender on" beside such states.
+- **USB passthrough (`win`):** a state whose `/vmlab/images/states/win/NAME.usb` lists devices (one `vendor:product` in hex a line, `#` comments) gets each of them whenever it is plugged into this laptop; the laptop has it back when the VM stops. `vm save` and `vm start` carry the list with the state, and `vm states` says "USB passthrough". `ruet` (the user's, for STM32 work in Keil) lists every ST-LINK probe and the STM32 DFU bootloader. A device of another vendor than ST (0483) also needs a udev rule (README, "The host").
 - **Not yours:** `pebble` on each VM is the user's own setup. Start it; never save over or delete it. When `vm reset` refuses because the VM ran on a state and was not saved since, pass `--discard` only for a run you started; otherwise ask the user.
 
 ## The default state

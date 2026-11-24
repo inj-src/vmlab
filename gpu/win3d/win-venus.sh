@@ -248,6 +248,17 @@ start(){
   [[ -f $DISK ]] || qemu-img create -q "${NEW_QCOW2[@]}" -F qcow2 -b "$READY" "$DISK"
   # .defender: the disk has Defender on (save and load carry it to and from NAME.defender)
   [[ -z $defender ]] || { "$HERE/defender-on.sh" "$DISK" >&2 && : > "$STATES/.defender"; } || die "Defender was not turned on: not started"
+  # .usb: host USB devices this disk's runs get (save and load carry it to and from NAME.usb),
+  # one vendor:product in hex per line, # for a comment. Each is a usb-host device that QEMU
+  # attaches whenever such a device is plugged in here (it looks every 2 s), and gives back to
+  # this machine when the VM stops. Opening it needs write access to /dev/bus/usb (a udev rule
+  # in ../../host/etc/udev). One device per filter: QEMU would try to open a held one again.
+  local usb=() u
+  while read -r u; do
+    u=${u%%#*}; u=${u//[[:space:]]/}; [[ -n $u ]] || continue
+    [[ $u =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]] || die "$STATES/.usb: '$u' is not vendor:product in hex"
+    usb+=(-device "usb-host,vendorid=0x${u%:*},productid=0x${u#*:},id=usb-${u/:/-}")
+  done < <(cat "$STATES/.usb" 2>/dev/null)
   st_ran
   # Secure Boot has to be off for the test-signed driver: plain OVMF with its own variables,
   # the ready state's where it has saved them
@@ -338,7 +349,7 @@ start(){
     -chardev qemu-vdagent,id=clip,name=vdagent,clipboard=on,mouse=off -device virtserialport,chardev=clip,name=com.redhat.spice.0 \
     -device virtio-vga-gl,venus=true,blob=true,hostmem=4G,xres=1920,yres=1080,addr=5 "${display[@]}" \
     -audiodev "$audio,id=snd0" -device ich9-intel-hda,addr=6 -device hda-duplex,audiodev=snd0 \
-    -device qemu-xhci,addr=7 -device usb-tablet -device usb-kbd \
+    -device qemu-xhci,addr=7 -device usb-tablet -device usb-kbd "${usb[@]}" \
     -qmp unix:"$S/qmp.sock",server=on,wait=off -monitor none -serial file:"$S/serial.log" -parallel none \
     -pidfile "$S/qemu.pid"
   up qemu || { stop_helpers; die "QEMU did not start: $(tail -5 "$S/qemu.log")"; }
@@ -591,7 +602,7 @@ case ${1:-} in
     "$0" scp "$HERE/guest-scripts/d3d12-mode.ps1" dev@127.0.0.1:C:/vmlab/
     ssh_guest "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\vmlab\\d3d12-mode.ps1 ${2:-status}" ;;
   reset) alive qemu && die "stop it first"; st_guard "${2:-}"
-    rm -f "$DISK" "$S/OVMF_VARS.fd" "$STATES/.defender"; st_mark clean
+    rm -f "$DISK" "$S/OVMF_VARS.fd" "$STATES/.defender" "$STATES/.usb"; st_mark clean
     echo "this run's changes dropped: the next start is the ready state" ;;
   commit) alive qemu && die "stop it first"
     [[ ${2:-} =~ ^(|--keep-states|--drop-states)$ ]] || die "usage: win-venus.sh commit [--keep-states|--drop-states]"
@@ -604,13 +615,13 @@ case ${1:-} in
     if compgen -G "$STATES/*.qcow2" > /dev/null; then
       case ${2:-} in
         --keep-states) states_hold ;;
-        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$STATES"/*.defender "$READY_HELD" ;;
+        --drop-states) rm -f "$STATES"/*.qcow2 "$STATES"/*.vars.fd "$STATES"/*.note "$STATES"/*.defender "$STATES"/*.usb "$READY_HELD" ;;
         *) die "the ready state has named states on it, which a commit alone makes unusable: $(state_names). Commit with --keep-states (they stay as they are and grow by what the commit changed) or --drop-states (they are deleted)" ;;
       esac
     fi
     qemu-img commit -q "$DISK"; rm -f "$DISK"
     [[ -f $S/OVMF_VARS.fd ]] && cp "$S/OVMF_VARS.fd" "$READY_VARS"
-    st_mark clean
+    rm -f "$STATES/.usb"; st_mark clean   # the default state passes no USB device through
     [[ ${2:-} != --keep-states ]] || states_release
     echo "committed: $READY is the ready state" ;;
   state) alive qemu && [[ ${2:-} != list && ${2:-} != rm && ${2:-} != default-size ]] && die "stop it first"
@@ -620,15 +631,17 @@ case ${1:-} in
         cp --reflink=auto "$DISK" "$STATES/$3.qcow2.new"; mv "$STATES/$3.qcow2.new" "$STATES/$3.qcow2"
         cp "$([[ -f $S/OVMF_VARS.fd ]] && echo "$S/OVMF_VARS.fd" || echo "$READY_VARS")" "$STATES/$3.vars.fd"
         if [[ -e $STATES/.defender ]]; then : > "$STATES/$3.defender"; else rm -f "$STATES/$3.defender"; fi
+        if [[ -s $STATES/.usb ]]; then cp "$STATES/.usb" "$STATES/$3.usb"; else rm -f "$STATES/$3.usb"; fi
         st_mark "$3"; echo "saved: $3" ;;
       load) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
         st_guard "${4:-}"; mkdir -p "$S"
         cp --reflink=auto "$STATES/$3.qcow2" "$DISK.new"; mv "$DISK.new" "$DISK"
         cp "$STATES/$3.vars.fd" "$S/OVMF_VARS.fd"
         if [[ -e $STATES/$3.defender ]]; then : > "$STATES/.defender"; else rm -f "$STATES/.defender"; fi
+        if [[ -s $STATES/$3.usb ]]; then cp "$STATES/$3.usb" "$STATES/.usb"; else rm -f "$STATES/.usb"; fi
         st_mark "$3"; echo "loaded: $3" ;;
       rm) st_valid "${3:-}"; [[ -f $STATES/$3.qcow2 ]] || die "no state '$3' ($(state_names))"
-        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd" "$STATES/$3.defender"; st_forget "$3"; echo "deleted: $3" ;;
+        rm -f "$STATES/$3.qcow2" "$STATES/$3.vars.fd" "$STATES/$3.defender" "$STATES/$3.usb"; st_forget "$3"; echo "deleted: $3" ;;
       list) for f in "$STATES"/*.qcow2; do   # NAME, bytes on disk, time saved
           [[ -f $f ]] || continue
           printf '%s\t%s\t%s\n' "$(basename "$f" .qcow2)" "$(( $(stat -c %b "$f") * 512 ))" "$(stat -c %Y "$f")"

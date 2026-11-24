@@ -63,6 +63,10 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 - Compressed swap in memory: `host/install-zram.sh` ran once as root (2026-11-23). zram0, zstd,
   half the RAM up to 12 GB, used before `/swap.img` (`host/etc/systemd/zram-generator.conf`,
   `host/etc/sysctl.d/91-vmlab-zram.conf`: swappiness 100, page-cluster 0).
+- USB passthrough: `host/install-usb.sh` ran once as root (2026-11-24). Its udev rule
+  (`host/etc/udev/rules.d/70-vmlab-stm32.rules`) opens ST's devices (vendor 0483) to the user,
+  whose QEMU passes them to a `win` state that lists them (`skills/vmlab/states.md`). Another
+  vendor's device needs its own line there.
 - `host/etc/`: `modprobe.d/kvm.conf` (KVM ignores the MSRs it does not know, which macOS reads),
   `tmpfiles.d/vmlab-thp.conf` (huge pages for shared memory when a program asks) and
   `sysctl.d/90-vmlab-reims.conf` (`vm.max_map_count`, for reims-vgpu on NVIDIA).
