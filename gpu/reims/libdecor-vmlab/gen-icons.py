@@ -12,7 +12,9 @@ from gi.repository import Gtk, Rsvg
 
 ICONS = {'close': 'window-close-symbolic', 'maximize': 'window-maximize-symbolic',
          'restore': 'window-restore-symbolic', 'minimize': 'window-minimize-symbolic',
-         'fullscreen': 'view-fullscreen-symbolic', 'hide': 'view-restore-symbolic'}
+         'fullscreen': 'view-fullscreen-symbolic', 'hide': 'view-restore-symbolic',
+         'save': 'document-save-symbolic', 'saved': 'object-select-symbolic',
+         'failed': 'dialog-error-symbolic'}
 theme = Gtk.IconTheme.get_default()
 out = ['/* made by gen-icons.py: alpha masks of the symbolic icons, 16 units at scales 1 to 3 */',
        '#define VMLAB_ICON_UNITS 16', '#define VMLAB_ICON_SCALES 3']
