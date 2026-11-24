@@ -11,5 +11,6 @@
 ## Privacy permissions
 
 - SSH sessions have Accessibility, Screen Recording and full disk access, so `screencapture`, accessibility calls and `~/Desktop`, `~/Documents`, `~/share` work over `ssh`.
-- **A new GUI tool** that needs a permission asks once in System Settings. Approve it with `vm gui mac` (screenshot, then clicks and typing; a password field takes only the real keyboard; the password is `vmlab`), and tell the user.
+- Cua Driver has Accessibility, Screen Recording, Full Disk Access, App Management, and Automation (Apple Events) for every app installed in the state, so its background saves and Finder renames ask nothing. An app you install later asks on Cua's first scripting action; `ssh mac 'zsh -s' < /vmlab/tools/vmlab/mac/cua-automation.sh` allows it beforehand.
+- **A new GUI tool** that needs a permission asks once in System Settings. Approve it with `vm gui mac` (screenshot, then clicks and typing; a password field takes only the real keyboard; the password is `vmlab`), and tell the user. Open the password prompt with a `vm gui mac click` on the switch: a prompt that opens while System Settings is behind another window does not take the keys.
 - Reinstalling or updating Cua Driver can drop its grants: `cua-driver permissions status` checks them.
