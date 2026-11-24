@@ -763,7 +763,7 @@ Mac could not be watched at all). `window.sh` holds what the two launchers share
 Vulkan on the RTX 4050. The guest is macOS Tahoe 26.7.1 (x64): 6 CPUs, 8 GB, 1920×1080, user
 `dev` / `vmlab`, auto-login, passwordless sudo. Inside: Xcode Command Line Tools, Node 26, Python
 3.12 and uv, VS Code, Chrome 157 (default browser, with the lab's policy profile), the Electron 38
-bench app (`~/vmlab/bench-app`), Cua Driver 0.47 (LaunchAgent `com.trycua.cua-driver`, with its
+bench app (`~/vmlab/bench-app`), Cua Driver 0.61 (LaunchAgent `com.trycua.cua-driver`, with its
 Accessibility and Screen Recording grants), the debloat (`../mac/debloat.sh`; `PerfPowerServices`
 does not spin on macOS 26, so `pps-stop.sh` is not installed) and vmlab-spice-agent (clipboard
 and file drop, `../mac/install-spice-agent.sh`).
