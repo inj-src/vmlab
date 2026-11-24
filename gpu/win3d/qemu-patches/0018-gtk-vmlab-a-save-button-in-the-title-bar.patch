@@ -1,0 +1,139 @@
+gtk: vmlab: a save button in the title bar
+
+As the user asked (2026-11-24): one click saves the running VM's disk over the state it is on,
+with no questions, and the button says when it is done. The button is left of hide, and only
+there when VMLAB_SAVE_COMMAND is set (the launcher sets it to `vm save win --button`, which
+does the saving and sends a desktop notification with the state's name, or why it failed).
+- The command runs beside QEMU's main loop (g_spawn_async, a child watch): it talks to QEMU
+  over QMP while it runs, and gets none of QEMU's open files, blocked signals or ignored
+  SIGPIPE.
+- The icon: a spinner while it runs, then a tick (exit 0) or dialog-error (any other exit)
+  for 4 s. Exit 3 (a name asked for and cancelled, or a save already running) puts the save
+  icon back at once. A click while a save runs does nothing.
+
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -3452,6 +3452,113 @@
+     return button;
+ }
+ 
++/*
++ * vmlab: the save button. One click runs VMLAB_SAVE_COMMAND (`vm save win --button`), which
++ * saves the running VM's disk over the state it is on. The button shows how it goes: a spinner
++ * while the command runs, then a tick (exit 0) or an error mark (any other exit) for 4 s. Exit 3
++ * (asked for a name and cancelled, or a save already running) puts the icon back at once. A
++ * click while a save runs does nothing. The command runs beside QEMU's main loop, which it
++ * talks to (QMP), and gets none of QEMU's files (g_spawn closes them).
++ */
++static struct {
++    GtkWidget *button, *idle, *spinner, *done, *failed;
++    GPid pid;
++    guint revert;
++} vmlab_save;
++
++#define VMLAB_SAVE_TOOLTIP "Save: the disk as it is now, over the state the VM is on " \
++    "(a name is asked on the default state). The VM runs on"
++
++static void gd_vmlab_save_show(GtkWidget *image, const char *tooltip)
++{
++    gtk_button_set_image(GTK_BUTTON(vmlab_save.button), image);
++    gtk_widget_set_tooltip_text(vmlab_save.button, tooltip);
++}
++
++static gboolean gd_vmlab_save_revert(gpointer opaque)
++{
++    vmlab_save.revert = 0;
++    gd_vmlab_save_show(vmlab_save.idle, _(VMLAB_SAVE_TOOLTIP));
++    return G_SOURCE_REMOVE;
++}
++
++static void gd_vmlab_save_done(GPid pid, gint status, gpointer opaque)
++{
++    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
++
++    g_spawn_close_pid(pid);
++    vmlab_save.pid = 0;
++    gtk_spinner_stop(GTK_SPINNER(vmlab_save.spinner));
++    if (code == 3) {
++        gd_vmlab_save_revert(NULL);
++        return;
++    }
++    if (code == 0) {
++        gd_vmlab_save_show(vmlab_save.done, _("Saved (the notification says as what)"));
++    } else {
++        gd_vmlab_save_show(vmlab_save.failed, _("Not saved (the notification says why)"));
++    }
++    vmlab_save.revert = g_timeout_add_seconds(4, gd_vmlab_save_revert, NULL);
++}
++
++/* in the child: none of QEMU's blocked signals (SIGALRM, ...) or its ignored SIGPIPE */
++static void gd_vmlab_save_child(gpointer opaque)
++{
++    sigset_t none;
++
++    sigemptyset(&none);
++    pthread_sigmask(SIG_SETMASK, &none, NULL);
++    signal(SIGPIPE, SIG_DFL);
++}
++
++static void gd_vmlab_save_clicked(GtkButton *button, void *opaque)
++{
++    g_auto(GStrv) argv = NULL;
++    g_autoptr(GError) err = NULL;
++
++    if (vmlab_save.pid) {
++        return;
++    }
++    if (vmlab_save.revert) {
++        g_source_remove(vmlab_save.revert);
++        vmlab_save.revert = 0;
++    }
++    if (!g_shell_parse_argv(g_getenv("VMLAB_SAVE_COMMAND"), NULL, &argv, &err) ||
++        !g_spawn_async(NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD, gd_vmlab_save_child, NULL,
++                       &vmlab_save.pid, &err)) {
++        warn_report("vmlab: the save command (VMLAB_SAVE_COMMAND): %s", err->message);
++        vmlab_save.pid = 0;
++        gd_vmlab_save_show(vmlab_save.failed, err->message);
++        vmlab_save.revert = g_timeout_add_seconds(4, gd_vmlab_save_revert, NULL);
++        return;
++    }
++    gtk_spinner_start(GTK_SPINNER(vmlab_save.spinner));
++    gd_vmlab_save_show(vmlab_save.spinner, _("Saving..."));
++    g_child_watch_add(vmlab_save.pid, gd_vmlab_save_done, NULL);
++}
++
++static GtkWidget *gd_vmlab_save_button(void)
++{
++    GtkWidget **image[] = { &vmlab_save.idle, &vmlab_save.done, &vmlab_save.failed };
++    const char *icon[] = { "document-save-symbolic", "object-select-symbolic",
++                           "dialog-error-symbolic" };
++    int i;
++
++    vmlab_save.button = gd_vmlab_title_bar_button(icon[0], _(VMLAB_SAVE_TOOLTIP));
++    /* the images are swapped in and out of the button: each is kept (a reference of ours) */
++    for (i = 0; i < ARRAY_SIZE(icon); i++) {
++        *image[i] = g_object_ref_sink(gtk_image_new_from_icon_name(icon[i], GTK_ICON_SIZE_MENU));
++        gtk_widget_show(*image[i]);
++    }
++    vmlab_save.spinner = g_object_ref_sink(gtk_spinner_new());
++    gtk_widget_set_size_request(vmlab_save.spinner, 16, 16);
++    gtk_widget_show(vmlab_save.spinner);
++    gtk_button_set_image(GTK_BUTTON(vmlab_save.button), vmlab_save.idle);
++    gtk_button_set_always_show_image(GTK_BUTTON(vmlab_save.button), TRUE);
++    g_signal_connect(vmlab_save.button, "clicked", G_CALLBACK(gd_vmlab_save_clicked), NULL);
++    return vmlab_save.button;
++}
++
+ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+ {
+     VirtualConsole *vc;
+@@ -3547,6 +3654,9 @@
+             g_signal_connect(hide, "clicked", G_CALLBACK(gd_vmlab_hide_clicked), s);
+             gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header), hide);
+         }
++        if (g_getenv("VMLAB_SAVE_COMMAND")) {
++            gtk_header_bar_pack_end(GTK_HEADER_BAR(s->vmlab_header), gd_vmlab_save_button());
++        }
+         gtk_window_set_titlebar(GTK_WINDOW(s->window), s->vmlab_header);
+         gtk_widget_add_events(s->window, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
+         g_signal_connect(s->window, "button-press-event",
