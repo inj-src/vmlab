@@ -178,6 +178,12 @@ def save_win(qmp_sock, ga_sock, disk, top, target):
     except QmpError as e:
         die(f"{e}. Windows still writes to {top}, over {disk}: stopping the VM now loses "
             f"those writes. Commit it by hand (QMP block-commit device {node}, base-node disk0)")
+    # out of the disk's chain now, but a node blockdev-add made stays until blockdev-del: the
+    # next save's blockdev-add of the same name would fail on it
+    try:
+        qmp(qmp_sock, "blockdev-del", {"node-name": node})
+    except QmpError as e:
+        print(f"live-save: {e}", file=sys.stderr)
     if not copied:
         die(f"the reflink copy of {disk} failed; nothing was saved")
     print(f"saved {target}")
