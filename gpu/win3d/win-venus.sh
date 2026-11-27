@@ -336,7 +336,10 @@ start(){
   # its slot: left to QEMU's numbering, the cache disk (added 2026-11-12) moved the GPU from
   # slot 4 to 5, Windows set it up as a new device with the driver's defaults (HWCursor=0), and
   # the pointer trailed again. A new device takes a free slot (8 and up), never one of these.
-  unit vmlab-win-venus "$S/qemu.log" --setenv=VK_LOADER_DRIVERS_SELECT="$select" --setenv=RENDER_SERVER_EXEC_PATH="$RENDER_SERVER" "${layer[@]}" "${env[@]}" \
+  # CPUWeight: the desktop (100) comes first when both want the CPUs, so a build in the guest
+  # leaves the laptop responsive; with idle CPUs the guest gets all it asks for (as x86sim's
+  # limited.sh does; IO caps would be ignored: the user manager has no io controller here)
+  unit vmlab-win-venus "$S/qemu.log" -p CPUWeight=50 --setenv=VK_LOADER_DRIVERS_SELECT="$select" --setenv=RENDER_SERVER_EXEC_PATH="$RENDER_SERVER" "${layer[@]}" "${env[@]}" \
     "${trace[@]}" "$QEMU" -name win-venus -L /usr/share/qemu -L /usr/share/seabios -L /usr/lib/ipxe/qemu -machine q35,hpet=off -accel kvm \
     -cpu "$cpu" \
     -smp "$smp" -m 8192M -rtc base=localtime,driftfix=slew \

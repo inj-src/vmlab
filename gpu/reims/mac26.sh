@@ -278,7 +278,8 @@ start(){
   : > "$V/logs/qemu.log"
   systemctl --user reset-failed "$UNIT" 2>/dev/null || true
   st_ran
-  systemd-run --user --quiet --collect --unit="$UNIT" "${env[@]}" \
+  # CPUWeight 50: the desktop comes first when both want the CPUs (win-venus.sh says why)
+  systemd-run --user --quiet --collect --unit="$UNIT" -p CPUWeight=50 "${env[@]}" \
     -p StandardOutput="append:$V/logs/qemu.log" -p StandardError="append:$V/logs/qemu.log" "${thp[@]}" "$V/run.sh"
   if [[ $window != none ]]; then agent_link; [[ -z $hideable ]] || tray mac "$UNIT" "$V/window.state"; fi
   for _ in $(seq 20); do python3 -I "${0%/*}/../pin.py" "$V/qmp.sock" "$VCPUS" 2>/dev/null && break; sleep 0.5; done
