@@ -1,0 +1,9 @@
+# Arduino boards and the USB-serial chips on clone boards, opened to plugdev and the desktop's user
+# so the VMs' QEMU can pass them through (the `ruet` state's .usb list). Installed by host/install-usb.sh.
+# Arduino (2341) and Arduino.org (2a03): every board.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2341", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2a03", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# USB-serial chips, by product only: CH340/CH341 and CH9102 (WCH), FT232R (FTDI), CP2102 (Silicon Labs).
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523|5523|55d4", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="6001", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="10c4", ATTR{idProduct}=="ea60", MODE="0660", GROUP="plugdev", TAG+="uaccess"
