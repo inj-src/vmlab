@@ -1065,6 +1065,21 @@ $M reset                # back to the clean snapshot; $M commit makes the curren
   `--grep` or `-S` for the symptom; each commit says what the guest sees change. The Dock
   badge fault (below) took hours to find here and was fixed there two days before. If
   upstream has the fix, move the lab's base instead of patching.
+- **Local translator fixes** (dev lane, 2026-11-27): metal2vulkan from `metal2vulkan-dev/`, branch
+  `vmlab-dev`: the pinned 30a5a88 plus `reims/patches/metal2vulkan-x86sim-fixes.dev.patch`, two
+  fixes from x86Sim's fork (github.com/x86sim/metal2vulkan a980409c). A 16-byte load declared
+  `align 16` is read as four words, not one `uvec4`: a buffer bound at an offset of 4 mod 16
+  read the wrong bytes (x86Sim saw it in ASTC textures). A pointer `select` may take a global's
+  address on either side, which was refused, and a refused shader ends the VM. The tests whose
+  output the first fix changes are `#[ignore]`d with the reason. `metal2vulkan-local.dev.patch`
+  is the `[patch]` in `reims-vgpu-dev/Cargo.toml` that takes the three crates from there. Making
+  the checkout again: `git init metal2vulkan-dev`, `git fetch --depth 1
+  https://github.com/steelbrain/metal2vulkan <the pin>`, check it out as `vmlab-dev` and `git am`
+  the patch. Tested 2026-11-27: the library tests fail alike with and without it (here only for
+  want of a newer LLVM than 18; with x86Sim's `spirv-val` 2025.1 every shader-validity test
+  passes), and the Mac booted and drew its desktop and the WebGL Aquarium. When reims moves its
+  pin, `[patch]` must go or follow: it replaces whatever commit the pin names. Drop both once the
+  pin has the fixes (upstream had neither on 2026-11-27).
 - **Local window changes** (both lanes): `reims/patches/window-maximized-and-title.{dev,stable}.patch`
   and, on top of it in the dev lane, `window-pinned-mode.dev.patch`,
   `sdl-no-xdg-foreign-export.dev.patch` (`Cargo.toml`; `Cargo.lock` follows at the build),

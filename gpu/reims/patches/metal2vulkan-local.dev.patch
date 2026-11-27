@@ -1,0 +1,13 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -137,3 +137,10 @@
+ # cleaning up crash mutter 46.2 (../README.md).
+ [patch.crates-io]
+ sdl3-src = { path = "../reims/sdl3-src-3.4.18-vmlab" }
++
++# vmlab: metal2vulkan at the commit pinned above plus two translator fixes from x86Sim's fork
++# (../metal2vulkan-dev, branch vmlab-dev; ../reims/patches/metal2vulkan-x86sim-fixes.dev.patch)
++[patch."https://github.com/steelbrain/metal2vulkan"]
++metal2vulkan = { path = "../metal2vulkan-dev/crates/metal2vulkan" }
++metal2vulkan-air = { path = "../metal2vulkan-dev/crates/metal2vulkan-air" }
++metal2vulkan-runtime = { path = "../metal2vulkan-dev/crates/metal2vulkan-runtime" }
