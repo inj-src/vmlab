@@ -415,11 +415,20 @@ cmd_cache(){
     [[ -f $LAB/images/$n-cache-empty.qcow2 ]] || die "no empty cache disk to start again from ($LAB/images/$n-cache-empty.qcow2)"
     rm -f "$CACHE/$n.qcow2"; echo "$n: the build cache is empty"
   elif [[ $# == 0 ]]; then
-    for n in win mac; do
-      if [[ -f $CACHE/$n.qcow2 ]]; then echo "$n  $(du -h "$CACHE/$n.qcow2" | cut -f1) of 25G at most  $CACHE/$n.qcow2"
-      else echo "$n  none yet"; fi
-    done
+    for n in win mac; do echo "$n  $(cache_fill "$n")  $CACHE/$n.qcow2"; done
   else die "usage: vm cache | vm cache clear <name>"; fi
+}
+
+# cache_fill VM: how full its build cache is, as "15.2 of 25 GB used, 9.8 GB left". What the
+# file takes on the laptop: both launchers pass the guest's deletes on (discard=unmap), so it
+# goes down again as files in C:\cache or ~/cache are deleted
+cache_fill(){
+  local f=$CACHE/$1.qcow2
+  [[ -f $f ]] || { echo "empty (made at the next start)"; return; }
+  qemu-img info -U --output=json "$f" 2>/dev/null | jq -r '"\(.["actual-size"]) \(.["virtual-size"])"' \
+    | awk '{ u = $1 / 2^30; t = $2 / 2^30; l = t - u; if (l < 0) l = 0
+             printf "%.1f of %d GB used, %.1f GB left\n", u, t + 0.5, l }' | grep . \
+    || echo "unknown (qemu-img could not read $f)"
 }
 
 # ---- Named states: a VM's disk kept under a name (the launchers do the keeping: gpu/states.sh).
@@ -460,6 +469,8 @@ state_table(){
     [[ $cur == loaded && $(state_of "$n") == running ]] && now=running
     printf '%-4s %-16s %7s  %-16s  %-15s  %s\n' "$n" "$name" "$(st_size "$bytes")" "$(st_when "$when")" "$now" "$note"
   done < <(state_rows)
+  printf '\n%-4s %s\n' VM 'BUILD CACHE (C:\cache, ~/cache: kept across states and resets)'
+  for n in win mac; do printf '%-4s %s\n' "$n" "$(cache_fill "$n")"; done
 }
 # The list's lines: the vm and the state in front for fzf's {1} {2}, then what is shown. A line
 # of "-" in front is not a state: a VM's title, or the empty line before the next one. Every
@@ -471,7 +482,7 @@ st_day(){
 }
 st_room(){ awk -v b="$1" 'BEGIN { if (b >= 2^30) printf "%.1f GB", b / 2^30; else if (b >= 2^20) printf "%d MB", b / 2^20; else printf "<1 MB" }'; }
 state_lines(){
-  local n name bytes when cur chg note i last="" wn=0 ww=0 wr=0 wm=0 b=$'\e[1m' d=$'\e[2m' z=$'\e[0m'
+  local n name bytes when cur chg note i t last="" wn=0 ww=0 wr=0 wm=0 b=$'\e[1m' d=$'\e[2m' z=$'\e[0m'
   local -a N=() S=() C=() W=() R=() M=() T=()
   while IFS=$'\t' read -r n name bytes when cur chg note; do
     i=${#N[@]}; N[i]=$n S[i]=$name C[i]="" W[i]="" R[i]="" M[i]="" T[i]=$note
@@ -488,7 +499,8 @@ state_lines(){
   for i in "${!N[@]}"; do
     if [[ ${N[i]} != "$last" ]]; then
       [[ -z $last ]] || printf -- '-\t-\t\n'
-      case ${N[i]} in win) printf -- "-\t-\t${b}Windows$z\n" ;; mac) printf -- "-\t-\t${b}Mac$z\n" ;; esac; last=${N[i]}
+      case ${N[i]} in win) t=Windows ;; mac) t=Mac ;; esac
+      printf -- "-\t-\t${b}%-$(( wn + 3 ))s$z${d}build cache %s$z\n" "$t" "$(cache_fill "${N[i]}")"; last=${N[i]}
     fi
     printf "%s\t%s\t%-$(( wn + 3 ))s${C[i]}%-${ww}s$z$d%-${wm}s%-${wr}s%s$z\n" "${N[i]}" "${S[i]}" "${S[i]}" "${W[i]}" "${M[i]}" "${R[i]}" "${T[i]}"
   done
@@ -673,7 +685,7 @@ vm push <name> <dir> [dest]    mirror the git work tree at <dir>, uncommitted an
                                C:\cache\src\<repo> on win, ~/cache/src/<repo> on mac, or to
                                <dest>. Later pushes send only the changes and keep the
                                guest's build output
-vm cache                       how large each VM's build cache is. C:\cache and ~/cache are a
+vm cache                       how full each VM's build cache is. C:\cache and ~/cache are a
                                disk of their own that reset and commit leave alone
 vm cache clear <name>          empty that VM's build cache (VM must be stopped)
 vm tunnel <name> <port> [lp]   forward VM's 127.0.0.1:<port> to localhost:<lp>
@@ -713,8 +725,9 @@ vm save <name> --button        what the window's save button does: --live over t
                                VM is on, without questions (on the default state it asks for a
                                name); a notification says when it is saved
 vm note <name> <state> text    the line of text the list shows beside a state
-vm states                      the states of both VMs. In a terminal: a list to work in (start,
-                               save, note, delete). --plain: a table. --json: for programs
+vm states                      the states of both VMs, and how full each build cache is. In a
+                               terminal: a list to work in (start, save, note, delete).
+                               --plain: a table. --json: for programs (the states only)
 vm clear <name> <state>...     delete states; --all: every state of that VM. In a terminal it
                                asks first (-y: no question)
 EOF
