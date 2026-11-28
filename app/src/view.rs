@@ -395,7 +395,7 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
             Button::new("Save")
                 .variant(ButtonVariant::Neutral)
                 .control_size(ControlSize::Large)
-                .icon(&icons::SAVE)
+                .icon(&oc::DOWNLOAD)
                 .disabled(!idle)
                 .on_press(move |s: &mut App| s.save(vm))
                 .build(k)
@@ -433,7 +433,7 @@ fn more(s: &App, st: &Status, saved: &Saved, k: &Kit, layer: &mut Vec<El>) -> El
         menu = menu.item(MenuItem::new("Switch to this state").key("m-switch").icon(&icons::SWITCH).on_select(move |s: &mut App| s.pick(vm, &n)));
     }
     if cur && st.changed && name != "default" {
-        menu = menu.item(MenuItem::new("Save changes").key("m-save").icon(&icons::SAVE).on_select(move |s: &mut App| s.save(vm)));
+        menu = menu.item(MenuItem::new("Save changes").key("m-save").icon(&oc::DOWNLOAD).on_select(move |s: &mut App| s.save(vm)));
     }
     let (n, note) = (name.clone(), saved.note.clone());
     menu = menu.item(MenuItem::new("Edit note").key("m-note").icon(&oc::EDIT).on_select(move |s: &mut App| {
