@@ -194,11 +194,12 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, layer: &mut Vec<El>) -> El {
             &format!("{} is running. Starting {} shuts it down first, about a minute.", other.title(), vm.title()),
         ));
     }
+    // The cache first: a fixed-height summary that a growing list of states never pushes away.
     body = body
-        .child(text("States").key("states-title").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(cache(s, d, st, k))
+        .child(text("States").key("states-title").font(k.ty.ui_medium).color(k.c.text_base).mt(8.0))
         .child(states(s, d, st, k, hair, layer))
-        .child(under(s, st, k))
-        .child(cache(s, d, st, k));
+        .child(under(s, st, k));
     col()
         .key("panel")
         .grow(1.0)
@@ -485,67 +486,59 @@ fn cache(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
     let vm = s.sel;
     let idle = s.busy.is_none();
     let fill = d.cache(vm).and_then(|c| Some((c.used_bytes?, c.size_bytes?)));
-    let mut head = row()
-        .key("cache-head")
+    // One line: what it is and where the guest sees it, then how full, then Clear.
+    let mut top = row()
+        .key("top")
         .w_full()
         .h(24.0)
+        .gap(8.0)
         .center_y()
-        .child(text("Build cache").key("t").font(k.ty.ui_medium).color(c.text_base))
+        .child(text("Build cache").key("t").font(k.ty.ui_medium).color(c.text_base).nowrap())
+        .child(text(vm.cache_path()).key("path").font(k.ty.small).color(c.text_faint).truncate().shrink())
         .child(spacer());
+    let (frac, warn) = match fill {
+        Some((used, size)) => {
+            let frac = used as f32 / size.max(1) as f32;
+            top = top.child(
+                row()
+                    .key("figure")
+                    .gap(4.0)
+                    .center_y()
+                    .child(text(gb(used)).key("n").font(k.ty.ui_medium).color(c.text_base).nowrap())
+                    .child(text(format!("of {}", gb(size))).key("of").font(k.ty.ui).color(c.text_muted).nowrap()),
+            );
+            (frac, frac > 0.9)
+        }
+        None => {
+            top = top.child(text("Empty, made at the next start").key("figure").font(k.ty.ui).color(c.text_muted).nowrap());
+            (0.0, false)
+        }
+    };
     if fill.is_some_and(|(used, _)| used > 0) {
-        head = head.child(
+        top = top.child(
             Button::new("Clear")
                 .variant(ButtonVariant::Ghost)
                 .control_size(ControlSize::Small)
                 .disabled(!idle || st.running)
-                .help(if st.running { "Shut it down to clear it" } else { "Empty the build cache" })
+                .help(if st.running { "Shut it down to clear it" } else { "Empty the build cache, which every state shares" })
                 .on_press(move |s: &mut App| s.dialog = Dialog::ClearCache { vm })
                 .build(k)
-                .key("clear"),
+                .key("clear")
+                .mr(-6.0),
         );
     }
-    let (figure, free, frac, warn, foot) = match fill {
-        Some((used, size)) => {
-            let frac = used as f32 / size.max(1) as f32;
-            (
-                row()
-                    .key("figure")
-                    .gap(5.0)
-                    .items_end()
-                    .child(text(gb(used)).key("n").font(k.ty.body_medium).color(c.text_base))
-                    .child(text(format!("of {}", gb(size))).key("of").font(k.ty.ui).color(c.text_muted)),
-                Some(format!("{} free", gb(size.saturating_sub(used)))),
-                frac,
-                frac > 0.9,
-                format!("{}, shared by every state", vm.cache_path()),
-            )
-        }
-        None => (
-            row().key("figure").child(text("Empty").key("n").font(k.ty.body_medium).color(c.text_base)),
-            None,
-            0.0,
-            false,
-            format!("{}, made at the next start", vm.cache_path()),
-        ),
-    };
-    let mut top = row().key("top").w_full().items_end().child(figure).child(spacer());
-    if let Some(f) = free {
-        top = top.child(text(f).key("free").font(k.ty.small).color(c.text_muted));
-    }
-    let body = col()
+    col()
         .key("cache")
         .w_full()
         .radius(8.0)
         .fill(c.layer_01)
         .border(0.5, c.border_muted)
         .px(14.0)
-        .pt(12.0)
+        .pt(10.0)
         .pb(12.0)
         .gap(10.0)
         .child(top)
         .child(segments(k, frac, warn))
-        .child(text(foot).key("path").font(k.ty.small).color(c.text_faint));
-    col().key("cache-section").w_full().gap(10.0).pt(8.0).child(head).child(body)
 }
 
 /// A gauge in `SEGMENTS` steps: lit up to `frac`, amber when nearly full.
