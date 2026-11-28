@@ -13,7 +13,7 @@ use crate::{App, Dialog, dialogs, icons};
 const MAX_W: f32 = 1080.0;
 const TOC_W: f32 = 164.0;
 /// Where the brand and the header sit, so their lines meet across the gap.
-const TOP: f32 = 22.0;
+const TOP: f32 = 36.0;
 const BAR_H: f32 = 36.0;
 
 /// Running: a calmer green than the theme's success token, which is drawn for small icons.
