@@ -263,7 +263,7 @@ fn main() {
         return;
     }
     let spec = AppSpec {
-        min_size: Some((620.0, 460.0)),
+        min_size: Some((680.0, 460.0)),
         fonts: rune_theme_opencode::FONTS,
         families: rune_theme_opencode::FAMILIES,
         scenes: sample::SCENES,

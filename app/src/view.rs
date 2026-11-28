@@ -8,7 +8,13 @@ use rune_theme_opencode::icons as oc;
 use crate::model::{Saved, Snapshot, Status, Vm, for_how_long, gb, parse_utc, when};
 use crate::{App, Dialog, dialogs, icons};
 
-const SIDEBAR_W: f32 = 196.0;
+/// The page: the VM list and the chosen VM side by side, centred, no wider than `MAX_W`, as a
+/// documentation site's table of contents and article.
+const MAX_W: f32 = 1080.0;
+const TOC_W: f32 = 164.0;
+/// Where the brand and the header sit, so their lines meet across the gap.
+const TOP: f32 = 22.0;
+const BAR_H: f32 = 36.0;
 
 /// Running: a calmer green than the theme's success token, which is drawn for small icons.
 pub fn ok(k: &Kit) -> Color {
@@ -38,14 +44,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
             .build(k);
         layer.push(ToastRegion::new().toast(toast).build(k));
     }
-    let base = row()
-        .key("window")
-        .w_full()
-        .h_full()
-        .fill(c.bg_base)
-        .child(sidebar(s, k))
-        .child(el().key("sidebar-edge").w(hair).h_full().fill(c.border_base))
-        .child(panel);
+    let frame = row().key("frame").w_full().max_w(MAX_W).h_full().px(28.0).gap(36.0).child(toc(s, k)).child(panel);
+    let base = row().key("window").w_full().h_full().fill(c.bg_base).justify_center().child(frame);
     rune_kit::root(base, layer)
 }
 
@@ -80,21 +80,45 @@ fn dot(k: &Kit, key: &str, running: bool, busy: bool) -> El {
     }
 }
 
-fn sidebar(s: &App, k: &Kit) -> El {
+/// The VMs as a table of contents: links on a thin track, the chosen one lit, with the brand
+/// above and the free space under them (together, however tall the window). No panel of its own: it shares the page.
+fn toc(s: &App, k: &Kit) -> El {
     let c = &k.c;
     let brand = row()
         .key("brand")
-        .h(32.0)
-        .px(6.0)
+        .h(BAR_H)
         .gap(9.0)
         .center_y()
-        .child(icon(&icons::VMLAB, 22.0).key("mark"))
+        .child(icon(&icons::VMLAB, 20.0).key("mark"))
         .child(text("vmlab").key("name").font(k.ty.body_medium).color(c.text_base));
-    let mut nav = col().key("nav").w_full().gap(2.0).role("tablist").label("VMs");
+    let mut nav = col().key("nav").w_full().role("tablist").label("VMs");
     for vm in Vm::ALL {
         let on = s.sel == vm;
         let running = s.data.as_ref().and_then(|d| d.status(vm)).is_some_and(|st| st.running);
         let busy = s.busy.as_ref().is_some_and(|b| b.vm == vm);
+        let link = row()
+            .key("link")
+            .grow(1.0)
+            .shrink()
+            .min_w(0.0)
+            .h_full()
+            .ml(4.0)
+            .px(8.0)
+            .gap(8.0)
+            .center_y()
+            .radius(6.0)
+            .hover(if on { Color::TRANSPARENT } else { c.hover })
+            .child(icon(logo(vm), 14.0).key("logo").color(if on { c.icon_base } else { c.icon_muted }))
+            .child(
+                text(vm.title())
+                    .key("title")
+                    .font(if on { k.ty.ui_medium } else { k.ty.ui })
+                    .color(if on { c.text_base } else { c.text_muted })
+                    .truncate()
+                    .grow(1.0)
+                    .shrink(),
+            )
+            .child(dot(k, "dot", running, busy));
         nav = nav.child(
             row()
                 .key(format!("nav-{}", vm.id()))
@@ -104,23 +128,22 @@ fn sidebar(s: &App, k: &Kit) -> El {
                 .focusable(true)
                 .w_full()
                 .h(32.0)
-                .px(8.0)
-                .gap(9.0)
-                .center_y()
-                .radius(6.0)
-                .fill(if on { c.layer_03 } else { Color::TRANSPARENT })
-                .hover(if on { Color::TRANSPARENT } else { c.hover })
                 .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut App| {
                     s.sel = vm;
                     s.menu = None;
                 })
-                .child(icon(logo(vm), 15.0).key("logo").color(c.icon_base))
-                .child(text(vm.title()).key("title").font(k.ty.ui).color(if on { c.text_base } else { c.text_muted }).grow(1.0))
-                .child(dot(k, "dot", running, busy)),
+                .child(el().key("track").w(if on { 2.0 } else { 1.0 }).h_full().fill(if on { c.text_base } else { c.border_base }))
+                .child(link),
         );
     }
-    let mut side = col().key("sidebar").w(SIDEBAR_W).h_full().fill(c.page).px(10.0).pt(14.0).pb(16.0).gap(14.0).child(brand).child(nav).child(spacer());
+    let list = col()
+        .key("contents")
+        .w_full()
+        .gap(10.0)
+        .child(text("Machines").key("label").font(k.ty.small_medium).color(c.text_faint))
+        .child(nav);
+    let mut side = col().key("toc").w(TOC_W).h_full().pt(TOP).pb(24.0).gap(28.0).child(brand).child(list);
     if let Some(d) = &s.data
         && d.disk_bytes > 0
     {
@@ -129,7 +152,6 @@ fn sidebar(s: &App, k: &Kit) -> El {
             col()
                 .key("disk")
                 .w_full()
-                .px(8.0)
                 .gap(8.0)
                 .child(
                     row()
@@ -163,7 +185,7 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, layer: &mut Vec<El>) -> El {
     let Some(st) = d.status(vm) else {
         return col().key("panel").grow(1.0).h_full().center().child(text("vm does not list this VM").font(k.ty.ui).color(k.c.text_muted));
     };
-    let mut body = col().key(format!("body-{}", vm.id())).w_full().px(24.0).pt(18.0).pb(24.0).gap(12.0);
+    let mut body = col().key(format!("body-{}", vm.id())).w_full().px(1.0).pt(20.0).pb(28.0).gap(12.0);
     if let Some(other) = d.running()
         && other != vm
     {
@@ -217,7 +239,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
         .child(text(vm.title()).key("vm").font(k.ty.ui_medium).color(c.text_base).nowrap())
         .child(text("/").key("sep").font(k.ty.ui).color(c.text_faint))
         .child(text(st.state.clone()).key("state").font(k.ty.ui).color(c.text_muted).truncate());
-    let mut bar = row().key("top").w_full().h(52.0).px(20.0).gap(6.0).center_y().child(crumb).child(spacer());
+    let mut bar = row().key("top").w_full().h(BAR_H).gap(6.0).center_y().child(crumb).child(spacer());
     if let Some(b) = s.busy.as_ref().filter(|b| b.vm == vm) {
         bar = bar
             .child(Spinner::new().size(14.0).build(k).key("spin"))
@@ -268,7 +290,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
                     .key("start"),
             );
     }
-    col().key("head").w_full().child(bar).child(el().key("rule").w_full().h(hair).fill(c.border_base))
+    col().key("head").w_full().pt(TOP).child(bar).child(el().key("rule").w_full().h(hair).mt(14.0).fill(c.border_base))
 }
 
 // ---------------------------------------------------------------- states
