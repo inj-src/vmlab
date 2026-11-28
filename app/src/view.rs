@@ -100,10 +100,11 @@ fn toc(s: &App, k: &Kit) -> El {
     let brand = row()
         .key("brand")
         .h(BAR_H)
-        .gap(9.0)
+        .gap(10.0)
         .center_y()
-        .child(icon(&icons::VMLAB, 20.0).key("mark"))
-        .child(text("vmlab").key("name").font(k.ty.body_medium).color(c.text_base));
+        .child(icon(&icons::VMLAB, 26.0).key("mark"))
+        // A size above the page's own text: the window's name, not one more label.
+        .child(text("vmlab").key("name").font(rune::TextStyle { size: 18.0, weight: 600.0, line_height: 24.0, ..k.ty.body_medium }).color(c.text_base));
     let mut nav = col().key("nav").w_full().role("tablist").label("VMs").focus_group();
     for vm in Vm::ALL {
         let on = s.sel == vm;
