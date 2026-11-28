@@ -231,9 +231,8 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, compact: bool, layer: &mut V
     // The cache first: a fixed-height summary that a growing list of states never pushes away.
     body = body
         .child(cache(s, d, st, k))
-        .child(text("States").key("states-title").font(k.ty.ui_medium).color(k.c.text_base).mt(8.0))
-        .child(states(s, d, st, k, hair, layer))
-        .child(under(s, st, k));
+        .child(states_head(s, st, k))
+        .child(states(s, d, st, k, hair, layer));
     let mut panel = col().key("panel").grow(1.0).shrink().min_w(0.0).h_full().child(header(s, st, k, hair, compact));
     if let Some(t) = failed {
         // The body's 1 pt inset, so the strip's edges meet the cards' below it.
@@ -434,18 +433,39 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
     } else {
         text(saved.note.clone()).font(k.ty.ui).color(c.text_muted).help_when_truncated(saved.note.clone())
     };
-    let mut copy = col().key("copy").grow(1.0).shrink().min_w(0.0).gap(2.0).child(title).child(note.key("note").truncate().w_full());
-    if cur && st.changed {
-        copy = copy.child(
-            row()
-                .key("changed")
-                .gap(6.0)
-                .center_y()
-                .pt(2.0)
-                .child(icon(&icons::DOT, 6.0).key("d").color(warn(k)))
-                .child(text("Unsaved changes").key("t").font(k.ty.small_medium).color(warn(k))),
-        );
-    }
+    // The third line: unsaved changes on the state in use (with Save beside the words it acts
+    // on), else its size and when it was saved. Every row ends the same way: only ⋯ on the right.
+    let third = if cur && st.changed {
+        let mut line = row()
+            .key("changed")
+            .gap(6.0)
+            .center_y()
+            .child(icon(&icons::DOT, 6.0).key("d").color(warn(k)))
+            .child(text("Unsaved changes").key("t").font(k.ty.small_medium).color(warn(k)));
+        if name != "default" {
+            line = line.child(
+                Button::new("Save")
+                    .variant(ButtonVariant::Neutral)
+                    .control_size(ControlSize::Small)
+                    .icon(&oc::DOWNLOAD)
+                    .disabled(!idle)
+                    .on_press(move |s: &mut App| s.save(vm))
+                    .build(k)
+                    .key("save")
+                    .ml(4.0),
+            );
+        }
+        line.pt(2.0)
+    } else {
+        let saved_at = saved.saved.as_deref().and_then(parse_utc).map(|at| when(at, d.now, d.utc_offset));
+        let words = match saved_at {
+            Some(w) => format!("{} · Saved {}", gb(saved.size_bytes), lower_first(&w)),
+            None if name == "default" => format!("{} · Base image", gb(saved.size_bytes)),
+            None => gb(saved.size_bytes),
+        };
+        row().key("meta").child(text(words).key("t").font(k.ty.small).color(c.text_faint).nowrap())
+    };
+    let copy = col().key("copy").grow(1.0).shrink().min_w(0.0).gap(2.0).child(title).child(note.key("note").truncate().w_full()).child(third);
     // What a press does: the state it is on shows the window (or starts the VM on it); another
     // one switches, which starts a stopped VM too.
     let does = match (cur, st.running) {
@@ -472,24 +492,6 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
     if idle {
         let n2 = name.clone();
         r = r.hover(c.hover).cursor(Cursor::Pointer).on_press(move |s: &mut App| s.pick(vm, &n2));
-    }
-    if cur && st.changed && name != "default" {
-        r = r.child(
-            Button::new("Save")
-                .variant(ButtonVariant::Neutral)
-                .control_size(ControlSize::Large)
-                .icon(&oc::DOWNLOAD)
-                .disabled(!idle)
-                .on_press(move |s: &mut App| s.save(vm))
-                .build(k)
-                .key("save"),
-        );
-    } else {
-        let mut meta = col().key("meta").items_end().gap(2.0).child(text(gb(saved.size_bytes)).key("size").font(k.ty.small).color(c.text_muted).nowrap());
-        if let Some(at) = saved.saved.as_deref().and_then(parse_utc) {
-            meta = meta.child(text(when(at, d.now, d.utc_offset)).key("at").font(k.ty.small).color(c.text_muted).nowrap());
-        }
-        r = r.child(meta);
     }
     r.child(more(s, st, saved, k, layer))
 }
@@ -542,7 +544,13 @@ fn more(s: &App, st: &Status, saved: &Saved, k: &Kit, layer: &mut Vec<El>) -> El
     menu.build(k, layer)
 }
 
-fn under(s: &App, st: &Status, k: &Kit) -> El {
+/// "Today 14:03" reads "Saved today 14:03"; month names keep their capital.
+fn lower_first(w: &str) -> String {
+    if w.starts_with("Today") || w.starts_with("Yesterday") { w[..1].to_lowercase() + &w[1..] } else { w.to_owned() }
+}
+
+/// The States heading: the add action beside the section it adds to, and what a press on a row does.
+fn states_head(s: &App, st: &Status, k: &Kit) -> El {
     let vm = s.sel;
     let pristine = st.state == "default" && !st.changed;
     let only = s.data.as_ref().is_some_and(|d| d.states(vm).len() < 2);
@@ -556,24 +564,26 @@ fn under(s: &App, st: &Status, k: &Kit) -> El {
     } else {
         format!("Choose a state to start {} on it", vm.title())
     };
-    row()
-        .key("under")
+    let title = row()
+        .key("states-title")
         .w_full()
         .center_y()
-        .justify_between()
-        .gap(12.0)
-        // While busy there is no hint: a spacer keeps Save on the right without an empty label.
-        .child(if hint.is_empty() { spacer().key("hint") } else { text(hint).key("hint").font(k.ty.small).color(k.c.text_muted).truncate().shrink() })
+        .mt(8.0)
+        .child(text("States").key("t").font(k.ty.ui_medium).color(k.c.text_base))
+        .child(spacer())
         .child(
-            Button::new("Save as new state")
-                .variant(ButtonVariant::Neutral)
-                .control_size(ControlSize::Large)
+            Button::new("New state")
+                .variant(ButtonVariant::Ghost)
                 .icon(&oc::PLUS)
+                .help("Save as new state")
                 .disabled(s.busy.is_some() || pristine)
                 .on_press(move |s: &mut App| s.open_save_new(vm))
                 .build(k)
-                .key("save-new"),
-        )
+                .key("save-new")
+                .mr(-8.0),
+        );
+    let head = col().key("states-head").w_full().gap(2.0).child(title);
+    if hint.is_empty() { head } else { head.child(text(hint).key("hint").font(k.ty.small).color(k.c.text_faint).truncate().w_full()) }
 }
 
 // ---------------------------------------------------------------- cards
