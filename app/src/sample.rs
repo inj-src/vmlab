@@ -29,7 +29,7 @@ pub const SCENES: &[Scene] = &[
     }),
     ("save-new", |s| {
         s.data = Some(snapshot(true, true));
-        s.dialog = Dialog::SaveNew { vm: Vm::Win, name: TextEdit::new("pebble"), note: TextEdit::default() };
+        s.dialog = Dialog::SaveNew { vm: Vm::Win, name: TextEdit::new("database"), note: TextEdit::default() };
     }),
     ("ports", |s| {
         s.data = Some(snapshot(true, true));
