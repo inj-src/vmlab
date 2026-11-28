@@ -35,6 +35,12 @@ pub const SCENES: &[Scene] = &[
         s.data = Some(snapshot(true, true));
         s.dialog = Dialog::Ports { vm: Vm::Win };
     }),
+    ("ports-many", |s| {
+        let mut d = snapshot(true, true);
+        d.status[0].tunnels = (0..12).map(|i| Tunnel { laptop: 5173 + i, vm: 5173 + i }).collect();
+        s.data = Some(d);
+        s.dialog = Dialog::Ports { vm: Vm::Win };
+    }),
     ("busy", |s| {
         s.data = Some(snapshot(false, false));
         s.busy = Some(Busy { vm: Vm::Win, label: "Switching to webdev".into() });

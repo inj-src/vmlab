@@ -1,7 +1,7 @@
 //! The dialogs: what a switch does with unsaved changes, a delete you type the name for, a new
 //! state's name and note, a note, the default, the build cache, the ports.
 
-use rune::{El, TextEdit, col, row, text};
+use rune::{El, ScrollSpec, TextEdit, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Dialog as Modal, Field, Kit, TextInput};
 
 use crate::model::{Vm, gb, valid_name};
@@ -109,9 +109,13 @@ pub fn build(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 let to = format!("on {}, to this laptop’s port{} {list}", vm.title(), if one { "" } else { "s" });
                 rows.push(port_row(k, "fwd", &at, &to, if one { "Close" } else { "Close all" }, move |s: &mut App| s.close_forwards(vm)));
             }
-            rows.push(text("vm tunnel and vm forward open more.").key("more").font(k.ty.small).color(k.c.text_faint));
-            rows.push(actions_row(vec![button("Done", ButtonVariant::Neutral).on_press(close).build(k).key("done")]));
-            ("ports", "Ports".into(), format!("What reaches {} and what it reaches, besides SSH.", vm.title()), form(rows))
+            // The connections scroll when there are more than the window holds; the footnote and
+            // Done stay put under them. The 3 pt pad, taken back by the margin, keeps the scroll
+            // view from clipping the buttons' edges and shadows.
+            let list = col().key("list").shrink().min_h(0.0).gap(12.0).mx(-3.0).px(3.0).my(-3.0).py(3.0).scroll(ScrollSpec { stick_bottom: false }).children(rows);
+            let more = text("vm tunnel and vm forward open more.").key("more").font(k.ty.small).color(k.c.text_faint);
+            let done = actions_row(vec![button("Done", ButtonVariant::Neutral).on_press(close).build(k).key("done")]);
+            ("ports", "Ports".into(), format!("What reaches {} and what it reaches, besides SSH.", vm.title()), form(vec![list, more, done]).shrink().min_h(0.0))
         }
     };
     let busy = s.busy.is_some();

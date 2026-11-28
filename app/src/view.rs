@@ -235,7 +235,8 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, compact: bool, layer: &mut V
         .child(under(s, st, k));
     let mut panel = col().key("panel").grow(1.0).shrink().min_w(0.0).h_full().child(header(s, st, k, hair, compact));
     if let Some(t) = failed {
-        panel = panel.child(problem(k, t).mt(20.0).mx(1.0));
+        // The body's 1 pt inset, so the strip's edges meet the cards' below it.
+        panel = panel.child(col().key("problem-wrap").w_full().px(1.0).pt(20.0).child(problem(k, t)));
     }
     panel
         .child(col().key("scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
@@ -560,7 +561,8 @@ fn under(s: &App, st: &Status, k: &Kit) -> El {
         .center_y()
         .justify_between()
         .gap(12.0)
-        .child(text(hint).key("hint").font(k.ty.small).color(k.c.text_muted).truncate().shrink())
+        // While busy there is no hint: a spacer keeps Save on the right without an empty label.
+        .child(if hint.is_empty() { spacer().key("hint") } else { text(hint).key("hint").font(k.ty.small).color(k.c.text_muted).truncate().shrink() })
         .child(
             Button::new("Save as new state")
                 .variant(ButtonVariant::Neutral)
