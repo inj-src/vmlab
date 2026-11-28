@@ -74,6 +74,8 @@ wait_ssh(){
 }
 
 cmd_status(){
+  [[ ${1:-} != --json ]] || { status_json; return; }
+  [[ -z ${1:-} ]] || die "usage: vm status [--json]"
   for n in "${!RUN[@]}"; do
     local s addr=- owner=""
     s=$(state_of "$n")
@@ -82,6 +84,35 @@ cmd_status(){
     local on; on=$(st_cur "$n"); st_chg "$n" && on+=", changed since"; st_def "$n" && on+=", Defender on"
     printf '%-4s %-8s %-15s %s\n' "$n" "$s" "$addr" "${owner:+started by $owner  }state: $on"
   done
+}
+
+# vm status --json, for programs (the vmlab app): per VM whether it runs, since when, its window
+# (shown, hidden, none), the state it is on, and the open tunnels (laptop port -> VM port) and
+# forwards (VM port -> laptop port), read from their ssh processes as vm untunnel finds them
+status_json(){
+  local n
+  for n in win mac; do
+    local s since=null owner="" win=none tun fwd
+    s=$(state_of "$n")
+    if [[ $s == running ]]; then
+      since=$(systemctl --user show "${UNIT[$n]}" -p ActiveEnterTimestamp --value 2>/dev/null)
+      since=$( [[ -n $since ]] && date -u -d "$since" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo null)
+      [[ -f $STATE/$n.owner ]] && owner=$(cat "$STATE/$n.owner")
+      win=$(window_of "$n")
+    fi
+    tun=$({ pgrep -af "^ssh .*-p ${PORT[$n]} .*-L 127\.0\.0\.1:" 2>/dev/null || true; } | { grep -oE -- '-L 127\.0\.0\.1:[0-9]+:127\.0\.0\.1:[0-9]+' || true; } \
+      | awk -F: '{ printf "{\"laptop\":%s,\"vm\":%s}\n", $2, $4 }' | jq -s -c .)
+    fwd=$({ pgrep -af "^ssh .*-p ${PORT[$n]} .*-R [0-9]+:127\.0\.0\.1:" 2>/dev/null || true; } \
+      | { grep -oE -- '-R [0-9]+:127\.0\.0\.1:[0-9]+' || true; } \
+      | sed 's/^-R //' | awk -F: '{ printf "{\"vm\":%s,\"laptop\":%s}\n", $1, $3 }' | jq -s -c .)
+    jq -n -c --arg vm "$n" --arg run "$s" --arg since "$since" --arg owner "$owner" --arg window "$win" \
+      --arg state "$(st_cur "$n")" --argjson changed "$(st_chg "$n" && echo true || echo false)" \
+      --argjson defender "$(st_def "$n" && echo true || echo false)" --argjson port "${PORT[$n]}" \
+      --argjson tunnels "${tun:-[]}" --argjson forwards "${fwd:-[]}" \
+      '{vm: $vm, running: ($run == "running"), since: (if $since == "null" then null else $since end),
+        owner: (if $owner == "" then null else $owner end), window: $window, ssh_port: $port,
+        state: $state, changed: $changed, defender: $defender, tunnels: $tunnels, forwards: $forwards}'
+  done | jq -s .
 }
 
 # After vm start win --defender: Defender's definitions up to date (win/update-defender.ps1)
@@ -416,7 +447,16 @@ cmd_cache(){
     rm -f "$CACHE/$n.qcow2"; echo "$n: the build cache is empty"
   elif [[ $# == 0 ]]; then
     for n in win mac; do echo "$n  $(cache_fill "$n")  $CACHE/$n.qcow2"; done
-  else die "usage: vm cache | vm cache clear <name>"; fi
+  elif [[ $1 == --json ]]; then
+    # for programs: what each cache file takes on the laptop and its size (null: not made yet)
+    for n in win mac; do
+      local f=$CACHE/$n.qcow2 used=null size=null
+      if [[ -f $f ]]; then read -r used size < <(qemu-img info -U --output=json "$f" 2>/dev/null \
+        | jq -r '"\(.["actual-size"] // "null") \(.["virtual-size"] // "null")"') || true; fi
+      jq -n -c --arg vm "$n" --arg path "$f" --argjson used "${used:-null}" --argjson size "${size:-null}" \
+        '{vm: $vm, path: $path, used_bytes: $used, size_bytes: $size}'
+    done | jq -s .
+  else die "usage: vm cache [--json] | vm cache clear <name>"; fi
 }
 
 # cache_fill VM: how full its build cache is, as "15.2 of 25 GB used, 9.8 GB left". What the
@@ -657,7 +697,8 @@ cmd_clear(){
 }
 
 cmd_help(){ cat <<'EOF'
-vm status                      which VM is running, where its SSH is, who started it
+vm status [--json]             which VM is running, where its SSH is, who started it.
+                               --json: for programs (also since when, its window, its tunnels)
 vm start <win|mac> [state] [--window] [--defender]
                                boot (refuses if the other VM is running) and wait for SSH.
                                With a state (vm states): that state's disk, or the VM as it
@@ -685,7 +726,7 @@ vm push <name> <dir> [dest]    mirror the git work tree at <dir>, uncommitted an
                                C:\cache\src\<repo> on win, ~/cache/src/<repo> on mac, or to
                                <dest>. Later pushes send only the changes and keep the
                                guest's build output
-vm cache                       how full each VM's build cache is. C:\cache and ~/cache are a
+vm cache [--json]              how full each VM's build cache is. C:\cache and ~/cache are a
                                disk of their own that reset and commit leave alone
 vm cache clear <name>          empty that VM's build cache (VM must be stopped)
 vm tunnel <name> <port> [lp]   forward VM's 127.0.0.1:<port> to localhost:<lp>
@@ -735,7 +776,8 @@ EOF
 
 sub=${1:-help}; shift || true
 case $sub in
-  status|help) "cmd_$sub" ;;
+  status) cmd_status "$@" ;;
+  help) cmd_help ;;
   start) [[ $# -ge 1 ]] || die "usage: vm start <name> [state] [--window] [--defender]"; cmd_start "$@" ;;
   stop|ip|port|view|hide|restart) [[ $# -eq 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$1" ;;
   reset|commit) [[ $# -ge 1 ]] || die "usage: vm $sub <name>"; "cmd_$sub" "$@" ;;
