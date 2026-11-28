@@ -252,7 +252,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             bar = bar.child(
                 Button::new(if ports == 1 { "1 port".to_owned() } else { format!("{ports} ports") })
                     .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Small)
+                    .control_size(ControlSize::Large)
                     .icon(&icons::ARROWS)
                     .help("Tunnels and forwards")
                     .on_press(move |s: &mut App| s.dialog = Dialog::Ports { vm })
@@ -265,6 +265,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             .child(
                 IconButton::new(&icons::RESTART)
                     .variant(IconButtonVariant::Ghost)
+                    .control_size(ControlSize::Large)
                     .label("Restart")
                     .help("Restart")
                     .disabled(!idle)
@@ -275,6 +276,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             .child(
                 IconButton::new(&icons::POWER)
                     .variant(IconButtonVariant::Ghost)
+                    .control_size(ControlSize::Large)
                     .label("Shut down")
                     .help("Shut down")
                     .disabled(!idle)
@@ -285,6 +287,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             .child(
                 Button::new("Show window")
                     .variant(ButtonVariant::Contrast)
+                    .control_size(ControlSize::Large)
                     .icon(&icons::OPEN)
                     .disabled(!idle)
                     .on_press(move |s: &mut App| s.show(vm))
@@ -299,6 +302,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             .child(
                 Button::new("Start")
                     .variant(ButtonVariant::Contrast)
+                    .control_size(ControlSize::Large)
                     .icon(&icons::PLAY)
                     .disabled(!idle)
                     .on_press(move |s: &mut App| s.start(vm))
@@ -390,7 +394,7 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
         r = r.child(
             Button::new("Save")
                 .variant(ButtonVariant::Neutral)
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Large)
                 .icon(&icons::SAVE)
                 .disabled(!idle)
                 .on_press(move |s: &mut App| s.save(vm))
@@ -417,6 +421,7 @@ fn more(s: &App, st: &Status, saved: &Saved, k: &Kit, layer: &mut Vec<El>) -> El
     let n = name.clone();
     let trigger = IconButton::new(&oc::OUTLINE_DOTS)
         .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
         .label(format!("More for {name}"))
         .expanded(open)
         .disabled(!idle)
@@ -467,7 +472,7 @@ fn under(s: &App, st: &Status, k: &Kit) -> El {
         .child(
             Button::new("Save as new state")
                 .variant(ButtonVariant::Neutral)
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Large)
                 .icon(&oc::PLUS)
                 .disabled(s.busy.is_some() || pristine)
                 .on_press(move |s: &mut App| s.open_save_new(vm))
@@ -516,7 +521,7 @@ fn cache(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
         top = top.child(
             Button::new("Clear")
                 .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
+                .control_size(ControlSize::Regular)
                 .disabled(!idle || st.running)
                 .help(if st.running { "Shut it down to clear it" } else { "Empty the build cache, which every state shares" })
                 .on_press(move |s: &mut App| s.dialog = Dialog::ClearCache { vm })

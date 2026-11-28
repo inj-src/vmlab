@@ -35,10 +35,13 @@ pub static OPEN: Icon = line(
     r#"<path d="M14 5h5v5M19 5l-8 8M18 14v4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18V7.5A1.5 1.5 0 0 1 5.5 6H10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
 );
 pub static PLAY: Icon = line("play", r#"<path d="M7.5 5.5v13l11-6.5z" fill="currentColor"/>"#);
-pub static SAVE: Icon = line(
-    "save",
-    r#"<path d="M5.5 4h10l3 3v11.5a1.5 1.5 0 0 1-1.5 1.5H7a1.5 1.5 0 0 1-1.5-1.5zM8.5 4v4.5h6V4M8.5 20v-5.5h7V20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
-);
+/// A floppy disk drawn like OpenCode's own glyphs (a 16-point view, 1-point strokes), so it sits
+/// beside them in the menus and on the Save button.
+pub static SAVE: Icon = Icon {
+    name: "save",
+    view: 16.0,
+    body: r#"<path d="M2.5 2.5H11L13.5 5V13.5H2.5Z M5 2.5V5.5H10V2.5 M4.5 13.5V9.5H11.5V13.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
 pub static STAR: Icon = line(
     "star",
     r#"<path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.3L12 16l-4.9 2.6 1.1-5.3-4-3.7 5.4-.6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
