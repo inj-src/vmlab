@@ -381,7 +381,6 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
         .py(10.0)
         .gap(12.0)
         .center_y()
-        .hover_group()
         .child(copy);
     if idle {
         let n2 = name.clone();
@@ -423,7 +422,6 @@ fn more(s: &App, st: &Status, saved: &Saved, k: &Kit, layer: &mut Vec<El>) -> El
         .disabled(!idle)
         .on_press(move |s: &mut App| s.menu = if s.menu.as_deref() == Some(n.as_str()) { None } else { Some(n.clone()) })
         .build(k);
-    let trigger = if open || cur { trigger } else { trigger.group_opacity(0.0, 1.0) };
     let mut menu = Menu::new(format!("menu-{name}")).label(format!("{name} actions")).placement(rune_kit::Placement::BottomEnd).min_width(200.0).trigger(trigger).open(open).on_close(|s: &mut App| s.menu = None);
     if !cur {
         let n = name.clone();
