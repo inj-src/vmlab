@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=vmlab
+Comment=The lab's VMs and their saved states: start, switch, save and delete them
+Exec=/vmlab/tools/vmlab/app/target/release/vmlab
+TryExec=/vmlab/tools/vmlab/app/target/release/vmlab
+Icon=/vmlab/tools/vmlab/app/icons/vmlab.svg
+StartupWMClass=vmlab
+Terminal=false
+Categories=System;Emulator;
