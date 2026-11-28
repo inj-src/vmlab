@@ -1,0 +1,176 @@
+From: vmlab pointer-lag investigation
+Subject: [PATCH 19/20] gtk/vmlab: keep Wayland motion and frame clock live, round cursor size to buffer scale
+
+Three VM-window input/cursor fixes on scaled Wayland (e.g. GNOME/Mutter at 125%):
+
+1. Fullscreen opaque subsurface frame-clock stall (gtk-vmlab-wl.c, gtk.c):
+   In full screen, wl.surface (WL_SHM_FORMAT_XRGB8888) completely occludes GTK's
+   parent wl_surface. Mutter culls the occluded parent and stops emitting
+   wl_surface.frame callbacks on it, leaving GTK's GdkFrameClock frozen. Because
+   GDK enables motion event compression by default, GDK_MOTION_NOTIFY events are
+   queued waiting for GDK_FRAME_CLOCK_PHASE_FLUSH_EVENTS and stall until the
+   parent surface is exposed (e.g. Overview / Super).
+   Register wl.surface with gdk_wayland_window_add_frame_callback_surface(),
+   commit wl.surface in an after-paint hook so attached frame callbacks always
+   complete even on a static guest frame, and disable GDK motion compression on
+   the toplevel and drawing_area GdkWindows.
+
+2. Odd Wayland cursor buffer size at scale 2 (gtk.c):
+   At 125% scaling (buffer_scale=2, zoom=1.6), ceil(64 * 1.6) = 103 is not a
+   multiple of buffer_scale. GDK logs a warning once and drops cursor->scale
+   from 2 to 1 while still scaling the hotspot by 2, rendering every Windows
+   cursor at 2x intended size. Round Cairo cursor surface dimensions up to a
+   multiple of bs.
+
+3. Clamping active mouse drags at framebuffer padding edges (gtk.c):
+   When a mouse button is held (e.g. dragging a maximized window's title bar at
+   y=0 or selecting text to an edge), brushing into the widget's few-pixel padding
+   dropped motion events and triggered vmlab_arrow_host(vc, false). Clamp fbx/fby
+   to the framebuffer bounds while a mouse button is held.
+
+---
+diff --git a/ui/gtk-vmlab-wl.c b/ui/gtk-vmlab-wl.c
+index fc9a379..3fbd041 100644
+--- a/ui/gtk-vmlab-wl.c
++++ b/ui/gtk-vmlab-wl.c
+@@ -59,6 +59,9 @@ static struct {
+     struct wl_surface *surface;
+     struct wl_subsurface *sub;
+     struct wp_viewport *viewport;
++    GdkWindow *gdk_window;      /* toplevel GdkWindow that owns the frame clock */
++    GdkFrameClock *frame_clock;
++    gulong after_paint_id;
+     int scale120;               /* the screen's scale, in 120ths */
+     VmlabBuffer buf[VMLAB_BUFFERS];
+     bool pending;               /* a frame waits for a buffer */
+@@ -291,6 +294,19 @@ static bool buffer_make(VmlabBuffer *b, int w, int h)
+ 
+ /* start and stop */
+ 
++/*
++ * GDK attaches wl_surface.frame callbacks to registered frame-callback surfaces
++ * during its own after-paint handler, but only commits the parent wl_surface.
++ * Commit wl.surface here so the compositor delivers the frame callback even when
++ * the guest screen is static and the parent wl_surface is fully occluded.
++ */
++static void frame_clock_after_paint(GdkFrameClock *clock, gpointer opaque)
++{
++    if (wl.on && wl.surface && !wl.uncovered) {
++        wl_surface_commit(wl.surface);
++    }
++}
++
+ static void vmlab_wl_stop(void)
+ {
+     int i;
+@@ -307,6 +323,15 @@ static void vmlab_wl_stop(void)
+     for (i = 0; i < VMLAB_BUFFERS; i++) {
+         buffer_free(&wl.buf[i]);
+     }
++    if (wl.frame_clock && wl.after_paint_id) {
++        g_signal_handler_disconnect(wl.frame_clock, wl.after_paint_id);
++    }
++    wl.frame_clock = NULL;
++    wl.after_paint_id = 0;
++    if (wl.gdk_window && wl.surface) {
++        gdk_wayland_window_remove_frame_callback_surface(wl.gdk_window, wl.surface);
++    }
++    wl.gdk_window = NULL;
+     g_clear_pointer(&wl.viewport, wp_viewport_destroy);
+     g_clear_pointer(&wl.sub, wl_subsurface_destroy);
+     g_clear_pointer(&wl.surface, wl_surface_destroy);
+@@ -483,6 +508,17 @@ static void vmlab_wl_start(VirtualConsole *vc)
+     wl_region_destroy(nothing);
+     wl.scale_of_window = wp_fractional_scale_manager_v1_get_fractional_scale(wl.scales, parent);
+     wp_fractional_scale_v1_add_listener(wl.scale_of_window, &scale_listener, NULL);
++    wl.gdk_window = gdk_window;
++    gdk_wayland_window_add_frame_callback_surface(gdk_window, wl.surface);
++    wl.frame_clock = gdk_window_get_frame_clock(gdk_window);
++    if (wl.frame_clock) {
++        /*
++         * Run strictly after GDK's own after-paint handler, which attaches
++         * wl_surface.frame to wl.surface before emitting the remaining handlers.
++         */
++        wl.after_paint_id = g_signal_connect_after(
++            wl.frame_clock, "after-paint", G_CALLBACK(frame_clock_after_paint), NULL);
++    }
+     wl.on = true;
+     write_scale_file();
+     info_report("vmlab: the picture is shown at the screen's own pixels (a Wayland sub-surface)");
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 29ab68c..c9f669d 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -699,9 +699,11 @@ static void gd_cursor_define(DisplayChangeListener *dcl,
+     } else {
+         double zoom = vmlab_cursor_zoom;
+         int bs = vmlab_cursor_buffer_scale;
++        /* Wayland requires cursor buffer dimensions to be a multiple of buffer_scale */
++        int cw = ((int)ceil(c->width * zoom) + bs - 1) / bs * bs;
++        int ch = ((int)ceil(c->height * zoom) + bs - 1) / bs * bs;
+         cairo_surface_t *image = cairo_image_surface_create(
+-            CAIRO_FORMAT_ARGB32, MAX(bs, (int)ceil(c->width * zoom)),
+-            MAX(bs, (int)ceil(c->height * zoom)));
++            CAIRO_FORMAT_ARGB32, MAX(bs, cw), MAX(bs, ch));
+         cairo_t *cr = cairo_create(image);
+ 
+         cairo_scale(cr, zoom, zoom);
+@@ -1416,11 +1418,21 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
+                           gtk_widget_get_scale_factor(widget), fbx, fby);
+ 
+     if (qemu_input_is_absolute(vc->gfx.dcl.con)) {
+-        if (fbx < 0 || fby < 0 ||
+-            fbx >= surface_width(vc->gfx.ds) ||
+-            fby >= surface_height(vc->gfx.ds)) {
+-            vmlab_arrow_host(vc, false);
+-            return TRUE;
++        int fbw = surface_width(vc->gfx.ds);
++        int fbh = surface_height(vc->gfx.ds);
++
++        if (fbx < 0 || fby < 0 || fbx >= fbw || fby >= fbh) {
++            if (motion->state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK)) {
++                /*
++                 * Keep drags alive when brushing top/side padding (e.g. dragging a
++                 * maximized guest window's title bar at y=0 or selecting text to an edge).
++                 */
++                fbx = CLAMP(fbx, 0, fbw - 1);
++                fby = CLAMP(fby, 0, fbh - 1);
++            } else {
++                vmlab_arrow_host(vc, false);
++                return TRUE;
++            }
+         }
+         vmlab_arrow_host(vc, true);
+         qemu_input_queue_abs(vc->gfx.dcl.con, INPUT_AXIS_X, fbx,
+@@ -2981,6 +2993,11 @@ static void gd_vc_add_gfx(GtkDisplayState *s, QemuConsole *con)
+     vc = add_gfx_console(s, con);
+     gtk_widget_show_all(vc->tab_item);
+     gtk_widget_realize(vc->gfx.drawing_area);
++    if (gtk_widget_get_window(vc->gfx.drawing_area)) {
++        /* Deliver pointer motion directly instead of deferring to GdkFrameClock */
++        gdk_window_set_event_compression(
++            gtk_widget_get_window(vc->gfx.drawing_area), FALSE);
++    }
+ 
+     if (s->free_scale) {
+         gd_update_windowsize(vc);
+@@ -3696,10 +3713,19 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+     }
+     gd_vmlab_window_state(s);
+ 
++    if (gtk_widget_get_window(s->window)) {
++        gdk_window_set_event_compression(gtk_widget_get_window(s->window), FALSE);
++    }
++
+     for (idx = 0; idx < s->vcs->len; idx++) {
+         VirtualConsole *v = g_ptr_array_index(s->vcs, idx);
+         if (v->type == GD_VC_GFX) {
+             gtk_widget_realize(v->gfx.drawing_area);
++            if (gtk_widget_get_window(v->gfx.drawing_area)) {
++                /* Deliver pointer motion directly instead of deferring to GdkFrameClock */
++                gdk_window_set_event_compression(
++                    gtk_widget_get_window(v->gfx.drawing_area), FALSE);
++            }
+         }
+     }
+ 
