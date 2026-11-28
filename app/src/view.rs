@@ -1,7 +1,7 @@
 //! The window: the VMs down the side, the chosen one's header, its states, its build cache and
 //! how to reach it. Every press asks `App` to act; nothing here runs `vm`.
 
-use rune::{Color, Cursor, Cx, El, Icon, ScrollSpec, Tx, col, el, icon, row, spacer, text};
+use rune::{Color, Cursor, Cx, El, Icon, ScrollSpec, col, el, icon, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Spinner, Toast, ToastRegion};
 use rune_theme_opencode::icons as oc;
 
@@ -70,14 +70,14 @@ fn logo(vm: Vm) -> &'static Icon {
 /// The status dot: green while it runs, amber while an action runs on it, hollow when off.
 fn dot(k: &Kit, key: &str, running: bool, busy: bool) -> El {
     let c = &k.c;
-    let d = el().key(key).size(7.0, 7.0).radius(3.5);
-    if busy {
-        d.fill(c.warning.icon)
+    let (glyph, tint) = if busy {
+        (&icons::DOT, c.warning.icon)
     } else if running {
-        d.fill(ok(k))
+        (&icons::DOT, ok(k))
     } else {
-        d.border(1.2, c.icon_faint)
-    }
+        (&icons::RING, c.icon_faint)
+    };
+    icon(glyph, 8.0).key(key).color(tint)
 }
 
 /// The VMs as a table of contents: links on a thin track, the chosen one lit, with the brand
@@ -198,7 +198,7 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, layer: &mut Vec<El>) -> El {
         .child(text("States").key("states-title").font(k.ty.ui_medium).color(k.c.text_base))
         .child(states(s, d, st, k, hair, layer))
         .child(under(s, st, k))
-        .child(cards(s, d, st, k));
+        .child(cache(s, d, st, k));
     col()
         .key("panel")
         .grow(1.0)
@@ -245,6 +245,21 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             .child(Spinner::new().size(14.0).build(k).key("spin"))
             .child(text(format!("{}…", b.label)).key("busy").font(k.ty.ui).color(c.text_muted).nowrap().ml(4.0));
     } else if st.running {
+        // Tunnels and forwards, when there are any: what reaches the VM besides SSH.
+        let ports = st.tunnels.len() + st.forwards.len();
+        if ports > 0 {
+            bar = bar.child(
+                Button::new(if ports == 1 { "1 port".to_owned() } else { format!("{ports} ports") })
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .icon(&icons::ARROWS)
+                    .help("Tunnels and forwards")
+                    .on_press(move |s: &mut App| s.dialog = Dialog::Ports { vm })
+                    .build(k)
+                    .key("ports")
+                    .mr(4.0),
+            );
+        }
         bar = bar
             .child(
                 IconButton::new(&icons::RESTART)
@@ -464,97 +479,86 @@ fn under(s: &App, st: &Status, k: &Kit) -> El {
 
 // ---------------------------------------------------------------- cards
 
-fn card(k: &Kit, key: &str, title: &str, action: Option<El>, body: El) -> El {
-    let c = &k.c;
-    let mut head = row().key("h").w_full().h(24.0).center_y().justify_between().child(text(title.to_owned()).key("t").font(k.ty.ui_medium).color(c.text_base));
-    if let Some(a) = action {
-        head = head.child(a.mr(-6.0));
-    }
-    col().key(key).grow(1.0).w_frac(0.5).shrink().min_w(0.0).radius(8.0).fill(c.layer_01).border(0.5, c.border_muted).px(14.0).pt(10.0).pb(14.0).gap(8.0).child(head).child(body)
-}
-
-fn cards(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
+/// The build cache: a section like the states, its fill as a row of segments.
+fn cache(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
     let c = &k.c;
     let vm = s.sel;
     let idle = s.busy.is_none();
-    let cache = d.cache(vm).and_then(|c| Some((c.used_bytes?, c.size_bytes?)));
-    let cache_body = match cache {
-        Some((used, size)) => col()
-            .key("v")
-            .w_full()
-            .gap(8.0)
-            .child(
+    let fill = d.cache(vm).and_then(|c| Some((c.used_bytes?, c.size_bytes?)));
+    let mut head = row()
+        .key("cache-head")
+        .w_full()
+        .h(24.0)
+        .center_y()
+        .child(text("Build cache").key("t").font(k.ty.ui_medium).color(c.text_base))
+        .child(spacer());
+    if fill.is_some_and(|(used, _)| used > 0) {
+        head = head.child(
+            Button::new("Clear")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .disabled(!idle || st.running)
+                .help(if st.running { "Shut it down to clear it" } else { "Empty the build cache" })
+                .on_press(move |s: &mut App| s.dialog = Dialog::ClearCache { vm })
+                .build(k)
+                .key("clear"),
+        );
+    }
+    let (figure, free, frac, warn, foot) = match fill {
+        Some((used, size)) => {
+            let frac = used as f32 / size.max(1) as f32;
+            (
                 row()
-                    .key("big")
+                    .key("figure")
                     .gap(5.0)
                     .items_end()
                     .child(text(gb(used)).key("n").font(k.ty.body_medium).color(c.text_base))
                     .child(text(format!("of {}", gb(size))).key("of").font(k.ty.ui).color(c.text_muted)),
+                Some(format!("{} free", gb(size.saturating_sub(used)))),
+                frac,
+                frac > 0.9,
+                format!("{}, shared by every state", vm.cache_path()),
             )
-            .child(meter(k, "meter", used as f32 / size.max(1) as f32, used * 10 > size * 9))
-            .child(text(vm.cache_path()).key("path").font(k.ty.mono).color(c.text_muted)),
-        None => col()
-            .key("v")
-            .w_full()
-            .gap(8.0)
-            .child(text("Empty").key("n").font(k.ty.body_medium).color(c.text_base))
-            .child(meter(k, "meter", 0.0, false))
-            .child(text(format!("{}, made at the next start", vm.cache_path())).key("path").font(k.ty.small).color(c.text_muted)),
-    };
-    let clear = cache.filter(|(used, _)| *used > 0).map(|_| {
-        Button::new("Clear")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .disabled(!idle || st.running)
-            .help(if st.running { "Shut it down to clear it" } else { "Empty the build cache" })
-            .on_press(move |s: &mut App| s.dialog = Dialog::ClearCache { vm })
-            .build(k)
-            .key("clear")
-    });
-    let ports = st.tunnels.len() + st.forwards.len();
-    let reach = if st.running {
-        match ports {
-            0 => format!("127.0.0.1:{}", st.ssh_port),
-            1 => format!("127.0.0.1:{}, 1 port forwarded", st.ssh_port),
-            n => format!("127.0.0.1:{}, {n} ports forwarded", st.ssh_port),
         }
-    } else {
-        format!("127.0.0.1:{} when running", st.ssh_port)
+        None => (
+            row().key("figure").child(text("Empty").key("n").font(k.ty.body_medium).color(c.text_base)),
+            None,
+            0.0,
+            false,
+            format!("{}, made at the next start", vm.cache_path()),
+        ),
     };
-    let cmd = format!("ssh {}", vm.id());
-    let copy_field = row()
-        .key("copy")
+    let mut top = row().key("top").w_full().items_end().child(figure).child(spacer());
+    if let Some(f) = free {
+        top = top.child(text(f).key("free").font(k.ty.small).color(c.text_muted));
+    }
+    let body = col()
+        .key("cache")
         .w_full()
-        .h(30.0)
-        .pl(10.0)
-        .pr(2.0)
-        .radius(6.0)
-        .fill(c.layer_02)
+        .radius(8.0)
+        .fill(c.layer_01)
         .border(0.5, c.border_muted)
-        .center_y()
-        .child(text(cmd.clone()).key("cmd").font(k.ty.mono).color(c.text_base).grow(1.0))
-        .child(
-            IconButton::new(&oc::OUTLINE_COPY)
-                .variant(IconButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .label(format!("Copy {cmd}"))
-                .help("Copy")
-                .on_press_tx(move |s: &mut App, tx: &mut Tx| {
-                    tx.copy(cmd.clone());
-                    s.note(crate::Note::ok(format!("Copied “{cmd}”")));
-                })
-                .build(k)
-                .key("copy-btn"),
-        );
-    let ports_btn = (st.running && ports > 0).then(|| {
-        Button::new("Ports")
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .icon(&icons::ARROWS)
-            .on_press(move |s: &mut App| s.dialog = Dialog::Ports { vm })
-            .build(k)
-            .key("ports")
-    });
-    let connect = col().key("v").w_full().gap(8.0).child(copy_field).child(text(reach).key("reach").font(k.ty.small).color(c.text_muted));
-    row().key("cards").w_full().gap(12.0).items_stretch().child(card(k, "cache", "Build cache", clear, cache_body)).child(card(k, "connect", "Connect", ports_btn, connect))
+        .px(14.0)
+        .pt(12.0)
+        .pb(12.0)
+        .gap(10.0)
+        .child(top)
+        .child(segments(k, frac, warn))
+        .child(text(foot).key("path").font(k.ty.small).color(c.text_faint));
+    col().key("cache-section").w_full().gap(10.0).pt(8.0).child(head).child(body)
+}
+
+/// A gauge in `SEGMENTS` steps: lit up to `frac`, amber when nearly full.
+fn segments(k: &Kit, frac: f32, warn: bool) -> El {
+    const SEGMENTS: usize = 40;
+    let c = &k.c;
+    let lit = (frac.clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize;
+    // Anything in it at all shows one segment, so a nearly empty cache doesn't read as empty.
+    let lit = if frac > 0.0 { lit.max(1) } else { 0 };
+    let on = if warn { c.warning.icon } else { c.icon_base };
+    let mut bar = row().key("segments").w_full().h(10.0).gap(3.0).role("meter").label(format!("{:.0} % full", frac * 100.0));
+    for i in 0..SEGMENTS {
+        bar = bar.child(el().key(format!("s{i}")).grow(1.0).shrink().min_w(0.0).h_full().radius(2.0).fill(if i < lit { on } else { c.layer_03 }));
+    }
+    bar
 }

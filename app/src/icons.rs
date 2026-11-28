@@ -55,3 +55,8 @@ pub static INFO: Icon = line(
     "info",
     r#"<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 11v5M12 7.8v.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
 );
+
+/// The status dots, drawn as vectors so they stay round wherever they land on the pixel grid
+/// (a bordered 7-point box rounds to uneven widths at 125 %).
+pub static RING: Icon = line("ring", r#"<circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="3.6"/>"#);
+pub static DOT: Icon = line("dot", r#"<circle cx="12" cy="12" r="10" fill="currentColor"/>"#);
