@@ -46,9 +46,10 @@ impl Note {
     pub fn error(text: String) -> Note {
         Note { text, detail: None, error: true, id: 0 }
     }
-    /// `what` failed, and `vm` said `why`.
-    pub fn failed(what: &str, why: String) -> Note {
-        Note { text: format!("{what} failed"), detail: Some(why), error: true, id: 0 }
+    /// `what` failed on the VM `on`, and `vm` said `why`. The VM is named, as the error stays
+    /// on screen when the other VM is chosen.
+    pub fn failed(what: &str, on: Vm, why: String) -> Note {
+        Note { text: format!("{what} failed on {}", on.title()), detail: Some(why), error: true, id: 0 }
     }
 }
 
@@ -121,7 +122,7 @@ impl App {
         };
         self.toast = None;
         self.busy = Some(Busy { vm, label: label.into() });
-        worker.run(Job { label: label.into(), steps, done });
+        worker.run(Job { vm, label: label.into(), steps, done });
     }
 
     fn cur(&self, vm: Vm) -> Option<(String, bool, bool)> {

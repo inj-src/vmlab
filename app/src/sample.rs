@@ -41,7 +41,7 @@ pub const SCENES: &[Scene] = &[
     }),
     ("toast", |s| {
         s.data = Some(snapshot(true, true));
-        s.toast = Some(Note::failed("Switching to webdev", "win has changes on embedded that were not saved: save them, or start with --discard".into()));
+        s.toast = Some(Note::failed("Switching to webdev", Vm::Win, "win has changes on embedded that were not saved: save them, or start with --discard".into()));
     }),
     ("done", |s| {
         s.data = Some(snapshot(true, false));

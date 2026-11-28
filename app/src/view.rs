@@ -28,9 +28,9 @@ pub fn warn(k: &Kit) -> Color {
     if k.dark { k.c.warning.fg } else { rune::color::hex("#a16207").unwrap_or(k.c.warning.icon) }
 }
 
-/// Below this width the header's ports button keeps only its icon and the page's margins
+/// Below this width (the window opens at it) the header's ports button keeps only its icon and the page's margins
 /// shrink, so the state's name stays in the header down to the smallest window (680).
-const COMPACT_W: f32 = 760.0;
+const COMPACT_W: f32 = 780.0;
 
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
@@ -65,7 +65,7 @@ fn waiting(s: &App, k: &Kit) -> El {
         Some(e) => panel
             .child(icon(&oc::CIRCLE_EXCLAMATION, 20.0).key("failed").color(c.danger.icon))
             .child(text("vm did not answer").key("waiting").font(k.ty.ui_medium).color(c.text_base))
-            .child(text(e.clone()).key("why").font(k.ty.small).color(c.text_muted).wrap().max_w(420.0).align(rune::Align::Center))
+            .child(text(e.clone()).key("why").font(k.ty.mono).color(c.text_muted).wrap().max_w(420.0).align(rune::Align::Center))
             .child(text("Trying again every few seconds").key("retry").font(k.ty.small).color(c.text_faint)),
         None => panel.child(Loader::new().size(18.0).build(k).key("spin")).child(text("Reading the VMs…").key("waiting").font(k.ty.ui).color(c.text_muted)),
     }
@@ -205,7 +205,7 @@ fn meter(k: &Kit, key: &str, frac: f32, warning: bool) -> El {
         .w_full()
         .h(4.0)
         .radius(2.0)
-        .fill(c.layer_03)
+        .fill(if k.dark { c.layer_03 } else { c.border_base })
         .child(el().key("fill").w_frac(frac).h_full().radius(2.0).fill(tint))
 }
 
@@ -216,10 +216,9 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, compact: bool, layer: &mut V
     let Some(st) = d.status(vm) else {
         return col().key("panel").grow(1.0).h_full().center().child(text("vm does not list this VM").font(k.ty.ui).color(k.c.text_muted));
     };
-    let mut body = col().key(format!("body-{}", vm.id())).w_full().px(1.0).pt(20.0).pb(28.0).gap(12.0);
-    if let Some(t) = s.toast.as_ref().filter(|t| t.error) {
-        body = body.child(problem(k, t));
-    }
+    // A failed action sits between the header and the scroller, so it shows at any scroll.
+    let failed = s.toast.as_ref().filter(|t| t.error);
+    let mut body = col().key(format!("body-{}", vm.id())).w_full().px(1.0).pt(if failed.is_some() { 12.0 } else { 20.0 }).pb(28.0).gap(12.0);
     if let Some(other) = d.running()
         && other != vm
     {
@@ -234,13 +233,11 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, compact: bool, layer: &mut V
         .child(text("States").key("states-title").font(k.ty.ui_medium).color(k.c.text_base).mt(8.0))
         .child(states(s, d, st, k, hair, layer))
         .child(under(s, st, k));
-    col()
-        .key("panel")
-        .grow(1.0)
-        .shrink()
-        .min_w(0.0)
-        .h_full()
-        .child(header(s, st, k, hair, compact))
+    let mut panel = col().key("panel").grow(1.0).shrink().min_w(0.0).h_full().child(header(s, st, k, hair, compact));
+    if let Some(t) = failed {
+        panel = panel.child(problem(k, t).mt(20.0).mx(1.0));
+    }
+    panel
         .child(col().key("scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
 }
 
@@ -277,6 +274,8 @@ fn problem(k: &Kit, t: &crate::Note) -> El {
     row()
         .key("problem")
         .role("alert")
+        .label(t.text.clone())
+        .description(t.detail.clone().unwrap_or_default())
         .w_full()
         .pl(12.0)
         .pr(6.0)
@@ -291,6 +290,7 @@ fn problem(k: &Kit, t: &crate::Note) -> El {
             IconButton::new(&oc::CLOSE)
                 .variant(IconButtonVariant::Ghost)
                 .label("Dismiss")
+                .help("Dismiss")
                 .on_press(|s: &mut App| s.toast = None)
                 .build(k)
                 .key("dismiss"),
@@ -329,7 +329,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32, compact: bool) -> El {
             } else {
                 IconButton::new(&icons::ARROWS).variant(IconButtonVariant::Ghost).control_size(ControlSize::Large).label(words.clone()).help(format!("{words}: tunnels and forwards")).disabled(!idle).on_press(open).build(k)
             };
-            bar = bar.child(button.key("ports").mr(4.0));
+            bar = bar.child(button.key("ports").mr(if compact { 0.0 } else { 4.0 }));
         }
         bar = bar
             .child(
@@ -458,6 +458,7 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
         .label(does)
         .description(saved.note.clone())
         .focusable(idle)
+        .disabled(!idle)
         .press_on_return()
         .w_full()
         .min_h(58.0)
@@ -549,9 +550,9 @@ fn under(s: &App, st: &Status, k: &Kit) -> El {
     } else if pristine && only {
         format!("Set {} up, then save it as a state", vm.title())
     } else if st.running {
-        "Click a state to switch to it".into()
+        "Choose a state to switch to it".into()
     } else {
-        format!("Click a state to start {} on it", vm.title())
+        format!("Choose a state to start {} on it", vm.title())
     };
     row()
         .key("under")
@@ -559,7 +560,7 @@ fn under(s: &App, st: &Status, k: &Kit) -> El {
         .center_y()
         .justify_between()
         .gap(12.0)
-        .child(text(hint).key("hint").font(k.ty.small).color(k.c.text_faint).truncate().shrink())
+        .child(text(hint).key("hint").font(k.ty.small).color(k.c.text_muted).truncate().shrink())
         .child(
             Button::new("Save as new state")
                 .variant(ButtonVariant::Neutral)
@@ -628,7 +629,7 @@ fn cache(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
         .fill(c.layer_01)
         .border(0.5, c.border_muted)
         .px(14.0)
-        .pt(10.0)
+        .pt(12.0)
         .pb(12.0)
         .gap(10.0)
         .child(top)

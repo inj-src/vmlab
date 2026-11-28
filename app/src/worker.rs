@@ -9,11 +9,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rune::AppHandle;
 
-use crate::model::{Cache, Saved, Snapshot, Status};
+use crate::model::{Cache, Saved, Snapshot, Status, Vm};
 use crate::{App, Note};
 
 /// An action: `vm` runs once per step, in order, and the first step that fails ends it.
 pub struct Job {
+    pub vm: Vm,
     /// What the header says while it runs, and an error's title: `Starting`.
     pub label: String,
     pub steps: Vec<Vec<String>>,
@@ -89,7 +90,7 @@ impl Worker {
                     });
                     let note = match result {
                         Ok(()) => Note::ok(job.done),
-                        Err(e) => Note::failed(&job.label, e),
+                        Err(e) => Note::failed(&job.label, job.vm, e),
                     };
                     kicker.send(()).ok();
                     handle.update(move |s: &mut App, _| {
