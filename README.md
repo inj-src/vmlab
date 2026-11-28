@@ -16,7 +16,8 @@ holds everything that makes them run except the disks and what is downloaded or 
 |---|---|
 | `skills/vmlab/` | The agent skill for using the VMs. |
 | `docs/` | The lab's reference for working on it. |
-| `home/` | Files that belong in the home folder, at the same paths: the `vm` command and its helpers, `ssh_config`, the two launchers of the app grid. `./install.sh` links them into place. |
+| `home/` | Files that belong in the home folder, at the same paths: the `vm` command and its helpers, `ssh_config`, the three launchers of the app grid. `./install.sh` links them into place. |
+| `app/` | vmlab, the window for the two VMs and their saved states: start, switch, save, delete (Rust, on the Rune UI library). It does everything through `vm`. `app/build.sh` fetches Rune and builds it; the `vmlab` launcher opens `app/target/release/vmlab`. |
 | `gpu/win3d/` | The Windows VM: launcher `win-venus.sh`, the clean state's build (`setup-ready.sh`, `guest-scripts/`), patches for QEMU and the guest drivers, the boot firmware change. |
 | `gpu/reims/` | The macOS VM: launcher `mac26.sh`, patches for the reims window and SDL, the title bar plugin. |
 | `gpu/rig/` | A headless GNOME desktop for testing the VM windows without touching the real one. |
@@ -52,6 +53,7 @@ A new home-folder file goes under `home/` at its path; then `./install.sh`.
 | reims-util | `gpu/reims-util/` | github.com/steelbrain/reims-util at `ed7398997f83f9d004477e6eab8eaf46a462a47a`, unchanged. |
 | The Mac window's title bar plugin | `gpu/reims/libdecor-cairo/libdecor-cairo.so` | `gpu/reims/libdecor-vmlab/build.sh install` (the tarball and the patch are tracked). |
 | The Rust toolchain | `/vmlab/reims/rustup`, `/vmlab/reims/cargo` | rustup, with `RUSTUP_HOME` and `CARGO_HOME` set to those. |
+| Rune, the vmlab app's UI library | `app/rune/` | `app/build.sh` clones github.com/anomalyco/rune at `af6b1fdd9537a3f278f9c85e0f0893f1e773302a`, without its demo media. |
 | Stable lane leftovers | `gpu/metal2vulkan/`, `gpu/win-research/` | Not used by the VMs (`docs/lab.md`, "Freeing disk space"). The lane's checkout `gpu/reims-vgpu/` was removed on 2026-11-12. |
 
 ## The host

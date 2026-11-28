@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- vmlab: a detent dial clicked onto one of three positions, as a VM is switched between its
+       saved states. Obsidian tile of the VM icons' shape, a silver dial, the signal-orange pointer
+       and the lit position it is on. Design: Gemini 4 Neon's "Detent" (2026-11-28). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2c2e34"/><stop offset="1" stop-color="#131417"/></linearGradient>
+    <radialGradient id="sheen" cx=".3" cy=".1" r=".8"><stop offset="0" stop-color="#fff" stop-opacity=".12"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <linearGradient id="dial" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset=".65" stop-color="#dfe2e8"/><stop offset="1" stop-color="#b8bec8"/></linearGradient>
+    <radialGradient id="glow" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ff622e" stop-opacity=".55"/><stop offset="1" stop-color="#ff622e" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#bg)"/>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#sheen)"/>
+  <rect x="12.5" y="12.5" width="231" height="231" rx="55.5" fill="none" stroke="#fff" stroke-opacity=".12"/>
+  <circle cx="67.1" cy="85.1" r="8.5" fill="#6b707a"/>
+  <circle cx="128" cy="58" r="8.5" fill="#6b707a"/>
+  <circle cx="188.9" cy="85.1" r="22" fill="url(#glow)"/>
+  <circle cx="188.9" cy="85.1" r="9.5" fill="#ff5e2b"/>
+  <circle cx="128" cy="145" r="62" fill="#07080a" fill-opacity=".75"/>
+  <circle cx="128" cy="140" r="64" fill="#0c0d10"/>
+  <circle cx="128" cy="140" r="57" fill="url(#dial)"/>
+  <circle cx="128" cy="140" r="47" fill="none" stroke="#000" stroke-opacity=".07" stroke-width="2"/>
+  <path d="M135.4 133.3 161.4 109.9" fill="none" stroke="#ff5a26" stroke-width="15" stroke-linecap="round"/>
+</svg>
