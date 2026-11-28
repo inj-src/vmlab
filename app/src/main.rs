@@ -96,8 +96,9 @@ impl App {
         note.id = self.toasts;
         let id = note.id;
         self.toast = Some(note);
-        // It goes away by itself after a while, unless a newer one took its place.
-        if let Some(handle) = self.handle.clone() {
+        // Good news goes away by itself after a while, unless a newer note took its place; an
+        // error stays until it is closed or the next action starts.
+        if let Some(handle) = self.handle.clone().filter(|_| !self.toast.as_ref().is_some_and(|t| t.error)) {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(6));
                 handle.update_if(move |s: &mut App, _| {
@@ -118,6 +119,7 @@ impl App {
             self.note(Note::error("vmlab is not connected to vm yet".into()));
             return;
         };
+        self.toast = None;
         self.busy = Some(Busy { vm, label: label.into() });
         worker.run(Job { label: label.into(), steps, done });
     }

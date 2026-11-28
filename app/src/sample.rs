@@ -40,10 +40,15 @@ pub const SCENES: &[Scene] = &[
         s.busy = Some(Busy { vm: Vm::Win, label: "Switching to webdev".into() });
     }),
     ("toast", |s| {
-        s.data = Some(snapshot(true, false));
+        s.data = Some(snapshot(true, true));
         s.toast = Some(Note::failed("Switching to webdev", "win has changes on embedded that were not saved: save them, or start with --discard".into()));
     }),
+    ("done", |s| {
+        s.data = Some(snapshot(true, false));
+        s.toast = Some(Note::ok("Saved embedded".into()));
+    }),
     ("loading", |_| {}),
+    ("read-error", |s| s.read_error = Some("vm status --json: exit status 1".into())),
 ];
 
 const NOW: i64 = 1_795_869_600; // 2026-11-28 12:40 UTC

@@ -2,7 +2,7 @@
 //! how to reach it. Every press asks `App` to act; nothing here runs `vm`.
 
 use rune::{Color, Cursor, Cx, El, Icon, ScrollSpec, col, el, icon, row, spacer, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Spinner, Toast, ToastRegion};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Loader, Menu, MenuItem, Toast, ToastRegion};
 use rune_theme_opencode::icons as oc;
 
 use crate::model::{Saved, Snapshot, Status, Vm, for_how_long, gb, parse_utc, when};
@@ -22,40 +22,53 @@ pub fn ok(k: &Kit) -> Color {
     rune::color::hex(hex).unwrap_or(k.c.success.icon)
 }
 
+/// Unsaved changes, a busy VM, a nearly full gauge: one amber for the dot and its words. The
+/// theme's light warning text is too pale to read on a card (2.4:1); this one is 5:1.
+pub fn warn(k: &Kit) -> Color {
+    if k.dark { k.c.warning.fg } else { rune::color::hex("#a16207").unwrap_or(k.c.warning.icon) }
+}
+
+/// Below this width the header's ports button keeps only its icon and the page's margins
+/// shrink, so the state's name stays in the header down to the smallest window (680).
+const COMPACT_W: f32 = 760.0;
+
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
     let hair = 1.0 / cx.env().scale;
     let c = &k.c;
+    let compact = cx.layout_with("window", |r| r[2] < COMPACT_W).unwrap_or(false);
     let mut layer = Vec::new();
     let panel = match &s.data {
-        Some(d) => panel(s, d, k, hair, &mut layer),
+        Some(d) => panel(s, d, k, hair, compact, &mut layer),
         None => waiting(s, k),
     };
     dialogs::build(s, k, &mut layer);
-    if let Some(t) = &s.toast {
-        let glyph = if t.error { &oc::CIRCLE_EXCLAMATION } else { &oc::CIRCLE_CHECK };
-        let tint = if t.error { c.danger.icon } else { ok(k) };
-        let mut toast = Toast::new(format!("toast{}", t.id), t.text.clone()).lead(icon(glyph, 16.0).color(tint));
-        if let Some(d) = &t.detail {
-            toast = toast.description(d.clone());
-        }
-        let toast = toast
+    // Errors stay in the page (`problem`) until closed; the corner only says what went well.
+    if let Some(t) = s.toast.as_ref().filter(|t| !t.error) {
+        let toast = Toast::new(format!("toast{}", t.id), t.text.clone())
+            .lead(icon(&oc::CIRCLE_CHECK, 16.0).color(ok(k)))
             .on_close(|s: &mut App| s.toast = None)
             .build(k);
         layer.push(ToastRegion::new().toast(toast).build(k));
     }
-    let frame = row().key("frame").w_full().max_w(MAX_W).h_full().px(28.0).gap(36.0).child(toc(s, k)).child(panel);
+    let (px, gap) = if compact { (20.0, 28.0) } else { (28.0, 36.0) };
+    let frame = row().key("frame").w_full().max_w(MAX_W).h_full().px(px).gap(gap).child(toc(s, k)).child(panel);
     let base = row().key("window").w_full().h_full().fill(c.bg_base).justify_center().child(frame);
     rune_kit::root(base, layer)
 }
 
 fn waiting(s: &App, k: &Kit) -> El {
     let c = &k.c;
-    let line = match &s.read_error {
-        Some(e) => text(format!("vm did not answer: {e}")).font(k.ty.ui).color(c.danger.fg).wrap().max_w(420.0),
-        None => text("Reading the VMs…").font(k.ty.ui).color(c.text_muted),
-    };
-    col().key("panel").grow(1.0).h_full().center().gap(12.0).child(Spinner::new().build(k).key("spin")).child(line.key("waiting"))
+    let panel = col().key("panel").grow(1.0).h_full().center().gap(12.0);
+    match &s.read_error {
+        // The reader tries again every few seconds by itself.
+        Some(e) => panel
+            .child(icon(&oc::CIRCLE_EXCLAMATION, 20.0).key("failed").color(c.danger.icon))
+            .child(text("vm did not answer").key("waiting").font(k.ty.ui_medium).color(c.text_base))
+            .child(text(e.clone()).key("why").font(k.ty.small).color(c.text_muted).wrap().max_w(420.0).align(rune::Align::Center))
+            .child(text("Trying again every few seconds").key("retry").font(k.ty.small).color(c.text_faint)),
+        None => panel.child(Loader::new().size(18.0).build(k).key("spin")).child(text("Reading the VMs…").key("waiting").font(k.ty.ui).color(c.text_muted)),
+    }
 }
 
 // ---------------------------------------------------------------- sidebar
@@ -71,7 +84,7 @@ fn logo(vm: Vm) -> &'static Icon {
 fn dot(k: &Kit, key: &str, running: bool, busy: bool) -> El {
     let c = &k.c;
     let (glyph, tint) = if busy {
-        (&icons::DOT, c.warning.icon)
+        (&icons::DOT, warn(k))
     } else if running {
         (&icons::DOT, ok(k))
     } else {
@@ -91,12 +104,20 @@ fn toc(s: &App, k: &Kit) -> El {
         .center_y()
         .child(icon(&icons::VMLAB, 20.0).key("mark"))
         .child(text("vmlab").key("name").font(k.ty.body_medium).color(c.text_base));
-    let mut nav = col().key("nav").w_full().role("tablist").label("VMs");
+    let mut nav = col().key("nav").w_full().role("tablist").label("VMs").focus_group();
     for vm in Vm::ALL {
         let on = s.sel == vm;
-        let running = s.data.as_ref().and_then(|d| d.status(vm)).is_some_and(|st| st.running);
+        // No dot until `vm` has answered: a ring would claim it is off.
+        let known = s.data.as_ref().and_then(|d| d.status(vm));
+        let running = known.is_some_and(|st| st.running);
         let busy = s.busy.as_ref().is_some_and(|b| b.vm == vm);
-        let link = row()
+        let said = match known {
+            _ if busy => format!("{}, busy", vm.title()),
+            Some(st) if st.running => format!("{}, running", vm.title()),
+            Some(_) => format!("{}, stopped", vm.title()),
+            None => vm.title().to_owned(),
+        };
+        let mut link = row()
             .key("link")
             .grow(1.0)
             .shrink()
@@ -117,15 +138,19 @@ fn toc(s: &App, k: &Kit) -> El {
                     .truncate()
                     .grow(1.0)
                     .shrink(),
-            )
-            .child(dot(k, "dot", running, busy));
+            );
+        if known.is_some() {
+            link = link.child(dot(k, "dot", running, busy));
+        }
         nav = nav.child(
             row()
                 .key(format!("nav-{}", vm.id()))
                 .role("tab")
-                .label(vm.title())
+                .label(said)
                 .checked(on)
                 .focusable(true)
+                .focus_selected(on)
+                .press_on_return()
                 .w_full()
                 .h(32.0)
                 .cursor(Cursor::Pointer)
@@ -147,6 +172,7 @@ fn toc(s: &App, k: &Kit) -> El {
     if let Some(d) = &s.data
         && d.disk_bytes > 0
     {
+        // The bar is the disk's used part, as every disk gauge; the words say both.
         let used = 1.0 - d.free_bytes as f32 / d.disk_bytes as f32;
         side = side.child(
             col()
@@ -157,19 +183,24 @@ fn toc(s: &App, k: &Kit) -> El {
                     row()
                         .key("free")
                         .gap(4.0)
-                        .child(text(gb(d.free_bytes)).key("n").font(k.ty.small_medium).color(c.text_base))
-                        .child(text("free on /vmlab").key("on").font(k.ty.small).color(c.text_muted)),
+                        .child(text(gb(d.free_bytes)).key("n").font(k.ty.small_medium).color(c.text_base).nowrap())
+                        .child(text(format!("free of {}", gb(d.disk_bytes))).key("on").font(k.ty.small).color(c.text_muted).truncate().shrink()),
                 )
-                .child(meter(k, "disk-meter", used, false)),
+                .child(
+                    meter(k, "disk-meter", used, used > 0.9)
+                        .role("meter")
+                        .label(format!("/vmlab: {} free of {}", gb(d.free_bytes), gb(d.disk_bytes)))
+                        .help("Space on /vmlab, where the VMs and their states live"),
+                ),
         );
     }
     side
 }
 
-fn meter(k: &Kit, key: &str, frac: f32, warn: bool) -> El {
+fn meter(k: &Kit, key: &str, frac: f32, warning: bool) -> El {
     let c = &k.c;
     let frac = frac.clamp(0.0, 1.0);
-    let tint = if warn { c.warning.icon } else { c.icon_muted };
+    let tint = if warning { warn(k) } else { c.icon_muted };
     el().key(key)
         .w_full()
         .h(4.0)
@@ -180,12 +211,15 @@ fn meter(k: &Kit, key: &str, frac: f32, warn: bool) -> El {
 
 // ---------------------------------------------------------------- the chosen VM
 
-fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, layer: &mut Vec<El>) -> El {
+fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, compact: bool, layer: &mut Vec<El>) -> El {
     let vm = s.sel;
     let Some(st) = d.status(vm) else {
         return col().key("panel").grow(1.0).h_full().center().child(text("vm does not list this VM").font(k.ty.ui).color(k.c.text_muted));
     };
     let mut body = col().key(format!("body-{}", vm.id())).w_full().px(1.0).pt(20.0).pb(28.0).gap(12.0);
+    if let Some(t) = s.toast.as_ref().filter(|t| t.error) {
+        body = body.child(problem(k, t));
+    }
     if let Some(other) = d.running()
         && other != vm
     {
@@ -206,7 +240,7 @@ fn panel(s: &App, d: &Snapshot, k: &Kit, hair: f32, layer: &mut Vec<El>) -> El {
         .shrink()
         .min_w(0.0)
         .h_full()
-        .child(header(s, st, k, hair))
+        .child(header(s, st, k, hair, compact))
         .child(col().key("scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
 }
 
@@ -226,10 +260,48 @@ fn info(k: &Kit, line: &str) -> El {
         .child(text(line.to_owned()).key("t").font(k.ty.ui).color(c.text_muted).wrap().grow(1.0).shrink())
 }
 
-fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
+/// An action that failed: what, and `vm`'s own words (in its own type, flags and all), until
+/// it is closed or the next action starts. Above everything else, so it is seen.
+fn problem(k: &Kit, t: &crate::Note) -> El {
+    let c = &k.c;
+    let mut copy = col()
+        .key("copy")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .gap(4.0)
+        .child(text(t.text.clone()).key("t").font(k.ty.ui_medium).color(c.text_base).wrap());
+    if let Some(d) = &t.detail {
+        copy = copy.child(text(d.clone()).key("d").font(k.ty.mono).color(c.text_muted).wrap());
+    }
+    row()
+        .key("problem")
+        .role("alert")
+        .w_full()
+        .pl(12.0)
+        .pr(6.0)
+        .py(6.0)
+        .gap(9.0)
+        .radius(8.0)
+        .fill(c.danger.bg)
+        .border(0.5, c.danger.border)
+        .child(icon(&oc::CIRCLE_EXCLAMATION, 16.0).key("i").color(c.danger.icon).mt(3.0))
+        .child(copy.py(3.0))
+        .child(
+            IconButton::new(&oc::CLOSE)
+                .variant(IconButtonVariant::Ghost)
+                .label("Dismiss")
+                .on_press(|s: &mut App| s.toast = None)
+                .build(k)
+                .key("dismiss"),
+        )
+}
+
+fn header(s: &App, st: &Status, k: &Kit, hair: f32, compact: bool) -> El {
     let c = &k.c;
     let vm = s.sel;
     let idle = s.busy.is_none();
+    // The state gives way last: it keeps a few letters however narrow the window.
     let crumb = row()
         .key("crumb")
         .gap(8.0)
@@ -239,27 +311,25 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
         .child(icon(logo(vm), 16.0).key("logo").color(c.icon_base))
         .child(text(vm.title()).key("vm").font(k.ty.ui_medium).color(c.text_base).nowrap())
         .child(text("/").key("sep").font(k.ty.ui).color(c.text_faint))
-        .child(text(st.state.clone()).key("state").font(k.ty.ui).color(c.text_muted).truncate());
+        .child(text(st.state.clone()).key("state").font(k.ty.ui).color(c.text_muted).truncate().shrink().min_w(48.0).help_when_truncated(st.state.clone()));
     let mut bar = row().key("top").w_full().h(BAR_H).gap(6.0).center_y().child(crumb).child(spacer());
     if let Some(b) = s.busy.as_ref().filter(|b| b.vm == vm) {
         bar = bar
-            .child(Spinner::new().size(14.0).build(k).key("spin"))
+            .child(Loader::new().size(14.0).build(k).key("spin"))
             .child(text(format!("{}…", b.label)).key("busy").font(k.ty.ui).color(c.text_muted).nowrap().ml(4.0));
     } else if st.running {
         // Tunnels and forwards, when there are any: what reaches the VM besides SSH.
         let ports = st.tunnels.len() + st.forwards.len();
         if ports > 0 {
-            bar = bar.child(
-                Button::new(if ports == 1 { "1 port".to_owned() } else { format!("{ports} ports") })
-                    .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Large)
-                    .icon(&icons::ARROWS)
-                    .help("Tunnels and forwards")
-                    .on_press(move |s: &mut App| s.dialog = Dialog::Ports { vm })
-                    .build(k)
-                    .key("ports")
-                    .mr(4.0),
-            );
+            let words = if ports == 1 { "1 port".to_owned() } else { format!("{ports} ports") };
+            let open = move |s: &mut App| s.dialog = Dialog::Ports { vm };
+            // A narrow window keeps the icon and leaves the room to the state's name.
+            let button = if !compact {
+                Button::new(words).variant(ButtonVariant::Ghost).control_size(ControlSize::Large).icon(&icons::ARROWS).help("Tunnels and forwards").disabled(!idle).on_press(open).build(k)
+            } else {
+                IconButton::new(&icons::ARROWS).variant(IconButtonVariant::Ghost).control_size(ControlSize::Large).label(words.clone()).help(format!("{words}: tunnels and forwards")).disabled(!idle).on_press(open).build(k)
+            };
+            bar = bar.child(button.key("ports").mr(4.0));
         }
         bar = bar
             .child(
@@ -286,7 +356,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             )
             .child(
                 Button::new("Show window")
-                    .variant(ButtonVariant::Contrast)
+                    .variant(ButtonVariant::Submit)
                     .control_size(ControlSize::Large)
                     .icon(&icons::OPEN)
                     .disabled(!idle)
@@ -301,7 +371,7 @@ fn header(s: &App, st: &Status, k: &Kit, hair: f32) -> El {
             .child(text("Stopped").key("stopped").font(k.ty.ui).color(c.text_muted).mr(8.0))
             .child(
                 Button::new("Start")
-                    .variant(ButtonVariant::Contrast)
+                    .variant(ButtonVariant::Submit)
                     .control_size(ControlSize::Large)
                     .icon(&icons::PLAY)
                     .disabled(!idle)
@@ -344,7 +414,7 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
                 .key("tag")
                 .gap(5.0)
                 .center_y()
-                .child(el().key("d").size(6.0, 6.0).radius(3.0).fill(ok(k)))
+                .child(icon(&icons::DOT, 6.0).key("d").color(ok(k)))
                 .child(text(line).key("t").font(k.ty.small).color(c.text_muted).nowrap()),
         );
     } else if cur {
@@ -360,7 +430,7 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
     let note = if saved.note.is_empty() {
         text("No note").font(k.ty.ui).color(c.text_faint)
     } else {
-        text(saved.note.clone()).font(k.ty.ui).color(c.text_muted)
+        text(saved.note.clone()).font(k.ty.ui).color(c.text_muted).help_when_truncated(saved.note.clone())
     };
     let mut copy = col().key("copy").grow(1.0).shrink().min_w(0.0).gap(2.0).child(title).child(note.key("note").truncate().w_full());
     if cur && st.changed {
@@ -370,15 +440,25 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
                 .gap(6.0)
                 .center_y()
                 .pt(2.0)
-                .child(el().key("d").size(6.0, 6.0).radius(3.0).fill(c.warning.icon))
-                .child(text("Unsaved changes").key("t").font(k.ty.small_medium).color(c.warning.fg)),
+                .child(icon(&icons::DOT, 6.0).key("d").color(warn(k)))
+                .child(text("Unsaved changes").key("t").font(k.ty.small_medium).color(warn(k))),
         );
     }
+    // What a press does: the state it is on shows the window (or starts the VM on it); another
+    // one switches, which starts a stopped VM too.
+    let does = match (cur, st.running) {
+        (true, true) => format!("{name}, the current state: show {}", vm.title()),
+        (true, false) => format!("{name}, the current state: start {} on it", vm.title()),
+        (false, true) => format!("Switch to {name}"),
+        (false, false) => format!("Start {} on {name}", vm.title()),
+    };
     let mut r = row()
         .key(format!("state-{name}"))
         .role("button")
-        .label(if cur { format!("{name}, current state") } else { format!("Switch to {name}") })
+        .label(does)
+        .description(saved.note.clone())
         .focusable(idle)
+        .press_on_return()
         .w_full()
         .min_h(58.0)
         .px(14.0)
@@ -404,7 +484,7 @@ fn state_row(s: &App, d: &Snapshot, st: &Status, saved: &Saved, k: &Kit, layer: 
     } else {
         let mut meta = col().key("meta").items_end().gap(2.0).child(text(gb(saved.size_bytes)).key("size").font(k.ty.small).color(c.text_muted).nowrap());
         if let Some(at) = saved.saved.as_deref().and_then(parse_utc) {
-            meta = meta.child(text(when(at, d.now, d.utc_offset)).key("at").font(k.ty.small).color(c.text_faint).nowrap());
+            meta = meta.child(text(when(at, d.now, d.utc_offset)).key("at").font(k.ty.small).color(c.text_muted).nowrap());
         }
         r = r.child(meta);
     }
@@ -430,7 +510,8 @@ fn more(s: &App, st: &Status, saved: &Saved, k: &Kit, layer: &mut Vec<El>) -> El
     let mut menu = Menu::new(format!("menu-{name}")).label(format!("{name} actions")).placement(rune_kit::Placement::BottomEnd).min_width(200.0).trigger(trigger).open(open).on_close(|s: &mut App| s.menu = None);
     if !cur {
         let n = name.clone();
-        menu = menu.item(MenuItem::new("Switch to this state").key("m-switch").icon(&icons::SWITCH).on_select(move |s: &mut App| s.pick(vm, &n)));
+        let words = if st.running { "Switch to this state" } else { "Start on this state" };
+        menu = menu.item(MenuItem::new(words).key("m-switch").icon(&icons::SWITCH).on_select(move |s: &mut App| s.pick(vm, &n)));
     }
     if cur && st.changed && name != "default" {
         menu = menu.item(MenuItem::new("Save changes").key("m-save").icon(&oc::DOWNLOAD).on_select(move |s: &mut App| s.save(vm)));
@@ -461,14 +542,24 @@ fn more(s: &App, st: &Status, saved: &Saved, k: &Kit, layer: &mut Vec<El>) -> El
 fn under(s: &App, st: &Status, k: &Kit) -> El {
     let vm = s.sel;
     let pristine = st.state == "default" && !st.changed;
-    let hint = if pristine { format!("Set {} up, then save it as a state", vm.title()) } else { "Click a state to switch to it".into() };
+    let only = s.data.as_ref().is_some_and(|d| d.states(vm).len() < 2);
+    // Nothing to click while an action runs; with one state, nothing to switch to.
+    let hint = if s.busy.is_some() {
+        String::new()
+    } else if pristine && only {
+        format!("Set {} up, then save it as a state", vm.title())
+    } else if st.running {
+        "Click a state to switch to it".into()
+    } else {
+        format!("Click a state to start {} on it", vm.title())
+    };
     row()
         .key("under")
         .w_full()
         .center_y()
         .justify_between()
         .gap(12.0)
-        .child(text(hint).key("hint").font(k.ty.small).color(k.c.text_faint).truncate())
+        .child(text(hint).key("hint").font(k.ty.small).color(k.c.text_faint).truncate().shrink())
         .child(
             Button::new("Save as new state")
                 .variant(ButtonVariant::Neutral)
@@ -493,7 +584,7 @@ fn cache(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
     let mut top = row()
         .key("top")
         .w_full()
-        .h(24.0)
+        .h(28.0)
         .gap(8.0)
         .center_y()
         .child(text("Build cache").key("t").font(k.ty.ui_medium).color(c.text_base).nowrap())
@@ -520,14 +611,14 @@ fn cache(s: &App, d: &Snapshot, st: &Status, k: &Kit) -> El {
     if fill.is_some_and(|(used, _)| used > 0) {
         top = top.child(
             Button::new("Clear")
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Regular)
+                .variant(ButtonVariant::Neutral)
+                .control_size(ControlSize::Large)
                 .disabled(!idle || st.running)
                 .help(if st.running { "Shut it down to clear it" } else { "Empty the build cache, which every state shares" })
                 .on_press(move |s: &mut App| s.dialog = Dialog::ClearCache { vm })
                 .build(k)
                 .key("clear")
-                .mr(-6.0),
+                .ml(4.0),
         );
     }
     col()
@@ -551,10 +642,13 @@ fn segments(k: &Kit, frac: f32, warn: bool) -> El {
     let lit = (frac.clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize;
     // Anything in it at all shows one segment, so a nearly empty cache doesn't read as empty.
     let lit = if frac > 0.0 { lit.max(1) } else { 0 };
-    let on = if warn { c.warning.icon } else { c.icon_base };
-    let mut bar = row().key("segments").w_full().h(10.0).gap(3.0).role("meter").label(format!("{:.0} % full", frac * 100.0));
+    // Lit in the muted ink the disk meter uses (white would be the loudest thing on a dark
+    // page); unlit a step darker than the card in light, where layer_03 all but vanishes.
+    let on = if warn { self::warn(k) } else if k.dark { c.icon_muted } else { c.icon_base };
+    let off = if k.dark { c.layer_03 } else { c.border_base };
+    let mut bar = row().key("segments").w_full().h(10.0).gap(3.0).role("meter").label(format!("Build cache {:.0}% full", frac * 100.0));
     for i in 0..SEGMENTS {
-        bar = bar.child(el().key(format!("s{i}")).grow(1.0).shrink().min_w(0.0).h_full().radius(2.0).fill(if i < lit { on } else { c.layer_03 }));
+        bar = bar.child(el().key(format!("s{i}")).grow(1.0).shrink().min_w(0.0).h_full().radius(2.0).fill(if i < lit { on } else { off }));
     }
     bar
 }
